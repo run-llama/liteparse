@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+pnpm-lock.yaml
+
+# Build output
+dist/
+bin/
+sea-prep.blob
+sea-config.json
+
+# Environment
+.env
+.env.local
+
+# TypeScript
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Test output
+screenshots/
+*.pdf
+
+# Temporary files
+tmp/
+temp/

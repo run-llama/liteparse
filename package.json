@@ -1,0 +1,61 @@
+{
+  "name": "liteparse",
+  "version": "1.0.0",
+  "description": "Open-source PDF parsing with spatial text extraction and OCR processing",
+  "type": "module",
+  "main": "./dist/src/lib.js",
+  "types": "./dist/src/lib.d.ts",
+  "bin": {
+    "lp": "./dist/src/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/src/lib.d.ts",
+      "import": "./dist/src/lib.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src/vendor/pdfjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "preinstall": "npx only-allow pnpm",
+    "build": "tsc && npm run copy-vendor",
+    "copy-vendor": "mkdir -p dist/src/vendor && cp -r src/vendor/pdfjs dist/src/vendor/",
+    "build:binary": "npm run build && npm run build:bun",
+    "build:bun": "bun build ./dist/src/index.js --compile --target=bun --outfile=bin/lp",
+    "build:bun:all": "npm run build:bun:linux && npm run build:bun:macos && npm run build:bun:windows",
+    "build:bun:linux": "bun build ./dist/src/index.js --compile --target=bun-linux-x64 --outfile=bin/lp-linux-x64",
+    "build:bun:macos": "bun build ./dist/src/index.js --compile --target=bun-darwin-arm64 --outfile=bin/lp-macos-arm64",
+    "build:bun:windows": "bun build ./dist/src/index.js --compile --target=bun-windows-x64 --outfile=bin/lp-windows-x64.exe",
+    "dev": "tsc --watch",
+    "parse": "node dist/src/index.js parse",
+    "screenshot": "node dist/src/index.js screenshot",
+    "test-parse": "node dist/src/index.js parse test.pdf"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "canvas": "^2.11.2",
+    "sharp": "^0.33.0",
+    "form-data": "^4.0.0",
+    "zod": "^3.22.0",
+    "commander": "^11.0.0",
+    "unified": "^11.0.0",
+    "puppeteer": "^24.31.0",
+    "tesseract.js": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "~5.9.2",
+    "bun-types": "^1.1.0"
+  },
+  "volta": {
+    "node": "22.4.1"
+  },
+  "author": "",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@10.28.0"
+}
