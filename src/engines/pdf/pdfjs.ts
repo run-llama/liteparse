@@ -10,6 +10,7 @@ import {
   Annotation,
 } from './interface.js';
 import { TextItem } from '../../core/types.js';
+import { PdfiumRenderer } from './pdfium-renderer.js';
 
 // Dynamic import of PDF.js
 const __filename = fileURLToPath(import.meta.url);
@@ -19,7 +20,8 @@ const PDFJS_DIR = join(__dirname, '../../vendor/pdfjs');
 
 // Import PDF.js dynamically
 await import(`${PDFJS_DIR}/pdf.mjs`);
-const { getDocument } = await import(`${PDFJS_DIR}/pdf.mjs`);
+const pdfjs = await import(`${PDFJS_DIR}/pdf.mjs`);
+const { getDocument } = pdfjs;
 
 const CMAP_URL = `${PDFJS_DIR}/cmaps/`;
 const STANDARD_FONT_DATA_URL = `${PDFJS_DIR}/standard_fonts/`;
@@ -83,9 +85,14 @@ function singularValueDecompose2dScale(m: number[]): { x: number; y: number } {
 
 export class PdfJsEngine implements PdfEngine {
   name = 'pdfjs';
+  private pdfiumRenderer: PdfiumRenderer = new PdfiumRenderer();
+  private currentPdfPath: string | null = null;
 
   async loadDocument(filePath: string): Promise<PdfDocument> {
     const data = new Uint8Array(await fs.readFile(filePath));
+
+    // Store path for PDFium rendering
+    this.currentPdfPath = filePath;
 
     const loadingTask = getDocument({
       data,
@@ -249,33 +256,20 @@ export class PdfJsEngine implements PdfEngine {
   }
 
   async renderPageImage(
-    doc: PdfDocument,
+    _doc: PdfDocument,
     pageNum: number,
     dpi: number
   ): Promise<Buffer> {
-    const pdfDocument = (doc as any)._pdfDocument;
-    const page = await pdfDocument.getPage(pageNum);
+    // Use PDFium for rendering (more robust with inline images)
+    if (!this.currentPdfPath) {
+      throw new Error('PDF path not available for rendering');
+    }
 
-    // Calculate scale from DPI (72 DPI is the default)
-    const scale = dpi / 72;
-    const viewport = page.getViewport({ scale });
-
-    // Create canvas (using Node.js canvas library)
-    const { createCanvas } = await import('canvas');
-    const canvas = createCanvas(viewport.width, viewport.height);
-    const context = canvas.getContext('2d');
-
-    // Render PDF page to canvas
-    const renderContext = {
-      canvasContext: context,
-      viewport,
-    };
-
-    await page.render(renderContext).promise;
-    await page.cleanup();
-
-    // Convert canvas to buffer
-    return canvas.toBuffer('image/png');
+    return await this.pdfiumRenderer.renderPageToBuffer(
+      this.currentPdfPath,
+      pageNum,
+      dpi
+    );
   }
 
   async close(doc: PdfDocument): Promise<void> {
@@ -283,6 +277,10 @@ export class PdfJsEngine implements PdfEngine {
     if (pdfDocument && pdfDocument.destroy) {
       await pdfDocument.destroy();
     }
+
+    // Clean up PDFium renderer
+    await this.pdfiumRenderer.close();
+    this.currentPdfPath = null;
   }
 
   private parseTargetPages(targetPages: string, maxPages: number): number[] {

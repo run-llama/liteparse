@@ -6,7 +6,7 @@
   "main": "./dist/src/lib.js",
   "types": "./dist/src/lib.d.ts",
   "bin": {
-    "lp": "./dist/src/index.js"
+    "liteparse": "./dist/src/index.js"
   },
   "exports": {
     ".": {

@@ -5,7 +5,7 @@ import {
   OcrData,
   LiteParseConfig,
 } from '../core/types.js';
-import { PageData } from '../engines/pdf/interface.js';
+import { PageData, Image } from '../engines/pdf/interface.js';
 import { parseEasyOCRBlocks, OcrBlock } from './ocrUtils.js';
 
 const OCR_CONFIDENCE_THRESHOLD = 0.1;
@@ -17,6 +17,95 @@ const OCR_CONFIDENCE_THRESHOLD = 0.1;
  * - OR the OCR block covers more than this ratio of any single text item
  */
 const OCR_OVERLAP_THRESHOLD = 0.5;
+
+/**
+ * Maximum number of embedded images to process for OCR per page.
+ * Keeps the largest images when limit is exceeded.
+ */
+const MAX_IMAGES_PER_PAGE = 10;
+
+/**
+ * Minimum image dimensions for OCR processing
+ */
+const MIN_IMAGE_DIMENSION = 12;
+const MIN_IMAGE_AREA = 200;
+
+/**
+ * Minimum rendered image dimensions for OCR processing
+ */
+const MIN_RENDERED_DIMENSION = 6;
+const MIN_RENDERED_AREA = 200;
+
+/**
+ * Filters images that should not be OCR'd based on various criteria.
+ * Returns the filtered array of images that should be processed.
+ *
+ * Ported from llamaparse's filterImagesForOCR function.
+ */
+export function filterImagesForOCR(
+  images: Image[],
+  page: { width: number; height: number }
+): Image[] {
+  // Filter images that start with g_ or pattern_ (generated/pattern images)
+  let filtered = images.filter(
+    (image) =>
+      !image.type?.startsWith('g_') && !image.type?.startsWith('pattern_')
+  );
+
+  // Limit to max images per page, keeping the largest ones
+  if (filtered.length > MAX_IMAGES_PER_PAGE) {
+    filtered.sort((a, b) => b.width * b.height - a.width * a.height);
+    filtered = filtered.slice(0, MAX_IMAGES_PER_PAGE);
+  }
+
+  // Apply additional filtering criteria
+  filtered = filtered.filter((image) => {
+    // Ignore layout extracted images
+    if (image.type?.includes('layout_')) {
+      return false;
+    }
+
+    // Get image coords (use image dimensions if coords not set)
+    const coords = image.coords || {
+      x: image.x,
+      y: image.y,
+      w: image.width,
+      h: image.height,
+    };
+
+    // Skip images that are out of viewport
+    if (
+      coords.x + coords.w < 0 || // left of page
+      coords.y + coords.h < 0 || // above page
+      coords.x > page.width || // right of page
+      coords.y > page.height // below page
+    ) {
+      return false;
+    }
+
+    // Skip small images (raw dimensions)
+    if (
+      image.width < MIN_IMAGE_DIMENSION ||
+      image.height < MIN_IMAGE_DIMENSION ||
+      image.width * image.height < MIN_IMAGE_AREA
+    ) {
+      return false;
+    }
+
+    // Skip images that render too small in the viewport
+    if (
+      coords.w < MIN_RENDERED_DIMENSION ||
+      coords.h < MIN_RENDERED_DIMENSION ||
+      coords.w * coords.h < MIN_RENDERED_AREA
+    ) {
+      return false;
+    }
+
+    return true;
+  });
+
+  return filtered;
+}
 
 /**
  * Checks if two bounding boxes overlap and returns the overlap area.
@@ -142,6 +231,12 @@ export function buildBbox(
 
   // Process OCR data if images are present
   if (pageData.images.length && config.ocrEnabled) {
+    // Filter images that should be processed for OCR
+    const imagesToProcess = filterImagesForOCR(pageData.images, {
+      width: pageData.width,
+      height: pageData.height,
+    });
+
     // Collect text item bounding boxes for overlap checking
     const textItemBoxes = pageData.textItems.map((item) => ({
       x: item.x,
@@ -150,11 +245,7 @@ export function buildBbox(
       h: item.h || item.height,
     }));
 
-    for (const image of pageData.images) {
-      // Skip layout images
-      if (image.type?.includes('layout_')) {
-        continue;
-      }
+    for (const image of imagesToProcess) {
 
       // Parse OCR blocks from image
       let ocrData = parseEasyOCRBlocks(image);
