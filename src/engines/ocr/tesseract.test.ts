@@ -1,0 +1,99 @@
+import { vi, describe, it, expect } from "vitest";
+
+const mockTesseractResult = {
+  data: {
+    text: "Hello World",
+    words: [
+      {
+        text: "Hello",
+        confidence: 95,
+        bbox: { x0: 0, y0: 0, x1: 50, y1: 20 },
+      },
+      {
+        text: "World",
+        confidence: 92,
+        bbox: { x0: 60, y0: 0, x1: 120, y1: 20 },
+      },
+    ],
+    lines: [
+      {
+        text: "Hello World",
+        confidence: 93,
+        bbox: { x0: 0, y0: 0, x1: 120, y1: 20 },
+        words: [], // ref to words above if needed
+      },
+    ],
+    confidence: 93,
+  },
+};
+
+const {
+  data: { words: mockWords },
+} = mockTesseractResult;
+
+const mockResults = mockWords.map((word) => ({
+  text: word.text,
+  bbox: [word.bbox.x0, word.bbox.y0, word.bbox.x1, word.bbox.y1] as [
+    number,
+    number,
+    number,
+    number,
+  ],
+  confidence: word.confidence / 100, // Tesseract returns 0-100, we want 0-1
+}));
+
+const mockTesseractWorker = {
+  terminate: vi.fn(async () => {}),
+  recognize: vi.fn(async () => {
+    return mockTesseractResult;
+  }),
+};
+
+vi.mock("tesseract.js", async () => {
+  const actual = await vi.importActual<typeof import("tesseract.js")>("tesseract.js");
+  return {
+    ...actual,
+    createWorker: vi.fn(async (language: string, _num: number) => {
+      if (language == "it" || language == "ita") {
+        return;
+      }
+      return mockTesseractWorker;
+    }),
+  };
+});
+
+import { TesseractEngine } from "./tesseract";
+
+describe("test Tesseract OCR (single image)", () => {
+  it("test engine success", async () => {
+    const engine = new TesseractEngine();
+    expect(engine.name).toBe("tesseract");
+    const result = await engine.recognize("cat.png", { language: "en" });
+    expect(result).toStrictEqual(mockResults);
+  });
+
+  it("test engine failure (failed to initialize)", async () => {
+    const engine = new TesseractEngine();
+    expect(engine.name).toBe("tesseract");
+    expect(engine.recognize("cat.png", { language: "it" })).rejects.toThrow(
+      "Tesseract worker not initialized"
+    );
+  });
+});
+
+describe("test OCR simple HTTP server (batch)", () => {
+  it("test engine success", async () => {
+    const engine = new TesseractEngine();
+    expect(engine.name).toBe("tesseract");
+    const result = await engine.recognizeBatch(["cat.png", "dog.png"], { language: "en" });
+    expect(result).toStrictEqual([mockResults, mockResults]);
+  });
+
+  it("test engine failure (failed to initialize)", async () => {
+    const engine = new TesseractEngine();
+    expect(engine.name).toBe("tesseract");
+    expect(engine.recognizeBatch(["cat.png", "dog.png"], { language: "it" })).rejects.toThrow(
+      "Tesseract worker not initialized"
+    );
+  });
+});
