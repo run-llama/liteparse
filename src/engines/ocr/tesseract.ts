@@ -51,21 +51,31 @@ export class TesseractEngine implements OcrEngine {
 
     try {
       // Recognize text from image using scheduler
+      // In tesseract.js v6+, we need to enable blocks output to get word-level data
       const {
-        data: { words },
-      } = await this.scheduler.addJob("recognize", imagePath);
+        data: { blocks },
+      } = await this.scheduler.addJob("recognize", imagePath, {}, { blocks: true });
 
-      // Convert to our OcrResult format
-      const results: OcrResult[] = words.map((word) => ({
-        text: word.text,
-        bbox: [word.bbox.x0, word.bbox.y0, word.bbox.x1, word.bbox.y1] as [
-          number,
-          number,
-          number,
-          number,
-        ],
-        confidence: word.confidence / 100, // Tesseract returns 0-100, we want 0-1
-      }));
+      // Extract words from hierarchical blocks structure: blocks → paragraphs → lines → words
+      const results: OcrResult[] = [];
+      for (const block of blocks || []) {
+        for (const paragraph of block.paragraphs || []) {
+          for (const line of paragraph.lines || []) {
+            for (const word of line.words || []) {
+              results.push({
+                text: word.text,
+                bbox: [word.bbox.x0, word.bbox.y0, word.bbox.x1, word.bbox.y1] as [
+                  number,
+                  number,
+                  number,
+                  number,
+                ],
+                confidence: word.confidence / 100, // Tesseract returns 0-100, we want 0-1
+              });
+            }
+          }
+        }
+      }
 
       // Filter out low confidence results (below 30%)
       return results.filter((r) => r.confidence > 0.3);

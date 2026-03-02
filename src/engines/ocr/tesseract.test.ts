@@ -1,35 +1,38 @@
 import { vi, describe, it, expect } from "vitest";
 
+// In tesseract.js v6+, words are nested in blocks → paragraphs → lines → words
+const mockWords = [
+  {
+    text: "Hello",
+    confidence: 95,
+    bbox: { x0: 0, y0: 0, x1: 50, y1: 20 },
+  },
+  {
+    text: "World",
+    confidence: 92,
+    bbox: { x0: 60, y0: 0, x1: 120, y1: 20 },
+  },
+];
+
 const mockTesseractResult = {
   data: {
     text: "Hello World",
-    words: [
+    blocks: [
       {
-        text: "Hello",
-        confidence: 95,
-        bbox: { x0: 0, y0: 0, x1: 50, y1: 20 },
-      },
-      {
-        text: "World",
-        confidence: 92,
-        bbox: { x0: 60, y0: 0, x1: 120, y1: 20 },
-      },
-    ],
-    lines: [
-      {
-        text: "Hello World",
-        confidence: 93,
-        bbox: { x0: 0, y0: 0, x1: 120, y1: 20 },
-        words: [], // ref to words above if needed
+        paragraphs: [
+          {
+            lines: [
+              {
+                words: mockWords,
+              },
+            ],
+          },
+        ],
       },
     ],
     confidence: 93,
   },
 };
-
-const {
-  data: { words: mockWords },
-} = mockTesseractResult;
 
 const mockResults = mockWords.map((word) => ({
   text: word.text,
