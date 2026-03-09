@@ -198,7 +198,7 @@ function extractAnchorsPointsFromLines(lines: ProjectionTextBox[][], page: PageD
   group(anchorRight);
   group(anchorCenter);
 
-  deltaMin(anchorRight, 0.1);
+  deltaMin(anchorRight, 0.17);
   deltaMin(anchorLeft, 0.2);
   deltaMin(anchorCenter, 0.05);
 
@@ -332,7 +332,11 @@ function extractAnchorsPointsFromLines(lines: ProjectionTextBox[][], page: PageD
         }
 
         // Candidate found - update the anchor's bbox list
-        collection[parseFloat(candidateAnchor)].push(bbox);
+        // But first check if the bbox is already in this anchor (could happen after merging)
+        const targetAnchor = collection[parseFloat(candidateAnchor)];
+        if (!targetAnchor.includes(bbox)) {
+          targetAnchor.push(bbox);
+        }
       }
     }
   }
@@ -451,8 +455,11 @@ function extractAnchorsPointsFromLines(lines: ProjectionTextBox[][], page: PageD
         if (item.leftAnchor) {
           const key = parseFloat(item.leftAnchor);
           if (anchorLeft[key]) {
-            anchorLeft[key].splice(anchorLeft[key].indexOf(item), 1);
-            hasChanged = true;
+            const idx = anchorLeft[key].indexOf(item);
+            if (idx >= 0) {
+              anchorLeft[key].splice(idx, 1);
+              hasChanged = true;
+            }
           }
         }
         if (item.centerAnchor) {
