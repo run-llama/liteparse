@@ -24,7 +24,9 @@
   ],
   "scripts": {
     "build": "tsc && npm run copy-vendor",
+    "build:windows": "tsc && npm run copy-vendor:windows",
     "copy-vendor": "mkdir -p dist/src/vendor && cp -r src/vendor/pdfjs dist/src/vendor/",
+    "copy-vendor:windows": "powershell -Command \"New-Item -ItemType Directory -Path dist/src/vendor -Force; Copy-Item -Recurse src/vendor/pdfjs dist/src/vendor/\"",
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",

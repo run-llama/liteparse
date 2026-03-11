@@ -146,12 +146,30 @@ async function executeCommand(command: string, args: string[], timeoutMs = 60000
   });
 }
 
+/* Execute a command for PowerShell */
+async function executePowerShell(command: string, timeoutMs = 60000) {
+  return executeCommand(
+    "powershell",
+    ["-NoProfile", "-Command", command],
+    timeoutMs
+  );
+}
+
 /**
  * Check if a command is available
  */
 async function isCommandAvailable(command: string): Promise<boolean> {
   try {
     await executeCommand("which", [command], 5000);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function isCommandAvailableWindows(command: string): Promise<boolean> {
+  try {
+    await executePowerShell(`Get-Command ${command}`, 5000);
     return true;
   } catch {
     return false;
@@ -175,12 +193,12 @@ async function isPathExecutable(filePath: string): Promise<boolean> {
  */
 export async function findLibreOfficeCommand(): Promise<string | null> {
   // Check for 'libreoffice' in PATH (Linux, some macOS setups)
-  if (await isCommandAvailable("libreoffice")) {
+  if (await isCommandAvailable("libreoffice") || await isCommandAvailableWindows("libreoffice")) {
     return "libreoffice";
   }
 
   // Check for 'soffice' in PATH
-  if (await isCommandAvailable("soffice")) {
+  if (await isCommandAvailable("soffice") || await isCommandAvailableWindows("soffice")) {
     return "soffice";
   }
 
@@ -190,7 +208,17 @@ export async function findLibreOfficeCommand(): Promise<string | null> {
     "/Applications/LibreOffice.app/Contents/MacOS/libreoffice",
   ];
 
+  const windowsPaths = [
+    "C:\\Program Files\\Libreoffice\\program\\soffice.exe"
+  ]
+
   for (const libPath of macOSPaths) {
+    if (await isPathExecutable(libPath)) {
+      return libPath;
+    }
+  }
+
+  for (const libPath of windowsPaths) {
     if (await isPathExecutable(libPath)) {
       return libPath;
     }
@@ -207,12 +235,12 @@ export async function findImageMagickCommand(): Promise<{
   args: string[];
 } | null> {
   // ImageMagick v7 uses 'magick' command
-  if (await isCommandAvailable("magick")) {
+  if (await isCommandAvailable("magick") || await isCommandAvailableWindows("magick")) {
     return { command: "magick", args: [] };
   }
 
   // ImageMagick v6 uses 'convert' command
-  if (await isCommandAvailable("convert")) {
+  if (await isCommandAvailable("convert") || await isCommandAvailableWindows("convert")) {
     return { command: "convert", args: [] };
   }
 

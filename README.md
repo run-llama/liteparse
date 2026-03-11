@@ -238,7 +238,12 @@ brew install --cask libreoffice
 
 # Ubuntu/Debian
 apt-get install libreoffice
+
+# Windows
+choco install libreoffice-fresh # might require admin permissions
 ```
+
+> _For Windows, you might need to add the path to the directory containing LibreOffice CLI executable (generally `C:\Program Files\LibreOffice\program`) to the environment variables and re-start the machine._
 
 #### Images (via ImageMagick)
 - **Formats**: `.jpg`, `.jpeg`, `.png`, `.gif`, `.bmp`, `.tiff`, `.webp`, `.svg`
@@ -251,6 +256,9 @@ brew install imagemagick
 
 # Ubuntu/Debian
 apt-get install imagemagick
+
+# Windows
+choco install imagemagick.app # might require admin permissions
 ```
 
 ## Configuration
@@ -300,8 +308,11 @@ We provide a fairly rich `AGENTS.md`/`CLAUDE.md` that we recommend using to help
 # Install dependencies
 npm install
 
-# Build TypeScript
+# Build TypeScript (Linux/macOs)
 npm run build
+
+# Build Typescript (Windows)
+npm run build:windows
 
 # Watch mode
 npm run dev
