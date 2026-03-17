@@ -5,7 +5,7 @@ sidebar:
   order: 1
 ---
 
-LiteParse is an open-source PDF parsing tool that extracts text with spatial layout information and bounding boxes. It runs entirely on your machine, which means no cloud dependencies, no LLMs, no API keys.
+LiteParse is an open-source PDF parsing tool that parses text with spatial layout information and bounding boxes. It runs entirely on your machine, which means no cloud dependencies, no LLMs, no API keys.
 
 ## Installation
 
