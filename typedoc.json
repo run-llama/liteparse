@@ -1,0 +1,16 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": ["./src/lib.ts"],
+  "plugin": ["typedoc-plugin-markdown"],
+  "out": "./docs/src/content/docs/liteparse/.api-tmp",
+  "outputFileStrategy": "modules",
+  "flattenOutputFiles": true,
+  "hidePageHeader": true,
+  "hidePageTitle": true,
+  "hideGroupHeadings": false,
+  "excludeInternal": true,
+  "excludePrivate": true,
+  "excludeProtected": true,
+  "readme": "none",
+  "disableSources": false
+}
