@@ -17,6 +17,7 @@ from liteparse_eval.providers import (
     ParserProvider,
     LLMProvider,
     AnthropicProvider,
+    MiniMaxProvider,
     LiteparseProvider,
     MarkItDownProvider,
     PyMuPDFProvider,
@@ -430,7 +431,7 @@ def main():
     parser.add_argument(
         "--llm-provider",
         type=str,
-        choices=["anthropic"],
+        choices=["anthropic", "minimax"],
         default="anthropic",
         help="LLM provider to use. (default: anthropic)"
     )
@@ -452,11 +453,12 @@ def main():
     # Initialize LLM provider
     if args.llm_provider == "anthropic":
         llm_provider = AnthropicProvider()
+        llm_judge_provider = AnthropicProvider(model="claude-haiku-4-5-20251001")
+    elif args.llm_provider == "minimax":
+        llm_provider = MiniMaxProvider()
+        llm_judge_provider = MiniMaxProvider(model="MiniMax-M2.5-highspeed")
     else:
         raise ValueError("Please specify a valid LLM provider using --llm-provider")
-
-    # Use separate LLM judge provider
-    llm_judge_provider = AnthropicProvider(model="claude-haiku-4-5-20251001")
 
     benchmark = Benchmark(
         parser_provider=parser_provider,

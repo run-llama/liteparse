@@ -11,7 +11,9 @@ Requires Python 3.12+.
 pip install -e .
 ```
 
-You'll need an `ANTHROPIC_API_KEY` environment variable set for the LLM-based evaluation and dataset processing tools.
+You'll need an LLM API key for the evaluation tools:
+- **Anthropic** (default): Set `ANTHROPIC_API_KEY` environment variable
+- **MiniMax**: Set `MINIMAX_API_KEY` environment variable
 
 ## Dataset
 
@@ -57,7 +59,7 @@ Options:
 - `--ground-truth-dir` — Directory containing ground truth JSON files (required)
 - `--output` — Path to save results (JSON + HTML report)
 - `--parse-provider` — Parser to evaluate: `liteparse`, `pymupdf`, `pypdf`, `markitdown` (default: `liteparse`)
-- `--llm-provider` — LLM for answering questions: `anthropic` (default: `anthropic`)
+- `--llm-provider` — LLM for answering questions: `anthropic`, `minimax` (default: `anthropic`)
 
 Outputs:
 - `<output>.json` — Aggregate results with pass rates

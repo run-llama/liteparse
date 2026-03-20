@@ -1,4 +1,4 @@
-from .llm import LLMProvider, AnthropicProvider, QA_PROMPT
+from .llm import LLMProvider, AnthropicProvider, MiniMaxProvider, QA_PROMPT
 from .parsers import (
     ParserProvider,
     LiteparseProvider,
@@ -10,6 +10,7 @@ from .parsers import (
 __all__ = [
     "LLMProvider",
     "AnthropicProvider",
+    "MiniMaxProvider",
     "QA_PROMPT",
     "ParserProvider",
     "LiteparseProvider",

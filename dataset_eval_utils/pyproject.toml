@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.76.0",
+    "openai>=1.0.0",
     "pillow>=10.0.0",
     "pymupdf>=1.26.7",
     "pypdf>=6.6.2",
