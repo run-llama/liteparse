@@ -8,9 +8,7 @@
 |
 [Docs](https://developers.llamaindex.ai/liteparse/)
 
-<p align='center'>
-  <img src="https://github.com/user-attachments/assets/34d28dd3-c809-4edc-82c0-695f25f6e1f3" alt="out" width="600">
-</p>
+<img src="https://github.com/user-attachments/assets/34d28dd3-c809-4edc-82c0-695f25f6e1f3" alt="out" width="600">
 
 LiteParse is a standalone OSS PDF parsing tool focused exclusively on **fast and light** parsing. It provides high-quality spatial text parsing with bounding boxes, without proprietary LLM features or cloud dependencies. Everything runs locally on your machine. 
 
