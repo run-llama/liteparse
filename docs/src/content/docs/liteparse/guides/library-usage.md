@@ -59,6 +59,7 @@ const parser = new LiteParse({
   dpi: 300,
   outputFormat: "json",
   targetPages: "1-10",
+  password: "secret",        // for encrypted/protected documents
 });
 ```
 
@@ -157,6 +158,7 @@ parser = LiteParse(
     ocr_server_url="http://localhost:8828/ocr",
     ocr_language="fra",
     dpi=300,
+    password="secret",  # for encrypted/protected documents
 )
 
 # Per-call options

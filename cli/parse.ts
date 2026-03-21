@@ -26,6 +26,7 @@ interface ParseCommandOptions {
   dpi?: string;
   preciseBbox?: boolean;
   preserveSmallText?: boolean;
+  password?: string;
   config?: string;
   quiet?: boolean;
 }
@@ -35,6 +36,7 @@ interface ScreenshotCommandOptions {
   targetPages?: string;
   dpi?: string;
   format?: string;
+  password?: string;
   config?: string;
   quiet?: boolean;
 }
@@ -50,6 +52,7 @@ interface BatchParseCommandOptions {
   preciseBbox?: boolean;
   recursive?: boolean;
   extension?: string;
+  password?: string;
   config?: string;
   quiet?: boolean;
 }
@@ -78,6 +81,7 @@ program
   .option("--dpi <dpi>", "DPI for rendering", DEFAULT_DPI.toString())
   .option("--no-precise-bbox", "Disable precise bounding boxes")
   .option("--preserve-small-text", "Preserve very small text")
+  .option("--password <password>", "Password for encrypted/protected documents")
   .option("--config <file>", "Config file (JSON)")
   .option("-q, --quiet", "Suppress progress output")
   .action(async (file: string, options: ParseCommandOptions) => {
@@ -120,6 +124,7 @@ program
         dpi: parseInt(options.dpi || DEFAULT_DPI.toString()),
         preciseBoundingBox: options.preciseBbox !== false,
         preserveVerySmallText: options.preserveSmallText || false,
+        password: options.password,
       };
 
       // Create parser
@@ -168,6 +173,7 @@ program
   .option("--target-pages <pages>", 'Page numbers to screenshot (e.g., "1,3,5" or "1-5")')
   .option("--dpi <dpi>", "DPI for rendering", DEFAULT_DPI.toString())
   .option("--format <format>", "Image format: png|jpg", DEFAULT_SCREENSHOT_FORMAT)
+  .option("--password <password>", "Password for encrypted/protected documents")
   .option("--config <file>", "Config file (JSON)")
   .option("-q, --quiet", "Suppress progress output")
   .action(async (file: string, options: ScreenshotCommandOptions) => {
@@ -196,6 +202,7 @@ program
       config = {
         ...config,
         dpi: parseInt(options.dpi || DEFAULT_DPI.toString()),
+        password: options.password,
       };
 
       // Parse target pages
@@ -299,6 +306,7 @@ program
   .option("--no-precise-bbox", "Disable precise bounding boxes")
   .option("--recursive", "Recursively search input directory")
   .option("--extension <ext>", 'Only process files with this extension (e.g., ".pdf")')
+  .option("--password <password>", "Password for encrypted/protected documents (applied to all files)")
   .option("--config <file>", "Config file (JSON)")
   .option("-q, --quiet", "Suppress progress output")
   .action(async (inputDir: string, outputDir: string, options: BatchParseCommandOptions) => {
@@ -362,6 +370,7 @@ program
         maxPages: parseInt(options.maxPages || DEFAULT_MAX_PAGES.toString()),
         dpi: parseInt(options.dpi || DEFAULT_DPI.toString()),
         preciseBoundingBox: options.preciseBbox !== false,
+        password: options.password,
       };
 
       // Create a SINGLE parser instance for all files (key for batch efficiency)

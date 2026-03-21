@@ -18,7 +18,8 @@ export class PdfiumRenderer {
   async renderPageToBuffer(
     pdfInput: string | Buffer | Uint8Array,
     pageNumber: number,
-    dpi: number = 150
+    dpi: number = 150,
+    password?: string
   ): Promise<Buffer> {
     await this.init();
 
@@ -31,7 +32,7 @@ export class PdfiumRenderer {
       typeof pdfInput === "string" ? await fs.readFile(pdfInput) : Buffer.from(pdfInput);
 
     // Load document
-    const document = await this.pdfium.loadDocument(pdfBuffer);
+    const document = await this.pdfium.loadDocument(pdfBuffer, password);
 
     try {
       // Get page (0-indexed in pdfium)

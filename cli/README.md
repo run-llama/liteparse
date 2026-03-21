@@ -35,7 +35,8 @@ Both commands accept `--config <file>` to load settings from JSON:
   "maxPages": 100,
   "dpi": 200,
   "outputFormat": "json",
-  "preciseBoundingBox": true
+  "preciseBoundingBox": true,
+  "password": "optional_password"
 }
 ```
 

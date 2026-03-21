@@ -108,7 +108,7 @@ export class LiteParse {
 
     if (typeof input === "string") {
       log(`Processing file: ${input}`);
-      const conversionResult = await convertToPdf(input);
+      const conversionResult = await convertToPdf(input, this.config.password);
 
       if ("code" in conversionResult) {
         throw new Error(`Conversion failed: ${conversionResult.message}`);
@@ -126,7 +126,7 @@ export class LiteParse {
         log(`Converted ${conversionResult.originalExtension} to PDF`);
       }
 
-      doc = await this.pdfEngine.loadDocument(pdfPath);
+      doc = await this.pdfEngine.loadDocument(pdfPath, this.config.password);
     } else {
       log(`Processing buffer input (${input.byteLength} bytes)`);
       const ext = await guessExtensionFromBuffer(input);
@@ -134,10 +134,10 @@ export class LiteParse {
       if (ext === ".pdf") {
         // Zero-disk path: pass bytes directly to the PDF engine
         const data = input instanceof Uint8Array ? input : new Uint8Array(input);
-        doc = await this.pdfEngine.loadDocument(data);
+        doc = await this.pdfEngine.loadDocument(data, this.config.password);
       } else {
         // Non-PDF buffer: write to temp file for conversion
-        const conversionResult = await convertBufferToPdf(input);
+        const conversionResult = await convertBufferToPdf(input, this.config.password);
 
         if ("code" in conversionResult) {
           throw new Error(`Conversion failed: ${conversionResult.message}`);
@@ -151,7 +151,7 @@ export class LiteParse {
         needsCleanup = true;
         cleanupPath = conversionResult.pdfPath;
         log(`Converted ${conversionResult.originalExtension} buffer to PDF`);
-        doc = await this.pdfEngine.loadDocument(conversionResult.pdfPath);
+        doc = await this.pdfEngine.loadDocument(conversionResult.pdfPath, this.config.password);
       }
     }
 
@@ -236,7 +236,7 @@ export class LiteParse {
     log(`Generating screenshots for: ${typeof input === "string" ? input : "<buffer>"}`);
 
     // Load PDF document to get page count and dimensions
-    const doc = await this.pdfEngine.loadDocument(input as string | Uint8Array);
+    const doc = await this.pdfEngine.loadDocument(input as string | Uint8Array, this.config.password);
     const totalPages = doc.numPages;
 
     // Determine the input to pass to the renderer (file path or buffer)
@@ -325,7 +325,7 @@ export class LiteParse {
 
     try {
       // Render page as image buffer
-      const imageBuffer = await this.pdfEngine.renderPageImage(doc, page.pageNum, this.config.dpi);
+      const imageBuffer = await this.pdfEngine.renderPageImage(doc, page.pageNum, this.config.dpi, this.config.password);
 
       // Run OCR directly on the buffer (no temp file needed)
       log(`  OCR on page ${page.pageNum}...`);

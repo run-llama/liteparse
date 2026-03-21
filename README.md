@@ -191,6 +191,7 @@ Options:
   --dpi <dpi>             DPI for rendering (default: "150")
   --no-precise-bbox       Disable precise bounding boxes
   --preserve-small-text   Preserve very small text
+  --password <password>   Password for encrypted/protected documents
   --config <file>         Config file (JSON)
   -q, --quiet             Suppress progress output
   -h, --help              display help for command
@@ -215,6 +216,7 @@ Options:
   --no-precise-bbox       Disable precise bounding boxes
   --recursive             Recursively search input directory
   --extension <ext>       Only process files with this extension (e.g., ".pdf")
+  --password <password>   Password for encrypted/protected documents (applied to all files)
   --config <file>         Config file (JSON)
   -q, --quiet             Suppress progress output
   -h, --help              display help for command
@@ -233,6 +235,7 @@ Options:
   --target-pages <pages>  Page numbers to screenshot (e.g., "1,3,5" or "1-5")
   --dpi <dpi>             DPI for rendering (default: "150")
   --format <format>       Image format: png|jpg (default: "png")
+  --password <password>   Password for encrypted/protected documents
   --config <file>         Config file (JSON)
   -q, --quiet             Suppress progress output
   -h, --help              display help for command
@@ -349,7 +352,8 @@ Create a `liteparse.config.json` file:
   "dpi": 150,
   "outputFormat": "json",
   "preciseBoundingBox": true,
-  "preserveVerySmallText": false
+  "preserveVerySmallText": false,
+  "password": "optional_password"
 }
 ```
 

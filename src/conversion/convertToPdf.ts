@@ -235,7 +235,7 @@ export async function findImageMagickCommand(): Promise<{
 /**
  * Convert office documents using LibreOffice
  */
-export async function convertOfficeDocument(filePath: string, outputDir: string): Promise<string> {
+export async function convertOfficeDocument(filePath: string, outputDir: string, password?: string): Promise<string> {
   const libreOfficeCmd = await findLibreOfficeCommand();
   if (!libreOfficeCmd) {
     throw new Error(
@@ -243,9 +243,15 @@ export async function convertOfficeDocument(filePath: string, outputDir: string)
     );
   }
 
+  const args = ["--headless", "--invisible", "--convert-to", "pdf", "--outdir", outputDir];
+  if (password) {
+    args.push(`--infilter=:${password}`);
+  }
+  args.push(filePath);
+
   await executeCommand(
     libreOfficeCmd,
-    ["--headless", "--invisible", "--convert-to", "pdf", "--outdir", outputDir, filePath],
+    args,
     120000 // 2 minutes timeout
   );
 
@@ -331,7 +337,8 @@ export async function convertImageToPdf(filePath: string, outputDir: string): Pr
  * Main conversion function
  */
 export async function convertToPdf(
-  filePath: string
+  filePath: string,
+  password?: string
 ): Promise<ConversionResult | ConversionPassthrough | ConversionError> {
   try {
     // Check if file exists
@@ -362,9 +369,9 @@ export async function convertToPdf(
     let pdfPath: string;
 
     if (officeExtensions.includes(extension)) {
-      pdfPath = await convertOfficeDocument(filePath, tmpDir);
+      pdfPath = await convertOfficeDocument(filePath, tmpDir, password);
     } else if (spreadsheetExtensions.includes(extension)) {
-      pdfPath = await convertOfficeDocument(filePath, tmpDir);
+      pdfPath = await convertOfficeDocument(filePath, tmpDir, password);
     } else if (imageExtensions.includes(extension)) {
       pdfPath = await convertImageToPdf(filePath, tmpDir);
     } else {
@@ -419,7 +426,8 @@ export async function guessExtensionFromBuffer(data: Buffer | Uint8Array): Promi
  * For PDF buffers, callers should skip this and pass data directly to the PDF engine.
  */
 export async function convertBufferToPdf(
-  data: Buffer | Uint8Array
+  data: Buffer | Uint8Array,
+  password?: string
 ): Promise<ConversionResult | ConversionPassthrough | ConversionError> {
   const ext = await guessExtensionFromBuffer(data);
 
@@ -428,5 +436,5 @@ export async function convertBufferToPdf(
   const tmpPath = path.join(tmpDir, `input${ext}`);
   await fs.writeFile(tmpPath, data);
 
-  return convertToPdf(tmpPath);
+  return convertToPdf(tmpPath, password);
 }

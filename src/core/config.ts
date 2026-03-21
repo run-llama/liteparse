@@ -20,6 +20,7 @@ export const DEFAULT_CONFIG: LiteParseConfig = {
   preciseBoundingBox: true,
   preserveVerySmallText: false,
   preserveLayoutAlignmentAcrossPages: false,
+  password: undefined,
 };
 
 export function mergeConfig(userConfig: Partial<LiteParseConfig>): LiteParseConfig {

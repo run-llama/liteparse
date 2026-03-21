@@ -125,6 +125,14 @@ export interface LiteParseConfig {
    * @defaultValue `false`
    */
   preserveLayoutAlignmentAcrossPages: boolean;
+
+  /**
+   * Password for opening encrypted/protected documents.
+   * Used for password-protected PDFs and office documents.
+   *
+   * @defaultValue `undefined`
+   */
+  password?: string;
 }
 
 /**

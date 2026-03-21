@@ -36,6 +36,7 @@ lit parse [options] <file>
 | `--dpi <dpi>` | Rendering DPI | `150` |
 | `--no-precise-bbox` | Disable precise bounding boxes | — |
 | `--preserve-small-text` | Keep very small text | — |
+| `--password <password>` | Password for encrypted/protected documents | — |
 | `--config <file>` | JSON config file path | — |
 | `-q, --quiet` | Suppress progress output | — |
 
@@ -92,6 +93,7 @@ lit batch-parse [options] <input-dir> <output-dir>
 | `--no-precise-bbox` | Disable precise bounding boxes | — |
 | `--recursive` | Search subdirectories | — |
 | `--extension <ext>` | Only process this extension (e.g., `".pdf"`) | — (all supported) |
+| `--password <password>` | Password for encrypted/protected documents (applied to all files) | — |
 | `--config <file>` | JSON config file path | — |
 | `-q, --quiet` | Suppress progress output | — |
 
@@ -135,6 +137,7 @@ lit screenshot [options] <file>
 | `--target-pages <pages>` | Pages to screenshot (e.g., `"1,3,5"` or `"1-5"`) | — (all pages) |
 | `--dpi <dpi>` | Rendering DPI | `150` |
 | `--format <format>` | Image format: `png` or `jpg` | `png` |
+| `--password <password>` | Password for encrypted/protected documents | — |
 | `--config <file>` | JSON config file path | — |
 | `-q, --quiet` | Suppress progress output | — |
 

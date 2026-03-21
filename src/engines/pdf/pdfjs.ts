@@ -433,7 +433,7 @@ export class PdfJsEngine implements PdfEngine {
   private currentPdfPath: string | null = null;
   private currentPdfData: Uint8Array | null = null;
 
-  async loadDocument(input: string | Uint8Array): Promise<PdfDocument> {
+  async loadDocument(input: string | Uint8Array, password?: string): Promise<PdfDocument> {
     let data: Uint8Array;
     if (typeof input === "string") {
       data = new Uint8Array(await fs.readFile(input));
@@ -449,12 +449,27 @@ export class PdfJsEngine implements PdfEngine {
 
     const loadingTask = getDocument({
       data,
+      password,
       cMapUrl: CMAP_URL,
       cMapPacked: CMAP_PACKED,
       standardFontDataUrl: STANDARD_FONT_DATA_URL,
     });
 
-    const pdfDocument = await loadingTask.promise;
+    let pdfDocument: PdfJsDocument;
+    try {
+      pdfDocument = await loadingTask.promise;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("password") || message.includes("Password")) {
+        if (password) {
+          throw new Error("Incorrect password for this PDF. Please check the password and try again.");
+        } else {
+          throw new Error("This PDF is password-protected. Use --password <password> to provide the document password.");
+        }
+      }
+      throw error;
+    }
+
     const metadata = await pdfDocument.getMetadata();
 
     return {
@@ -624,7 +639,7 @@ export class PdfJsEngine implements PdfEngine {
     return pages;
   }
 
-  async renderPageImage(_doc: PdfDocument, pageNum: number, dpi: number): Promise<Buffer> {
+  async renderPageImage(_doc: PdfDocument, pageNum: number, dpi: number, password?: string): Promise<Buffer> {
     if (!this.pdfiumRenderer) {
       this.pdfiumRenderer = new PdfiumRenderer();
     }
@@ -635,7 +650,7 @@ export class PdfJsEngine implements PdfEngine {
       throw new Error("No PDF path or data available for rendering");
     }
 
-    return await this.pdfiumRenderer.renderPageToBuffer(pdfInput, pageNum, dpi);
+    return await this.pdfiumRenderer.renderPageToBuffer(pdfInput, pageNum, dpi, password);
   }
 
   async close(doc: PdfDocument): Promise<void> {
