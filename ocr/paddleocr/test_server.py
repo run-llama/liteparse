@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from paddleocr import PaddleOCR
 from PIL import Image
 
+import server as paddle_server_module
 from server import PaddleOCRServer
 
 
@@ -71,3 +72,35 @@ def test_server_ocr_endpoint(server: PaddleOCRServer) -> None:
     )
     assert response.status_code == 200
     assert response.json().get("results", []) == mock_ocr.transformed_results
+
+
+def test_server_normalizes_documented_language_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = Image.new("RGB", (1, 1), color=(255, 255, 255))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    buffer.seek(0)
+
+    captured_langs: list[str] = []
+
+    class CapturingPaddleOcr(MockPaddleOcr):
+        def __init__(self, *args, **kwargs) -> None:
+            captured_langs.append(kwargs.get("lang", ""))
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(paddle_server_module, "PaddleOCR", CapturingPaddleOcr)
+
+    server = PaddleOCRServer()
+    app = server._create_ocr_server()
+    client = TestClient(app)
+
+    response = client.post(
+        "/ocr",
+        files={"file": ("test.png", buffer, "image/png")},
+        data={"language": "zh"},
+    )
+
+    assert response.status_code == 200
+    assert captured_langs == ["en", "ch"]
+    assert server.current_language == "ch"

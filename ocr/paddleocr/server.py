@@ -30,6 +30,20 @@ class PaddleOCRServer:
         )
         self.current_language: str = "en"
 
+    @staticmethod
+    def normalize_language(language: str) -> str:
+        normalized = language.lower()
+        aliases = {
+            "zh": "ch",
+            "zh-cn": "ch",
+            "zh-hans": "ch",
+            "zh-tw": "chinese_cht",
+            "zh-hant": "chinese_cht",
+            "ja": "japan",
+            "ko": "korean",
+        }
+        return aliases.get(normalized, normalized)
+
     def _create_ocr_server(
         self,
     ) -> FastAPI:
@@ -40,7 +54,7 @@ class PaddleOCRServer:
             file: UploadFile = File(...), language: str = Form(default="en")
         ) -> OcrResponse:
             # Get language from request
-            language = language.lower()
+            language = self.normalize_language(language)
 
             try:
                 # Initialize OCR if needed or language changed
@@ -52,7 +66,7 @@ class PaddleOCRServer:
                         use_doc_unwarping=False,
                         use_textline_orientation=True,
                     )
-                    # self.current_language = paddle_lang
+                    self.current_language = language
 
                 # Load image
 
