@@ -142,6 +142,7 @@ func DefaultParseOptions() ParseOptions {
 		MaxPages:           1000,
 		DPI:                150,
 		PreciseBoundingBox: Bool(true),
+		Timeout:            60 * time.Second,
 	}
 }
 

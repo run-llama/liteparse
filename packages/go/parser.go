@@ -67,7 +67,7 @@ func (p *LiteParse) Parse(filePath string, opts *ParseOptions) (*ParseResult, er
 	}
 
 	args := append(cmd, "parse", absPath(filePath))
-	//args = append(args, buildParseCLIArgs(options)...)
+	args = append(args, buildParseCLIArgs(options)...)
 
 	stdout, stderr, exitCode, err := runCommand(args, options.Timeout)
 	if err != nil {
@@ -477,20 +477,27 @@ func runCommand(args []string, timeout time.Duration) (stdout string, stderr str
 	var stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
+
 	runErr := cmd.Run()
 	stdout = stdoutBuf.String()
 	stderr = stderrBuf.String()
 
-	var exitErr *exec.ExitError
 	if runErr == nil {
 		return stdout, stderr, 0, nil
 	}
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+
+	// Check for timeout error
+	if errors.Is(runErr, context.DeadlineExceeded) {
 		return stdout, stderr, 0, fmt.Errorf("operation timed out after %s", timeout)
 	}
+
+	// Check for exit error (non-zero exit code)
+	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) {
 		return stdout, stderr, exitErr.ExitCode(), nil
 	}
+
+	// Other errors (e.g., command not found)
 	return stdout, stderr, 0, runErr
 }
 

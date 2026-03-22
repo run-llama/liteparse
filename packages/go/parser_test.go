@@ -381,3 +381,142 @@ func writeTempFileAt(t *testing.T, dir, name, content string) string {
 	}
 	return path
 }
+
+func TestParseRealPDF(t *testing.T) {
+	// 测试解析真实的 PDF 文件
+	pdfPath := "/Users/xxdld/Documents/DataDictionary_20260122153143.pdf"
+
+	// 检查文件是否存在
+	if _, err := os.Stat(pdfPath); os.IsNotExist(err) {
+		t.Skipf("PDF file not found: %s", pdfPath)
+	}
+
+	// 创建解析器实例（使用系统中的 liteparse CLI）
+	parser := New("")
+
+	// 配置解析选项
+	opts := DefaultParseOptions()
+	opts.OCREnabled = Bool(false)           // 禁用 OCR
+	opts.OutputFormat = OutputFormatJSON    // 输出 JSON 格式
+	opts.PreserveVerySmallText = Bool(true) // 保留小文本
+	opts.Timeout = 30 * time.Second         // 设置 30 秒超时
+
+	// 执行解析
+	result, err := parser.Parse(pdfPath, &opts)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	// 验证结果
+	if result == nil {
+		t.Fatal("Expected non-nil result")
+	}
+
+	t.Logf("Successfully parsed PDF:")
+	t.Logf("  - Number of pages: %d", result.NumPages())
+	t.Logf("  - Output format: %s", result.OutputFormat)
+	t.Logf("  - Text length: %d characters", len(result.Text))
+
+	// 打印前 500 个字符的文本内容
+	if len(result.Text) > 0 {
+		preview := result.Text
+		if len(preview) > 500 {
+			preview = preview[:500] + "..."
+		}
+		t.Logf("  - Text preview:\n%s", preview)
+	}
+
+	// 验证基本结构
+	if result.NumPages() == 0 {
+		t.Error("Expected at least one page")
+	}
+
+	if result.OutputFormat != OutputFormatJSON {
+		t.Errorf("Expected JSON format, got %s", result.OutputFormat)
+	}
+
+	// 打印每一页的信息
+	for i := 1; i <= result.NumPages(); i++ {
+		page := result.GetPage(i)
+		if page != nil {
+			t.Logf("  - Page %d: %d text items, text length: %d",
+				i, len(page.TextItems), len(page.Text))
+		}
+	}
+}
+
+func TestParseRealPDFWithOCR(t *testing.T) {
+	// 测试使用 OCR 解析 PDF
+	pdfPath := "/Users/xxdld/Documents/DataDictionary_20260122153143.pdf"
+
+	if _, err := os.Stat(pdfPath); os.IsNotExist(err) {
+		t.Skipf("PDF file not found: %s", pdfPath)
+	}
+
+	parser := New("")
+
+	opts := DefaultParseOptions()
+	opts.OCREnabled = Bool(true)         // 启用 OCR
+	opts.OutputFormat = OutputFormatJSON
+	opts.Timeout = 60 * time.Second      // OCR 需要更长时间
+
+	result, err := parser.Parse(pdfPath, &opts)
+	if err != nil {
+		t.Fatalf("Parse with OCR failed: %v", err)
+	}
+
+	if result == nil {
+		t.Fatal("Expected non-nil result")
+	}
+
+	t.Logf("Successfully parsed PDF with OCR:")
+	t.Logf("  - Number of pages: %d", result.NumPages())
+	t.Logf("  - Text length: %d characters", len(result.Text))
+}
+
+func TestParseRealPDFTextFormat(t *testing.T) {
+	// 测试以纯文本格式解析 PDF
+	pdfPath := "/Users/xxdld/Documents/DataDictionary_20260122153143.pdf"
+
+	if _, err := os.Stat(pdfPath); os.IsNotExist(err) {
+		t.Skipf("PDF file not found: %s", pdfPath)
+	}
+
+	parser := New("")
+
+	opts := DefaultParseOptions()
+	opts.OutputFormat = OutputFormatText  // 纯文本输出
+	opts.OCREnabled = Bool(false)
+	opts.Timeout = 30 * time.Second
+
+	result, err := parser.Parse(pdfPath, &opts)
+	if err != nil {
+		t.Fatalf("Parse as text failed: %v", err)
+	}
+
+	if result == nil {
+		t.Fatal("Expected non-nil result")
+	}
+
+	t.Logf("Successfully parsed PDF as text:")
+	t.Logf("  - Output format: %s", result.OutputFormat)
+	t.Logf("  - Text length: %d characters", len(result.Text))
+
+	if result.OutputFormat != OutputFormatText {
+		t.Errorf("Expected text format, got %s", result.OutputFormat)
+	}
+
+	// 纯文本格式不应该有结构化的页面数据
+	if result.NumPages() != 0 {
+		t.Logf("Warning: Text format should not have structured pages, got %d", result.NumPages())
+	}
+
+	// 打印文本内容
+	if len(result.Text) > 0 {
+		preview := result.Text
+		if len(preview) > 1000 {
+			preview = preview[:1000] + "..."
+		}
+		t.Logf("  - Full text:\n%s", preview)
+	}
+}
