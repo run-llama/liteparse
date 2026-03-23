@@ -341,9 +341,10 @@ const {
   };
 });
 
-const { mockRemotePdfBytes, mockRemoteDocBytes } = vi.hoisted(() => ({
+const { mockRemotePdfBytes, mockRemoteDocBytes, mockRemoteCsvBytes } = vi.hoisted(() => ({
   mockRemotePdfBytes: new Uint8Array([0x25, 0x50, 0x44, 0x46]),
   mockRemoteDocBytes: new Uint8Array([0x50, 0x4b, 0x03, 0x04]),
+  mockRemoteCsvBytes: new TextEncoder().encode("name,value\nx,1\n"),
 }));
 
 import { LiteParse } from "./parser";
@@ -356,10 +357,25 @@ vi.mock("axios", async () => {
       ...actual,
       get: vi.fn(async (url: string) => {
         if (url === "https://example.com/document.pdf") {
-          return { data: mockRemotePdfBytes.buffer };
+          return {
+            data: mockRemotePdfBytes.buffer,
+            headers: { "content-type": "application/pdf" },
+          };
         }
         if (url === "https://example.com/document.docx") {
-          return { data: mockRemoteDocBytes.buffer };
+          return {
+            data: mockRemoteDocBytes.buffer,
+            headers: {
+              "content-type":
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            },
+          };
+        }
+        if (url === "https://example.com/report") {
+          return {
+            data: mockRemoteCsvBytes.buffer,
+            headers: { "content-type": "text/csv" },
+          };
         }
         throw new Error("network failure");
       }),
@@ -376,7 +392,11 @@ vi.mock("../conversion/convertToPdf.js", async () => {
     convertToPdf: vi.fn(async () => {
       return mockPdfConvertedResult;
     }),
-    convertBufferToPdf: vi.fn(async () => {
+    convertBufferToPdf: vi.fn(async (data: Uint8Array | Buffer) => {
+      const firstArg = data;
+      if (firstArg && firstArg[0] === 0x6e) {
+        return { content: "name,value\nx,1\n" };
+      }
       return mockPdfConvertedResult;
     }),
     cleanupConversionFiles: vi.fn(async () => {}),
@@ -635,6 +655,14 @@ describe("Parse tests", () => {
     const result = await liteparse.parse("https://example.com/document.docx");
     expect(result.text).toBe(mockParsedPages.map((p) => p.text).join("\n\n"));
     expect(result.pages).toStrictEqual(mockParsedPagesWithBoundingBoxes);
+  });
+
+  it("test parse remote text url uses metadata fallback instead of defaulting to pdf", async () => {
+    const config: Partial<LiteParseConfig> = { ocrEnabled: false, outputFormat: "text" };
+    const liteparse = new LiteParse(config);
+    const result = await liteparse.parse("https://example.com/report");
+    expect(result.pages).toStrictEqual([]);
+    expect(result.text).toBe("name,value\nx,1\n");
   });
 
   it("test parse remote url failure surfaces error", async () => {

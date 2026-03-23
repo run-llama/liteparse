@@ -1,5 +1,6 @@
 import pLimit from "p-limit";
 import axios from "axios";
+import path from "path";
 import {
   LiteParseConfig,
   LiteParseInput,
@@ -88,12 +89,43 @@ export class LiteParse {
     return input.startsWith("http://") || input.startsWith("https://");
   }
 
-  private async fetchRemoteDocument(input: string): Promise<Uint8Array> {
+  private async fetchRemoteDocument(
+    input: string
+  ): Promise<{ data: Uint8Array; contentType?: string }> {
     const response = await axios.get<ArrayBuffer>(input, {
       responseType: "arraybuffer",
       timeout: 60000,
     });
-    return new Uint8Array(response.data);
+    const rawContentType = response.headers["content-type"];
+    const contentType = Array.isArray(rawContentType) ? rawContentType[0] : rawContentType;
+    return {
+      data: new Uint8Array(response.data),
+      contentType,
+    };
+  }
+
+  private inferRemoteExtension(input: string, contentType?: string): string | undefined {
+    try {
+      const url = new URL(input);
+      const ext = path.extname(url.pathname).toLowerCase();
+      if (ext) {
+        return ext;
+      }
+    } catch {
+      // Ignore URL parsing errors here; fetch will surface the real failure.
+    }
+
+    const normalizedContentType = contentType?.split(";")[0].trim().toLowerCase();
+    const byContentType: Record<string, string> = {
+      "application/pdf": ".pdf",
+      "text/plain": ".txt",
+      "text/csv": ".csv",
+      "text/tab-separated-values": ".tsv",
+      "text/html": ".html",
+      "application/xhtml+xml": ".xhtml",
+    };
+
+    return normalizedContentType ? byContentType[normalizedContentType] : undefined;
   }
 
   /**
@@ -141,10 +173,21 @@ export class LiteParse {
 
       doc = await this.pdfEngine.loadDocument(pdfPath, this.config.password);
     } else {
-      const bufferInput = typeof input === "string" ? await this.fetchRemoteDocument(input) : input;
+      const remoteDocument =
+        typeof input === "string" ? await this.fetchRemoteDocument(input) : undefined;
+      const bufferInput: Buffer | Uint8Array =
+        remoteDocument?.data ?? (input as Buffer | Uint8Array);
 
       log(`Processing buffer input (${bufferInput.byteLength} bytes)`);
-      const ext = await guessExtensionFromBuffer(bufferInput);
+      let ext = await guessExtensionFromBuffer(bufferInput);
+      const inferredExt =
+        typeof input === "string"
+          ? this.inferRemoteExtension(input, remoteDocument?.contentType)
+          : undefined;
+
+      if (ext === ".pdf" && inferredExt && inferredExt !== ".pdf") {
+        ext = inferredExt;
+      }
 
       if (ext === ".pdf") {
         // Zero-disk path: pass bytes directly to the PDF engine
@@ -152,7 +195,11 @@ export class LiteParse {
         doc = await this.pdfEngine.loadDocument(data, this.config.password);
       } else {
         // Non-PDF buffer: write to temp file for conversion
-        const conversionResult = await convertBufferToPdf(bufferInput, this.config.password);
+        const conversionResult = await convertBufferToPdf(
+          bufferInput,
+          this.config.password,
+          inferredExt
+        );
 
         if ("code" in conversionResult) {
           throw new Error(`Conversion failed: ${conversionResult.message}`);
@@ -248,10 +295,11 @@ export class LiteParse {
       if (!quiet) console.error(msg); // Progress goes to stderr
     };
 
-    const resolvedInput =
+    const remoteDocument =
       typeof input === "string" && this.isRemoteDocumentUrl(input)
         ? await this.fetchRemoteDocument(input)
-        : input;
+        : undefined;
+    const resolvedInput: string | Buffer | Uint8Array = remoteDocument?.data ?? input;
 
     log(`Generating screenshots for: ${typeof input === "string" ? input : "<buffer>"}`);
 
@@ -263,8 +311,7 @@ export class LiteParse {
     const totalPages = doc.numPages;
 
     // Determine the input to pass to the renderer (file path or buffer)
-    const rendererInput: string | Buffer | Uint8Array =
-      typeof resolvedInput === "string" ? resolvedInput : resolvedInput;
+    const rendererInput: string | Buffer | Uint8Array = resolvedInput;
 
     const results: ScreenshotResult[] = [];
     const pages = pageNumbers || Array.from({ length: totalPages }, (_, i) => i + 1);

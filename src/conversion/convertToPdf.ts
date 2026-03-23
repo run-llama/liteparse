@@ -431,9 +431,10 @@ export async function guessExtensionFromBuffer(data: Buffer | Uint8Array): Promi
  */
 export async function convertBufferToPdf(
   data: Buffer | Uint8Array,
-  password?: string
+  password?: string,
+  extensionOverride?: string
 ): Promise<ConversionResult | ConversionPassthrough | ConversionError> {
-  const ext = await guessExtensionFromBuffer(data);
+  const ext = extensionOverride ?? (await guessExtensionFromBuffer(data));
 
   // Write buffer to temp file with detected extension
   const tmpDir = await fs.mkdtemp(path.join(getTmpDir(), "liteparse-"));
