@@ -9,7 +9,7 @@ export type OutputFormat = "json" | "text";
 /**
  * Accepted input types for {@link LiteParse.parse} and {@link LiteParse.screenshot}.
  *
- * - `string` — A file path to a document on disk.
+ * - `string` — A file path to a document on disk, or a direct `http(s)` URL for a remote document.
  * - `Buffer | Uint8Array` — Raw file bytes (PDF bytes go straight to the parser with zero disk I/O;
  *   non-PDF bytes are written to a temp file for format conversion).
  */

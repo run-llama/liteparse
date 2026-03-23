@@ -57,6 +57,10 @@ interface BatchParseCommandOptions {
   quiet?: boolean;
 }
 
+function isRemoteDocumentUrl(input: string): boolean {
+  return input.startsWith("http://") || input.startsWith("https://");
+}
+
 const program = new Command();
 
 program
@@ -89,7 +93,7 @@ program
       const quiet = options.quiet || false;
 
       // Check if file exists
-      if (!existsSync(file)) {
+      if (!isRemoteDocumentUrl(file) && !existsSync(file)) {
         console.error(`Error: File not found: ${file}`);
         process.exit(1);
       }
@@ -181,7 +185,7 @@ program
       const quiet = options.quiet || false;
 
       // Check if file exists
-      if (!existsSync(file)) {
+      if (!isRemoteDocumentUrl(file) && !existsSync(file)) {
         console.error(`Error: File not found: ${file}`);
         process.exit(1);
       }

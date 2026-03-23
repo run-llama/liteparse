@@ -34,6 +34,14 @@ for (const page of result.pages) {
 }
 ```
 
+You can also pass a direct remote document URL:
+
+```typescript
+const parser = new LiteParse();
+const result = await parser.parse("https://example.com/document.pdf");
+console.log(result.text);
+```
+
 ### JSON output with bounding boxes
 
 ```typescript

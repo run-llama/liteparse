@@ -19,7 +19,7 @@ lit parse [options] <file>
 
 | Argument | Description |
 |----------|-------------|
-| `file` | Path to the document file |
+| `file` | Path to the document file, or a direct `http(s)` URL to a remote document |
 
 ### Options
 
@@ -45,6 +45,9 @@ lit parse [options] <file>
 ```bash
 # Basic text parsing
 lit parse report.pdf
+
+# Parse a remote PDF
+lit parse https://example.com/report.pdf
 
 # JSON output with bounding boxes
 lit parse report.pdf --format json -o report.json

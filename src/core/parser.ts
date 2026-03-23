@@ -1,4 +1,5 @@
 import pLimit from "p-limit";
+import axios from "axios";
 import {
   LiteParseConfig,
   LiteParseInput,
@@ -83,6 +84,18 @@ export class LiteParse {
     }
   }
 
+  private isRemoteDocumentUrl(input: string): boolean {
+    return input.startsWith("http://") || input.startsWith("https://");
+  }
+
+  private async fetchRemoteDocument(input: string): Promise<Uint8Array> {
+    const response = await axios.get<ArrayBuffer>(input, {
+      responseType: "arraybuffer",
+      timeout: 60000,
+    });
+    return new Uint8Array(response.data);
+  }
+
   /**
    * Parse a document and return the extracted text, page data, and optionally structured JSON.
    *
@@ -106,7 +119,7 @@ export class LiteParse {
     let needsCleanup = false;
     let cleanupPath: string | undefined;
 
-    if (typeof input === "string") {
+    if (typeof input === "string" && !this.isRemoteDocumentUrl(input)) {
       log(`Processing file: ${input}`);
       const conversionResult = await convertToPdf(input, this.config.password);
 
@@ -128,16 +141,18 @@ export class LiteParse {
 
       doc = await this.pdfEngine.loadDocument(pdfPath, this.config.password);
     } else {
-      log(`Processing buffer input (${input.byteLength} bytes)`);
-      const ext = await guessExtensionFromBuffer(input);
+      const bufferInput = typeof input === "string" ? await this.fetchRemoteDocument(input) : input;
+
+      log(`Processing buffer input (${bufferInput.byteLength} bytes)`);
+      const ext = await guessExtensionFromBuffer(bufferInput);
 
       if (ext === ".pdf") {
         // Zero-disk path: pass bytes directly to the PDF engine
-        const data = input instanceof Uint8Array ? input : new Uint8Array(input);
+        const data = bufferInput instanceof Uint8Array ? bufferInput : new Uint8Array(bufferInput);
         doc = await this.pdfEngine.loadDocument(data, this.config.password);
       } else {
         // Non-PDF buffer: write to temp file for conversion
-        const conversionResult = await convertBufferToPdf(input, this.config.password);
+        const conversionResult = await convertBufferToPdf(bufferInput, this.config.password);
 
         if ("code" in conversionResult) {
           throw new Error(`Conversion failed: ${conversionResult.message}`);
@@ -233,17 +248,23 @@ export class LiteParse {
       if (!quiet) console.error(msg); // Progress goes to stderr
     };
 
+    const resolvedInput =
+      typeof input === "string" && this.isRemoteDocumentUrl(input)
+        ? await this.fetchRemoteDocument(input)
+        : input;
+
     log(`Generating screenshots for: ${typeof input === "string" ? input : "<buffer>"}`);
 
     // Load PDF document to get page count and dimensions
     const doc = await this.pdfEngine.loadDocument(
-      input as string | Uint8Array,
+      resolvedInput as string | Uint8Array,
       this.config.password
     );
     const totalPages = doc.numPages;
 
     // Determine the input to pass to the renderer (file path or buffer)
-    const rendererInput: string | Buffer | Uint8Array = typeof input === "string" ? input : input;
+    const rendererInput: string | Buffer | Uint8Array =
+      typeof resolvedInput === "string" ? resolvedInput : resolvedInput;
 
     const results: ScreenshotResult[] = [];
     const pages = pageNumbers || Array.from({ length: totalPages }, (_, i) => i + 1);

@@ -341,8 +341,31 @@ const {
   };
 });
 
+const { mockRemotePdfBytes, mockRemoteDocBytes } = vi.hoisted(() => ({
+  mockRemotePdfBytes: new Uint8Array([0x25, 0x50, 0x44, 0x46]),
+  mockRemoteDocBytes: new Uint8Array([0x50, 0x4b, 0x03, 0x04]),
+}));
+
 import { LiteParse } from "./parser";
 import { LiteParseConfig, ScreenshotResult } from "./types";
+
+vi.mock("axios", async () => {
+  const actual = await vi.importActual<typeof import("axios")>("axios");
+  return {
+    default: {
+      ...actual,
+      get: vi.fn(async (url: string) => {
+        if (url === "https://example.com/document.pdf") {
+          return { data: mockRemotePdfBytes.buffer };
+        }
+        if (url === "https://example.com/document.docx") {
+          return { data: mockRemoteDocBytes.buffer };
+        }
+        throw new Error("network failure");
+      }),
+    },
+  };
+});
 
 vi.mock("../conversion/convertToPdf.js", async () => {
   const actual = await vi.importActual<typeof import("../conversion/convertToPdf.js")>(
@@ -351,6 +374,9 @@ vi.mock("../conversion/convertToPdf.js", async () => {
   return {
     ...actual,
     convertToPdf: vi.fn(async () => {
+      return mockPdfConvertedResult;
+    }),
+    convertBufferToPdf: vi.fn(async () => {
       return mockPdfConvertedResult;
     }),
     cleanupConversionFiles: vi.fn(async () => {}),
@@ -431,7 +457,9 @@ vi.mock("../processing/grid.js", async () => {
       .mockImplementationOnce(() => structuredClone(mockParsedPagesOcr)) // ocr (tesseract) - json
       .mockImplementationOnce(() => structuredClone(mockParsedPagesOcr)) // ocr (http) - text
       .mockImplementationOnce(() => structuredClone(mockParsedPagesOcr)) // ocr (http) - json
-      .mockImplementationOnce(() => structuredClone(mockParsedPages)), //no bounding boxes
+      .mockImplementationOnce(() => structuredClone(mockParsedPages)) //no bounding boxes
+      .mockImplementationOnce(() => structuredClone(mockParsedPages)) // remote pdf
+      .mockImplementationOnce(() => structuredClone(mockParsedPages)), // remote non-pdf
   };
 });
 
@@ -592,6 +620,30 @@ describe("Parse tests", () => {
       }).length
     ).toBe(0);
   });
+
+  it("test parse remote pdf url", async () => {
+    const config: Partial<LiteParseConfig> = { ocrEnabled: false, outputFormat: "text" };
+    const liteparse = new LiteParse(config);
+    const result = await liteparse.parse("https://example.com/document.pdf");
+    expect(result.text).toBe(mockParsedPages.map((p) => p.text).join("\n\n"));
+    expect(result.pages).toStrictEqual(mockParsedPagesWithBoundingBoxes);
+  });
+
+  it("test parse remote non-pdf url through buffer conversion", async () => {
+    const config: Partial<LiteParseConfig> = { ocrEnabled: false, outputFormat: "text" };
+    const liteparse = new LiteParse(config);
+    const result = await liteparse.parse("https://example.com/document.docx");
+    expect(result.text).toBe(mockParsedPages.map((p) => p.text).join("\n\n"));
+    expect(result.pages).toStrictEqual(mockParsedPagesWithBoundingBoxes);
+  });
+
+  it("test parse remote url failure surfaces error", async () => {
+    const config: Partial<LiteParseConfig> = { ocrEnabled: false, outputFormat: "text" };
+    const liteparse = new LiteParse(config);
+    await expect(liteparse.parse("https://example.com/missing.pdf")).rejects.toThrow(
+      "network failure"
+    );
+  });
 });
 
 describe("test screenshot", () => {
@@ -612,5 +664,12 @@ describe("test screenshot", () => {
       mockScreenshotResults[2],
       mockScreenshotResults[3],
     ]);
+  });
+
+  it("test screenshot with remote pdf url", async () => {
+    const config: Partial<LiteParseConfig> = { ocrEnabled: false, outputFormat: "text" };
+    const liteparse = new LiteParse(config);
+    const results = await liteparse.screenshot("https://example.com/document.pdf", [1, 2]);
+    expect(results).toStrictEqual([mockScreenshotResults[0], mockScreenshotResults[1]]);
   });
 });
