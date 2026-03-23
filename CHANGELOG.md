@@ -1,5 +1,11 @@
 # @llamaindex/liteparse
 
+## 1.2.0
+
+### Minor Changes
+
+- [#56](https://github.com/run-llama/liteparse/pull/56) [`31b43f9`](https://github.com/run-llama/liteparse/commit/31b43f9666ce6df85e90a44be1e859c615bda757) Thanks [@logan-markewich](https://github.com/logan-markewich)! - Add CLI Stdin support for files, urls, etc.
+
 ## 1.1.0
 
 ### Minor Changes
