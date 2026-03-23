@@ -1,5 +1,11 @@
 # @llamaindex/liteparse
 
+## 1.1.0
+
+### Minor Changes
+
+- [#51](https://github.com/run-llama/liteparse/pull/51) [`7b421c6`](https://github.com/run-llama/liteparse/commit/7b421c61f2e2ffa04e68bb2bbe02dbf18e261507) Thanks [@logan-markewich](https://github.com/logan-markewich)! - Support for password protected PDFs
+
 ## 1.0.1
 
 ### Patch Changes
