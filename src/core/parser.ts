@@ -16,13 +16,46 @@ import { HttpOcrEngine } from "../engines/ocr/http-simple.js";
 import { projectPagesToGrid } from "../processing/grid.js";
 import { buildBoundingBoxes } from "../processing/bbox.js";
 import { formatJSON } from "../output/json.js";
-import {
-  convertToPdf,
-  convertBufferToPdf,
-  cleanupConversionFiles,
-  guessExtensionFromBuffer,
-} from "../conversion/convertToPdf.js";
 import { cleanOcrTableArtifacts } from "../processing/textUtils.js";
+import type * as ConversionModule from "../conversion/convertToPdf.js";
+
+/**
+ * Lazy-load the conversion module to avoid pulling in Node.js-only dependencies
+ * (child_process, fs, file-type) at import time. This allows LiteParse to be
+ * bundled for edge runtimes (e.g. Cloudflare Workers) where only PDF parsing
+ * is needed — the conversion module is only loaded when non-PDF input is encountered.
+ *
+ * The module path is assigned to a variable — this is the load-bearing mechanism
+ * that prevents esbuild/Wrangler from statically resolving and bundling the module.
+ * The @vite-ignore comment is an additional hint for Vite/Rollup environments.
+ */
+const _conversionPath: string = "../conversion/convertToPdf.js";
+let _conversionCache: typeof ConversionModule | null = null;
+async function loadConversionModule(): Promise<typeof ConversionModule> {
+  if (_conversionCache === null) {
+    _conversionCache = (await import(/* @vite-ignore */ _conversionPath)) as typeof ConversionModule;
+  }
+  return _conversionCache;
+}
+
+/**
+ * Detect PDF by checking for the %PDF magic bytes (0x25504446) at the start of the buffer.
+ * This avoids importing the `file-type` package (which pulls in Node.js-only dependencies)
+ * for the most common case: PDF buffer input.
+ *
+ * This is the same approach used by edge-compatible PDF libraries like unpdf (unjs),
+ * which skip file-type detection entirely and pass raw bytes directly to pdf.js.
+ * Since pdf.js itself validates the PDF header internally, explicit magic byte checking
+ * is only needed here to decide whether to take the zero-dependency PDF path or fall
+ * back to the Node.js conversion module for non-PDF formats.
+ *
+ * @see https://en.wikipedia.org/wiki/List_of_file_signatures
+ */
+const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46] as const;
+function isPdfBytes(data: Uint8Array): boolean {
+  if (data.length < PDF_MAGIC.length) return false;
+  return PDF_MAGIC.every((byte, i) => data[i] === byte);
+}
 
 /**
  * Main document parser class. Handles PDF parsing, OCR, format conversion,
@@ -108,6 +141,7 @@ export class LiteParse {
 
     if (typeof input === "string") {
       log(`Processing file: ${input}`);
+      const { convertToPdf } = await loadConversionModule();
       const conversionResult = await convertToPdf(input, this.config.password);
 
       if ("code" in conversionResult) {
@@ -129,14 +163,14 @@ export class LiteParse {
       doc = await this.pdfEngine.loadDocument(pdfPath, this.config.password);
     } else {
       log(`Processing buffer input (${input.byteLength} bytes)`);
-      const ext = await guessExtensionFromBuffer(input);
+      const data = input instanceof Uint8Array ? input : new Uint8Array(input);
 
-      if (ext === ".pdf") {
+      if (isPdfBytes(data)) {
         // Zero-disk path: pass bytes directly to the PDF engine
-        const data = input instanceof Uint8Array ? input : new Uint8Array(input);
         doc = await this.pdfEngine.loadDocument(data, this.config.password);
       } else {
-        // Non-PDF buffer: write to temp file for conversion
+        // Non-PDF buffer: lazy-load conversion (requires Node.js APIs)
+        const { convertBufferToPdf } = await loadConversionModule();
         const conversionResult = await convertBufferToPdf(input, this.config.password);
 
         if ("code" in conversionResult) {
@@ -157,60 +191,63 @@ export class LiteParse {
 
     log(`Loaded PDF with ${doc.numPages} pages`);
 
-    // Extract pages
-    const pages = await this.pdfEngine.extractAllPages(
-      doc,
-      this.config.maxPages,
-      this.config.targetPages
-    );
+    try {
+      // Extract pages
+      const pages = await this.pdfEngine.extractAllPages(
+        doc,
+        this.config.maxPages,
+        this.config.targetPages
+      );
 
-    // run BEFORE grid projection
-    if (this.ocrEngine) {
-      await this.runOCR(doc, pages, log);
-    }
+      // run BEFORE grid projection
+      if (this.ocrEngine) {
+        await this.runOCR(doc, pages, log);
+      }
 
-    // Process pages with complete grid projection (after OCR)
-    const processedPages = projectPagesToGrid(pages, this.config);
+      // Process pages with complete grid projection (after OCR)
+      const processedPages = projectPagesToGrid(pages, this.config);
 
-    // Build bounding boxes if enabled
-    if (this.config.preciseBoundingBox) {
-      for (const page of processedPages) {
-        page.boundingBoxes = buildBoundingBoxes(page.textItems);
+      // Build bounding boxes if enabled
+      if (this.config.preciseBoundingBox) {
+        for (const page of processedPages) {
+          page.boundingBoxes = buildBoundingBoxes(page.textItems);
+        }
+      }
+
+      // Build final text
+      const fullText = processedPages.map((p) => p.text).join("\n\n");
+
+      // Close PDF document
+      await this.pdfEngine.close(doc);
+
+      // Cleanup OCR engine if it's Tesseract (to free memory)
+      if (this.ocrEngine && "terminate" in this.ocrEngine) {
+        await (this.ocrEngine as TesseractEngine).terminate();
+      }
+
+      const result: ParseResult = {
+        pages: processedPages,
+        text: fullText,
+      };
+
+      // Format based on output format
+      switch (this.config.outputFormat) {
+        case "json":
+          result.json = JSON.parse(formatJSON(result));
+          break;
+        case "text":
+          // Already in text format
+          break;
+      }
+
+      return result;
+    } finally {
+      // Cleanup temporary conversion files even if parsing throws
+      if (needsCleanup && cleanupPath) {
+        const { cleanupConversionFiles } = await loadConversionModule();
+        await cleanupConversionFiles(cleanupPath);
       }
     }
-
-    // Build final text
-    const fullText = processedPages.map((p) => p.text).join("\n\n");
-
-    // Close PDF document
-    await this.pdfEngine.close(doc);
-
-    // Cleanup OCR engine if it's Tesseract (to free memory)
-    if (this.ocrEngine && "terminate" in this.ocrEngine) {
-      await (this.ocrEngine as TesseractEngine).terminate();
-    }
-
-    // Cleanup temporary conversion files
-    if (needsCleanup && cleanupPath) {
-      await cleanupConversionFiles(cleanupPath);
-    }
-
-    const result: ParseResult = {
-      pages: processedPages,
-      text: fullText,
-    };
-
-    // Format based on output format
-    switch (this.config.outputFormat) {
-      case "json":
-        result.json = JSON.parse(formatJSON(result));
-        break;
-      case "text":
-        // Already in text format
-        break;
-    }
-
-    return result;
   }
 
   /**
