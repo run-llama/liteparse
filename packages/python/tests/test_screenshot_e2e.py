@@ -6,18 +6,19 @@ from pathlib import Path
 import pytest
 
 from liteparse import (
+    ImageFormat,
     LiteParse,
     ScreenshotBatchResult,
     ScreenshotResult,
-    ImageFormat,
-    ParseError,
 )
 
 
 class TestScreenshotBasic:
     """Basic screenshot functionality."""
 
-    def test_screenshot_returns_batch_result(self, parser: LiteParse, invoice_pdf: Path):
+    def test_screenshot_returns_batch_result(
+        self, parser: LiteParse, invoice_pdf: Path
+    ):
         result = parser.screenshot(invoice_pdf)
         assert isinstance(result, ScreenshotBatchResult)
 

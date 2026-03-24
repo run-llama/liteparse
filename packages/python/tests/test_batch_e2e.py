@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 from liteparse import (
-    LiteParse,
     BatchResult,
+    LiteParse,
     OutputFormat,
 )
 
@@ -15,7 +15,9 @@ from liteparse import (
 class TestBatchParseBasic:
     """Basic batch parsing functionality."""
 
-    def test_batch_parse_returns_batch_result(self, parser: LiteParse, invoice_pdf: Path):
+    def test_batch_parse_returns_batch_result(
+        self, parser: LiteParse, invoice_pdf: Path
+    ):
         input_dir = invoice_pdf.parent
         with tempfile.TemporaryDirectory() as tmpdir:
             result = parser.batch_parse(
@@ -27,7 +29,9 @@ class TestBatchParseBasic:
             assert isinstance(result, BatchResult)
             assert result.output_dir == tmpdir
 
-    def test_batch_parse_creates_output_files(self, parser: LiteParse, invoice_pdf: Path):
+    def test_batch_parse_creates_output_files(
+        self, parser: LiteParse, invoice_pdf: Path
+    ):
         input_dir = invoice_pdf.parent
         with tempfile.TemporaryDirectory() as tmpdir:
             parser.batch_parse(
@@ -53,6 +57,20 @@ class TestBatchParseBasic:
             )
             json_files = list(Path(tmpdir).rglob("*.json"))
             assert len(json_files) > 0
+
+    @pytest.mark.asyncio
+    async def test_batch_parse_async(self, parser: LiteParse, invoice_pdf: Path):
+        input_dir = invoice_pdf.parent
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = await parser.batch_parse_async(
+                input_dir,
+                tmpdir,
+                output_format="json",
+                ocr_enabled=False,
+                extension_filter=".pdf",
+            )
+            assert isinstance(result, BatchResult)
+            assert result.output_dir == tmpdir
 
 
 class TestBatchParseErrors:

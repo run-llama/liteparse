@@ -1,18 +1,16 @@
 """E2E tests for LiteParse.parse() — validates Python types match CLI output."""
 
-import json
 from pathlib import Path
 
 import pytest
 
 from liteparse import (
-    LiteParse,
-    ParseResult,
-    ParsedPage,
-    TextItem,
     BoundingBox,
+    LiteParse,
+    ParsedPage,
     ParseError,
-    CLINotFoundError,
+    ParseResult,
+    TextItem,
 )
 
 
@@ -35,6 +33,25 @@ class TestParseBasic:
 
     def test_parse_result_has_json(self, parser: LiteParse, invoice_pdf: Path):
         result = parser.parse(invoice_pdf, ocr_enabled=False)
+        assert result.json is not None
+        assert "pages" in result.json
+
+    def test_parse_bytest_input(self, parser: LiteParse, invoice_pdf: Path):
+        file_bytes = invoice_pdf.read_bytes()
+        result = parser.parse(file_bytes=file_bytes)
+        assert result.json is not None
+        assert "pages" in result.json
+
+    @pytest.mark.asyncio
+    async def test_parse_async(self, parser: LiteParse, invoice_pdf: Path):
+        result = await parser.parse_async(invoice_pdf)
+        assert result.json is not None
+        assert "pages" in result.json
+
+    @pytest.mark.asyncio
+    async def test_parse_async_bytes_input(self, parser: LiteParse, invoice_pdf: Path):
+        file_bytes = invoice_pdf.read_bytes()
+        result = await parser.parse_async(file_bytes=file_bytes)
         assert result.json is not None
         assert "pages" in result.json
 
@@ -100,7 +117,9 @@ class TestParseOptions:
         assert result.num_pages == 1
 
     def test_no_precise_bbox(self, parser: LiteParse, invoice_pdf: Path):
-        result = parser.parse(invoice_pdf, ocr_enabled=False, precise_bounding_box=False)
+        result = parser.parse(
+            invoice_pdf, ocr_enabled=False, precise_bounding_box=False
+        )
         assert isinstance(result, ParseResult)
         # With no precise bbox, boundingBoxes should be empty
         for page in result.pages:
