@@ -57,6 +57,7 @@ vi.mock("tesseract.js", async () => {
   return {
     ...actual,
     createWorker: vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async (language: string, _num: number, options?: { errorHandler?: (arg: any) => void }) => {
         if (language == "it" || language == "ita") {
           return;
