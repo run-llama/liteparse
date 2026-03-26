@@ -8,7 +8,7 @@ Python wrapper for [LiteParse](https://github.com/run-llama/liteparse) - fast, l
 pip install liteparse
 ```
 
-**Prerequisites:** The LiteParse Node.js CLI must be installed:
+While the python package can auto-install the LiteParse CLI if not installed, it is recommended to do it separately:
 
 ```bash
 npm install -g liteparse

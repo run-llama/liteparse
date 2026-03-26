@@ -40,9 +40,9 @@ for (const page of result.pages) {
 const parser = new LiteParse({ outputFormat: "json" });
 const result = await parser.parse("document.pdf");
 
-for (const page of result.json.pages) {
-  for (const bbox of page.boundingBoxes) {
-    console.log(`[${bbox.x1}, ${bbox.y1}] → [${bbox.x2}, ${bbox.y2}]`);
+for (const page of result.json?.pages || []) {
+  for (const item of page.textItems) {
+    console.log(`[${item.x}, ${item.y}] → [${item.x + item.width}, ${item.y + item.height}] ${item.text}`);
   }
 }
 ```
@@ -120,15 +120,11 @@ The Python package wraps the LiteParse CLI, so the Node.js CLI must be installed
 ### Installation
 
 ```bash
-# 1. Install the CLI (required)
-npm install -g @llamaindex/liteparse
-
-# 2. Install the Python package
 pip install liteparse
 ```
 
 <Aside type="caution">
-  The Python package calls the LiteParse CLI under the hood. Make sure `lit` is available on your PATH before using the Python library.
+  The Python package calls the LiteParse CLI under the hood: while the package can auto-install the CLI executable if not installed, it is recommended to do it separately (`npm install -g @llamaindex/liteparse` or `brew install run-llama/liteparse/llamaindex-liteparse`).
 </Aside>
 
 ### Parsing a document

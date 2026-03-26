@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import warnings
 from pathlib import Path
 from typing import Any, List, Literal, Optional, Union, cast
 
@@ -24,7 +25,7 @@ from .types import (
 )
 
 
-def _find_cli() -> str:
+def _find_cli(install_if_not_available: bool) -> str:
     """Find the liteparse CLI executable."""
     # Check if liteparse is in PATH
     cli_path = shutil.which("liteparse")
@@ -46,6 +47,24 @@ def _find_cli() -> str:
     for path in possible_paths:
         if os.path.isfile(path):
             return os.path.abspath(path)
+
+    if install_if_not_available:
+        warnings.warn(
+            "liteparse CLI could not be find. Running `npm install -g @llamaindex/liteparse` to install it.",
+            UserWarning,
+        )
+        result = subprocess.run(
+            ["npm", "install", "-g", "@llamaindex/liteparse"],
+        )
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode,
+                ["npm", "install", "-g", "@llamaindex/liteparse"],
+                result.stderr,
+            )
+        cli_path = shutil.which("liteparse")
+        if cli_path:
+            return cli_path
 
     raise CLINotFoundError(
         "liteparse CLI not found. Please install it with: npm i -g @llamaindex/liteparse"
@@ -209,20 +228,24 @@ class LiteParse:
         >>> print(result.text)
     """
 
-    def __init__(self, cli_path: Optional[str] = None):
+    def __init__(
+        self, cli_path: Optional[str] = None, install_if_not_available: bool = True
+    ):
         """
         Initialize LiteParse parser.
 
         Args:
             cli_path: Custom path to liteparse CLI (auto-detected if not provided)
+            install_if_not_available: Install the liteparse CLI from NPM if not available. Defaults to True.
         """
         self._cli_path = cli_path
+        self.install_if_not_available = install_if_not_available
 
     @property
     def cli_path(self) -> str:
         """Get the CLI path, finding it if not already set."""
         if self._cli_path is None:
-            self._cli_path = _find_cli()
+            self._cli_path = _find_cli(self.install_if_not_available)
         return self._cli_path
 
     def _prepare_command(

@@ -13,6 +13,7 @@
  * ```
  */
 export { LiteParse } from "./core/parser.js";
+export { searchItems } from "./processing/searchItems.js";
 export type {
   LiteParseConfig,
   LiteParseInput,
@@ -22,6 +23,8 @@ export type {
   ParsedPage,
   BoundingBox,
   TextItem,
+  JsonTextItem,
+  SearchItemsOptions,
   ScreenshotResult,
   MarkupData,
 } from "./core/types.js";

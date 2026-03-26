@@ -34,7 +34,7 @@ lit parse [options] <file>
 | `--max-pages <n>` | Maximum pages to parse | `10000` |
 | `--target-pages <pages>` | Pages to parse (e.g., `"1-5,10"`) | — (all pages) |
 | `--dpi <dpi>` | Rendering DPI | `150` |
-| `--no-precise-bbox` | Disable precise bounding boxes | — |
+| `--no-precise-bbox` | **Deprecated:** Disable populating the output boundingBoxes array. Will be removed in v2.0. Text item coordinates (`x`, `y`, `width`, `height`) are always present regardless. | — |
 | `--preserve-small-text` | Keep very small text | — |
 | `--password <password>` | Password for encrypted/protected documents | — |
 | `--config <file>` | JSON config file path | — |
@@ -93,7 +93,7 @@ lit batch-parse [options] <input-dir> <output-dir>
 | `--num-workers <n>` | Pages to OCR in parallel | CPU cores - 1 |
 | `--max-pages <n>` | Maximum pages per file | `10000` |
 | `--dpi <dpi>` | Rendering DPI | `150` |
-| `--no-precise-bbox` | Disable precise bounding boxes | — |
+| `--no-precise-bbox` | **Deprecated:** Disable populating the output boundingBoxes array. Will be removed in v2.0. Text item coordinates (`x`, `y`, `width`, `height`) are always present regardless. | — |
 | `--recursive` | Search subdirectories | — |
 | `--extension <ext>` | Only process this extension (e.g., `".pdf"`) | — (all supported) |
 | `--password <password>` | Password for encrypted/protected documents (applied to all files) | — |

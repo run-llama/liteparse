@@ -56,12 +56,19 @@ vi.mock("tesseract.js", async () => {
   const actual = await vi.importActual<typeof import("tesseract.js")>("tesseract.js");
   return {
     ...actual,
-    createWorker: vi.fn(async (language: string, _num: number) => {
-      if (language == "it" || language == "ita") {
-        return;
+    createWorker: vi.fn(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      async (language: string, _num: number, options?: { errorHandler?: (arg: any) => void }) => {
+        if (language == "it" || language == "ita") {
+          return;
+        }
+        if (language == "offline" || language == "fetchfail") {
+          options?.errorHandler?.("TypeError: fetch failed");
+          throw new Error("TypeError: fetch failed");
+        }
+        return mockTesseractWorker;
       }
-      return mockTesseractWorker;
-    }),
+    ),
   };
 });
 
@@ -80,6 +87,13 @@ describe("test Tesseract OCR (single image)", () => {
     expect(engine.name).toBe("tesseract");
     await expect(engine.recognize("cat.png", { language: "it" })).rejects.toThrow(
       "Tesseract worker not initialized"
+    );
+  });
+
+  it("test engine failure (fetch failed) returns actionable guidance", async () => {
+    const engine = new TesseractEngine();
+    await expect(engine.recognize("cat.png", { language: "offline" })).rejects.toThrow(
+      'Tesseract failed to download language data for "offline"'
     );
   });
 });

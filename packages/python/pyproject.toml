@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "liteparse"
-version = "1.0.2"
+version = "1.2.0"
 description = "Python wrapper for LiteParse - fast, lightweight PDF and document parsing"
 readme = "README.md"
 license = "MIT"

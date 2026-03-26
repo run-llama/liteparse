@@ -108,6 +108,9 @@ export interface LiteParseConfig {
    * Calculate precise bounding boxes for each text line. Disable for faster
    * parsing when bounding boxes aren't needed.
    *
+   * @deprecated Controls the deprecated `boundingBoxes` output. Will be removed in v2.0.
+   * Text item coordinates (`x`, `y`, `width`, `height`) are always present regardless.
+   *
    * @defaultValue `true`
    */
   preciseBoundingBox: boolean;
@@ -250,6 +253,8 @@ export interface OcrData {
  * An axis-aligned bounding box defined by its top-left and bottom-right corners.
  *
  * All coordinates are in PDF points.
+ *
+ * @deprecated Use {@link TextItem} coordinates (`x`, `y`, `width`, `height`) instead. Will be removed in v2.0.
  */
 export interface BoundingBox {
   /** X coordinate of the top-left corner. */
@@ -276,8 +281,47 @@ export interface ParsedPage {
   text: string;
   /** Individual text elements extracted from the page. */
   textItems: TextItem[];
-  /** Bounding boxes for text lines. Present when {@link LiteParseConfig.preciseBoundingBox} is enabled. */
+  /**
+   * @deprecated Use {@link TextItem} coordinates instead. Will be removed in v2.0.
+   * Present when {@link LiteParseConfig.preciseBoundingBox} is enabled.
+   */
   boundingBoxes?: BoundingBox[];
+}
+
+/**
+ * A text element from the JSON output with position, size, and font metadata.
+ */
+export interface JsonTextItem {
+  /** The text content of this item. */
+  text: string;
+  /** X coordinate of the top-left corner, in PDF points. */
+  x: number;
+  /** Y coordinate of the top-left corner, in PDF points. */
+  y: number;
+  /** Width of the text item in PDF points. */
+  width: number;
+  /** Height of the text item in PDF points. */
+  height: number;
+  /** Font name. */
+  fontName?: string;
+  /** Font size in PDF points. */
+  fontSize?: number;
+  /** The OCR confidence (null if OCR wasn't used) */
+  confidence?: number;
+}
+
+/**
+ * Options for {@link searchItems}.
+ */
+export interface SearchItemsOptions {
+  /** Find text items containing this phrase. Matches can span multiple adjacent items. */
+  phrase: string;
+  /**
+   * Whether the search should be case-sensitive.
+   *
+   * @defaultValue `false`
+   */
+  caseSensitive?: boolean;
 }
 
 /**
@@ -296,17 +340,10 @@ export interface ParseResultJson {
     /** Full text content of the page. */
     text: string;
     /** Individual text elements with position and font metadata. */
-    textItems: Array<{
-      text: string;
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      fontName?: string;
-      fontSize?: number;
-      confidence?: number;
-    }>;
-    /** Bounding boxes for text lines. */
+    textItems: JsonTextItem[];
+    /**
+     * @deprecated Use `textItems` coordinates instead. Will be removed in v2.0.
+     */
     boundingBoxes: BoundingBox[];
   }>;
 }

@@ -33,6 +33,10 @@ export class TesseractEngine implements OcrEngine {
       workerOptions.cachePath = this.tessdataPath;
       workerOptions.gzip = false; // Pre-cached files are not gzipped
     }
+    workerOptions.errorHandler = () => {
+      // Let createWorker reject so LiteParse can convert the failure into
+      // an actionable initialization error instead of crashing the process.
+    };
 
     // Create worker pool
     for (let i = 0; i < this.concurrency; i++) {
