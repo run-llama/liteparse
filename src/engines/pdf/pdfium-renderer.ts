@@ -3,6 +3,37 @@ import sharp from "sharp";
 import { promises as fs } from "fs";
 
 /**
+ * Minimal interface for PDFium's WASM module internals.
+ * These properties are private/protected in @hyzyla/pdfium's typings,
+ * but we need direct access for low-level page object bound queries.
+ */
+interface PdfiumWasmModule {
+  _FPDFPageObj_GetBounds?: (
+    objHandle: number,
+    leftPtr: number,
+    bottomPtr: number,
+    rightPtr: number,
+    topPtr: number
+  ) => number;
+  _FPDF_GetPageWidthF: (pagePtr: number) => number;
+  _FPDF_GetPageHeightF: (pagePtr: number) => number;
+  _malloc: (size: number) => number;
+  _free: (ptr: number) => void;
+  HEAPU8: Uint8Array;
+}
+
+/** Minimum image dimension in PDF points to be considered for OCR */
+const MIN_IMAGE_SIZE_PT = 25;
+/** Images covering more than this fraction of the page are treated as backgrounds */
+const MAX_IMAGE_PAGE_COVERAGE = 0.9;
+
+interface PdfiumPageInternal {
+  module: PdfiumWasmModule;
+  pageIdx: number;
+  objects(): Iterable<{ type: string; objectIdx: number }>;
+}
+
+/**
  * PDFium-based PDF screenshot renderer
  * Uses native PDFium library for high-quality, fast screenshots
  */
@@ -91,30 +122,27 @@ export class PdfiumRenderer {
     const document = await this.pdfium.loadDocument(pdfBuffer, password);
 
     try {
-      const page = document.getPage(pageNumber - 1);
+      // Cast to internal interface — module/pageIdx/objectIdx are private in
+      // @hyzyla/pdfium typings but required for low-level WASM bound queries
+      const page = document.getPage(pageNumber - 1) as unknown as PdfiumPageInternal;
       const results: Array<{ x: number; y: number; width: number; height: number }> = [];
 
-      // Access the underlying WASM module for low-level bound queries
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const mod = (page as any).module;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const pagePtr = (page as any).pageIdx;
+      const mod = page.module;
+      const pagePtr = page.pageIdx;
 
       if (!mod || !mod._FPDFPageObj_GetBounds) {
         return results;
       }
 
       // Get page dimensions via WASM (getSize() is private in typings)
-      const pageWidth: number = mod._FPDF_GetPageWidthF(pagePtr);
-      const pageHeight: number = mod._FPDF_GetPageHeightF(pagePtr);
+      const pageWidth = mod._FPDF_GetPageWidthF(pagePtr);
+      const pageHeight = mod._FPDF_GetPageHeightF(pagePtr);
 
       // Iterate page objects looking for images
       for (const obj of page.objects()) {
         if (obj.type !== "image") continue;
 
-        // objectIdx is the WASM object handle/pointer directly
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const objHandle = (obj as any).objectIdx;
+        const objHandle = obj.objectIdx;
         if (!objHandle) continue;
 
         // Allocate memory for 4 floats (left, bottom, right, top)
@@ -133,9 +161,9 @@ export class PdfiumRenderer {
           const w = right - left;
           const h = top - bottom;
 
-          // Filter out tiny images (< 10pt) and full-page backgrounds (> 90% coverage)
-          if (w < 10 || h < 10) continue;
-          if (w > pageWidth * 0.9 && h > pageHeight * 0.9) continue;
+          if (w < MIN_IMAGE_SIZE_PT || h < MIN_IMAGE_SIZE_PT) continue;
+          if (w > pageWidth * MAX_IMAGE_PAGE_COVERAGE && h > pageHeight * MAX_IMAGE_PAGE_COVERAGE)
+            continue;
 
           // Convert PDF coords (Y-up) to viewport coords (Y-down)
           results.push({

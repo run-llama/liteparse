@@ -70,7 +70,7 @@ export class LiteParse {
     this.config = mergeConfig(userConfig);
 
     // Initialize PDF engine
-    this.pdfEngine = new PdfJsEngine({ detectImages: this.config.detectImages });
+    this.pdfEngine = new PdfJsEngine();
 
     // Initialize OCR engine
     // Auto-detect: use HTTP OCR if URL provided, otherwise use Tesseract

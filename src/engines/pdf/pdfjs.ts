@@ -432,11 +432,6 @@ export class PdfJsEngine implements PdfEngine {
   private pdfiumRenderer: PdfiumRenderer | null = null;
   private currentPdfPath: string | null = null;
   private currentPdfData: Uint8Array | null = null;
-  private detectImages: boolean;
-
-  constructor(options?: { detectImages?: boolean }) {
-    this.detectImages = options?.detectImages ?? false;
-  }
 
   async loadDocument(input: string | Uint8Array, password?: string): Promise<PdfDocument> {
     let data: Uint8Array;
@@ -605,22 +600,20 @@ export class PdfJsEngine implements PdfEngine {
     }
 
     let images: Image[] = [];
-    if (this.detectImages) {
-      try {
-        if (!this.pdfiumRenderer) {
-          this.pdfiumRenderer = new PdfiumRenderer();
-        }
-        const pdfInput = this.currentPdfPath || this.currentPdfData || doc.data;
-        const imageBounds = await this.pdfiumRenderer.extractImageBounds(pdfInput, pageNum);
-        images = imageBounds.map((bounds) => ({
-          x: bounds.x,
-          y: bounds.y,
-          width: bounds.width,
-          height: bounds.height,
-        }));
-      } catch {
-        // Image extraction is best-effort
+    try {
+      if (!this.pdfiumRenderer) {
+        this.pdfiumRenderer = new PdfiumRenderer();
       }
+      const pdfInput = this.currentPdfPath || this.currentPdfData || doc.data;
+      const imageBounds = await this.pdfiumRenderer.extractImageBounds(pdfInput, pageNum);
+      images = imageBounds.map((bounds) => ({
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+      }));
+    } catch {
+      // Image extraction is best-effort
     }
 
     // Skip annotation extraction - not currently used in processing pipeline
