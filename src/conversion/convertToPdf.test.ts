@@ -76,6 +76,8 @@ vi.mock("fs", async () => {
       mkdtemp: vi.fn(async () => {
         return "/tmp/test";
       }),
+      rm: vi.fn(async () => {}),
+      writeFile: vi.fn(async () => {}),
       readFile: vi.fn(async () => {
         return "hello world";
       }),
@@ -265,6 +267,25 @@ describe("test convertToPdf", () => {
     const result = await convertToPdf("test.txt");
     expect(result).toStrictEqual({
       content: "hello world",
+    });
+  });
+});
+
+describe("test convertBufferToPdf", () => {
+  it("cleans up the temp directory when an unsupported buffer returns passthrough content", async () => {
+    const zipBytes = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+
+    const { convertBufferToPdf } = await import("./convertToPdf");
+    const fsModule = await import("fs");
+
+    const result = await convertBufferToPdf(zipBytes);
+
+    expect(result).toStrictEqual({
+      content: "hello world",
+    });
+    expect(fsModule.promises.rm).toHaveBeenCalledWith("/tmp/test", {
+      recursive: true,
+      force: true,
     });
   });
 });
