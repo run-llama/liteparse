@@ -105,9 +105,9 @@ describe("test guessFileExtension", () => {
     expect(await guessFileExtension("/some/file")).toBe(".png");
   });
 
-  it("defaults to .pdf when file-type returns undefined", async () => {
+  it("returns null when file-type returns undefined for an extensionless path", async () => {
     mockFileTypeFromFile.mockResolvedValue(undefined);
-    expect(await guessFileExtension("/some/file")).toBe(".pdf");
+    expect(await guessFileExtension("/some/file")).toBeNull();
   });
 
   it("returns extension directly if present", async () => {
@@ -263,6 +263,16 @@ describe("test convertToPdf", () => {
     });
     mockProc.stdout.emit("data", "conversion successfull");
     const result = await convertToPdf("test.txt");
+    expect(result).toStrictEqual({
+      content: "hello world",
+    });
+  });
+
+  it("treats an extensionless unrecognized file as passthrough content", async () => {
+    mockFileTypeFromFile.mockResolvedValue(undefined);
+
+    const result = await convertToPdf("notes");
+
     expect(result).toStrictEqual({
       content: "hello world",
     });

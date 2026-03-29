@@ -78,8 +78,9 @@ export const htmlExtensions = [".htm", ".html", ".xhtml"];
 /**
  * Guess file extension from file content using file-type magic byte detection.
  * Returns the path's own extension if present, otherwise inspects file bytes.
+ * Returns null when the format cannot be identified.
  */
-export async function guessFileExtension(filePath: string): Promise<string> {
+export async function guessFileExtension(filePath: string): Promise<string | null> {
   const ext = path.extname(filePath).toLowerCase();
   if (ext) {
     return ext;
@@ -90,7 +91,7 @@ export async function guessFileExtension(filePath: string): Promise<string> {
     return `.${result.ext}`;
   }
 
-  return ".pdf"; // Default assumption for extensionless files
+  return null;
 }
 
 /**
@@ -363,6 +364,15 @@ export async function convertToPdf(
       return {
         pdfPath: filePath,
         originalExtension: extension,
+      };
+    }
+
+    if (extension === null) {
+      // Unknown extensionless files should fall back to text passthrough / unsupported handling,
+      // not be treated as PDFs.
+      const content = await fs.readFile(filePath, "utf-8");
+      return {
+        content,
       };
     }
 
