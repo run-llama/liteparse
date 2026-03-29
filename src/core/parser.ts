@@ -102,115 +102,147 @@ export class LiteParse {
       if (!quiet) console.error(msg); // Progress goes to stderr
     };
 
-    let doc: PdfDocument;
+    let doc: PdfDocument | undefined;
     let needsCleanup = false;
     let cleanupPath: string | undefined;
+    let parseError: unknown;
+    let cleanupError: unknown;
 
-    if (typeof input === "string") {
-      log(`Processing file: ${input}`);
-      const conversionResult = await convertToPdf(input, this.config.password);
-
-      if ("code" in conversionResult) {
-        throw new Error(`Conversion failed: ${conversionResult.message}`);
+    const recordCleanupError = (error: unknown) => {
+      if (cleanupError === undefined) {
+        cleanupError = error;
       }
+    };
 
-      if ("content" in conversionResult) {
-        log(`File is a text-based format. Returning content directly.`);
-        return { pages: [], text: conversionResult.content };
+    const cleanupResource = async (fn: () => Promise<void>) => {
+      try {
+        await fn();
+      } catch (error) {
+        recordCleanupError(error);
       }
+    };
 
-      const pdfPath = conversionResult.pdfPath;
-      needsCleanup = pdfPath !== input;
-      if (needsCleanup) {
-        cleanupPath = pdfPath;
-        log(`Converted ${conversionResult.originalExtension} to PDF`);
-      }
-
-      doc = await this.pdfEngine.loadDocument(pdfPath, this.config.password);
-    } else {
-      log(`Processing buffer input (${input.byteLength} bytes)`);
-      const ext = await guessExtensionFromBuffer(input);
-
-      if (ext === ".pdf") {
-        // Zero-disk path: pass bytes directly to the PDF engine
-        const data = input instanceof Uint8Array ? input : new Uint8Array(input);
-        doc = await this.pdfEngine.loadDocument(data, this.config.password);
-      } else {
-        // Non-PDF buffer: write to temp file for conversion
-        const conversionResult = await convertBufferToPdf(input, this.config.password);
+    try {
+      if (typeof input === "string") {
+        log(`Processing file: ${input}`);
+        const conversionResult = await convertToPdf(input, this.config.password);
 
         if ("code" in conversionResult) {
           throw new Error(`Conversion failed: ${conversionResult.message}`);
         }
 
         if ("content" in conversionResult) {
-          log(`Buffer is a text-based format. Returning content directly.`);
+          log(`File is a text-based format. Returning content directly.`);
           return { pages: [], text: conversionResult.content };
         }
 
-        needsCleanup = true;
-        cleanupPath = conversionResult.pdfPath;
-        log(`Converted ${conversionResult.originalExtension} buffer to PDF`);
-        doc = await this.pdfEngine.loadDocument(conversionResult.pdfPath, this.config.password);
+        const pdfPath = conversionResult.pdfPath;
+        needsCleanup = pdfPath !== input;
+        if (needsCleanup) {
+          cleanupPath = pdfPath;
+          log(`Converted ${conversionResult.originalExtension} to PDF`);
+        }
+
+        doc = await this.pdfEngine.loadDocument(pdfPath, this.config.password);
+      } else {
+        log(`Processing buffer input (${input.byteLength} bytes)`);
+        const ext = await guessExtensionFromBuffer(input);
+
+        if (ext === ".pdf") {
+          // Zero-disk path: pass bytes directly to the PDF engine
+          const data = input instanceof Uint8Array ? input : new Uint8Array(input);
+          doc = await this.pdfEngine.loadDocument(data, this.config.password);
+        } else {
+          // Non-PDF buffer: write to temp file for conversion
+          const conversionResult = await convertBufferToPdf(input, this.config.password);
+
+          if ("code" in conversionResult) {
+            throw new Error(`Conversion failed: ${conversionResult.message}`);
+          }
+
+          if ("content" in conversionResult) {
+            log(`Buffer is a text-based format. Returning content directly.`);
+            return { pages: [], text: conversionResult.content };
+          }
+
+          needsCleanup = true;
+          cleanupPath = conversionResult.pdfPath;
+          log(`Converted ${conversionResult.originalExtension} buffer to PDF`);
+          doc = await this.pdfEngine.loadDocument(conversionResult.pdfPath, this.config.password);
+        }
+      }
+
+      log(`Loaded PDF with ${doc.numPages} pages`);
+
+      // Extract pages
+      const pages = await this.pdfEngine.extractAllPages(
+        doc,
+        this.config.maxPages,
+        this.config.targetPages
+      );
+
+      // run BEFORE grid projection
+      if (this.ocrEngine) {
+        await this.runOCR(doc, pages, log);
+      }
+
+      // Process pages with complete grid projection (after OCR)
+      const processedPages = projectPagesToGrid(pages, this.config);
+
+      // Build bounding boxes if enabled
+      if (this.config.preciseBoundingBox) {
+        for (const page of processedPages) {
+          page.boundingBoxes = buildBoundingBoxes(page.textItems);
+        }
+      }
+
+      // Build final text
+      const fullText = processedPages.map((p) => p.text).join("\n\n");
+
+      const result: ParseResult = {
+        pages: processedPages,
+        text: fullText,
+      };
+
+      // Format based on output format
+      switch (this.config.outputFormat) {
+        case "json":
+          result.json = JSON.parse(formatJSON(result));
+          break;
+        case "text":
+          // Already in text format
+          break;
+      }
+
+      return result;
+    } catch (error) {
+      parseError = error;
+      throw error;
+    } finally {
+      const docToClose = doc;
+      if (docToClose) {
+        await cleanupResource(async () => {
+          await this.pdfEngine.close(docToClose);
+        });
+      }
+
+      if (this.ocrEngine && "terminate" in this.ocrEngine) {
+        await cleanupResource(async () => {
+          await (this.ocrEngine as TesseractEngine).terminate();
+        });
+      }
+
+      const cleanupTarget = cleanupPath;
+      if (needsCleanup && cleanupTarget) {
+        await cleanupResource(async () => {
+          await cleanupConversionFiles(cleanupTarget);
+        });
+      }
+
+      if (parseError === undefined && cleanupError !== undefined) {
+        throw cleanupError;
       }
     }
-
-    log(`Loaded PDF with ${doc.numPages} pages`);
-
-    // Extract pages
-    const pages = await this.pdfEngine.extractAllPages(
-      doc,
-      this.config.maxPages,
-      this.config.targetPages
-    );
-
-    // run BEFORE grid projection
-    if (this.ocrEngine) {
-      await this.runOCR(doc, pages, log);
-    }
-
-    // Process pages with complete grid projection (after OCR)
-    const processedPages = projectPagesToGrid(pages, this.config);
-
-    // Build bounding boxes if enabled
-    if (this.config.preciseBoundingBox) {
-      for (const page of processedPages) {
-        page.boundingBoxes = buildBoundingBoxes(page.textItems);
-      }
-    }
-
-    // Build final text
-    const fullText = processedPages.map((p) => p.text).join("\n\n");
-
-    // Close PDF document
-    await this.pdfEngine.close(doc);
-
-    // Cleanup OCR engine if it's Tesseract (to free memory)
-    if (this.ocrEngine && "terminate" in this.ocrEngine) {
-      await (this.ocrEngine as TesseractEngine).terminate();
-    }
-
-    // Cleanup temporary conversion files
-    if (needsCleanup && cleanupPath) {
-      await cleanupConversionFiles(cleanupPath);
-    }
-
-    const result: ParseResult = {
-      pages: processedPages,
-      text: fullText,
-    };
-
-    // Format based on output format
-    switch (this.config.outputFormat) {
-      case "json":
-        result.json = JSON.parse(formatJSON(result));
-        break;
-      case "text":
-        // Already in text format
-        break;
-    }
-
-    return result;
   }
 
   /**

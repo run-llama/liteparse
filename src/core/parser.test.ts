@@ -1,4 +1,4 @@
-import { vi, describe, it, expect } from "vitest";
+import { vi, describe, it, expect, beforeEach } from "vitest";
 
 const {
   mockPages,
@@ -14,6 +14,18 @@ const {
   mockParsedPagesWithBoundingBoxes,
   mockParsedPagesWithBoundingBoxesOcr,
   mockScreenshotResults,
+  mockConvertToPdf,
+  mockCleanupConversionFiles,
+  mockPdfLoadDocument,
+  mockPdfExtractAllPages,
+  mockPdfExtractPage,
+  mockPdfRenderPageImage,
+  mockPdfClose,
+  mockTesseractRecognize,
+  mockTesseractTerminate,
+  mockHttpRecognize,
+  mockPdfiumRenderPageToBuffer,
+  mockPdfiumClose,
 } = vi.hoisted(() => {
   const mockPdfConvertedResult = {
     pdfPath: "/tmp/converted.pdf",
@@ -324,6 +336,21 @@ const {
     },
   ];
 
+  const mockConvertToPdf = vi.fn(async () => mockPdfConvertedResult);
+  const mockCleanupConversionFiles = vi.fn(async () => {});
+  const mockPdfLoadDocument = vi.fn().mockResolvedValue(mockPdfDocument);
+  const mockPdfExtractAllPages = vi.fn().mockResolvedValue(mockPages);
+  const mockPdfExtractPage = vi.fn().mockResolvedValue(mockPages[0]);
+  const mockPdfRenderPageImage = vi.fn(async () => Buffer.from(new Uint8Array([1, 2, 3, 4, 5])));
+  const mockPdfClose = vi.fn(async () => {});
+  const mockTesseractRecognize = vi.fn().mockResolvedValue(mockOcrResults);
+  const mockTesseractTerminate = vi.fn(async () => {});
+  const mockHttpRecognize = vi.fn().mockResolvedValue(mockOcrResults);
+  const mockPdfiumRenderPageToBuffer = vi.fn(async () =>
+    Buffer.from(new Uint8Array([1, 2, 3, 4, 5]))
+  );
+  const mockPdfiumClose = vi.fn(async () => {});
+
   return {
     mockPdfConvertedResult,
     mockPdfDocument,
@@ -338,6 +365,18 @@ const {
     mockParsedPagesWithBoundingBoxes,
     mockParsedPagesWithBoundingBoxesOcr,
     mockScreenshotResults,
+    mockConvertToPdf,
+    mockCleanupConversionFiles,
+    mockPdfLoadDocument,
+    mockPdfExtractAllPages,
+    mockPdfExtractPage,
+    mockPdfRenderPageImage,
+    mockPdfClose,
+    mockTesseractRecognize,
+    mockTesseractTerminate,
+    mockHttpRecognize,
+    mockPdfiumRenderPageToBuffer,
+    mockPdfiumClose,
   };
 });
 
@@ -350,10 +389,8 @@ vi.mock("../conversion/convertToPdf.js", async () => {
   );
   return {
     ...actual,
-    convertToPdf: vi.fn(async () => {
-      return mockPdfConvertedResult;
-    }),
-    cleanupConversionFiles: vi.fn(async () => {}),
+    convertToPdf: mockConvertToPdf,
+    cleanupConversionFiles: mockCleanupConversionFiles,
   };
 });
 
@@ -366,11 +403,11 @@ vi.mock("../engines/pdf/pdfjs.js", async () => {
       class {
         constructor() {}
 
-        loadDocument = vi.fn().mockResolvedValue(mockPdfDocument);
-        extractAllPages = vi.fn().mockResolvedValue(mockPages);
-        extractPage = vi.fn().mockResolvedValue(mockPages[0]);
-        renderPageImage = vi.fn(async () => Buffer.from(new Uint8Array([1, 2, 3, 4, 5])));
-        close = vi.fn(async () => {});
+        loadDocument = mockPdfLoadDocument;
+        extractAllPages = mockPdfExtractAllPages;
+        extractPage = mockPdfExtractPage;
+        renderPageImage = mockPdfRenderPageImage;
+        close = mockPdfClose;
       }
     ),
   };
@@ -386,7 +423,8 @@ vi.mock("../engines/ocr/tesseract.js", async () => {
       class {
         constructor() {}
 
-        recognize = vi.fn().mockResolvedValue(mockOcrResults);
+        recognize = mockTesseractRecognize;
+        terminate = mockTesseractTerminate;
       }
     ),
   };
@@ -411,7 +449,7 @@ vi.mock("../engines/ocr/http-simple.js", async () => {
           }
         }
 
-        recognize = vi.fn().mockResolvedValue(mockOcrResults);
+        recognize = mockHttpRecognize;
       }
     ),
   };
@@ -454,11 +492,27 @@ vi.mock("../engines/pdf/pdfium-renderer.js", async () => {
       class {
         constructor() {}
 
-        renderPageToBuffer = vi.fn(async () => Buffer.from(new Uint8Array([1, 2, 3, 4, 5])));
-        close = vi.fn(async () => {});
+        renderPageToBuffer = mockPdfiumRenderPageToBuffer;
+        close = mockPdfiumClose;
       }
     ),
   };
+});
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockConvertToPdf.mockResolvedValue(mockPdfConvertedResult);
+  mockCleanupConversionFiles.mockResolvedValue(undefined);
+  mockPdfLoadDocument.mockResolvedValue(mockPdfDocument);
+  mockPdfExtractAllPages.mockResolvedValue(mockPages);
+  mockPdfExtractPage.mockResolvedValue(mockPages[0]);
+  mockPdfRenderPageImage.mockResolvedValue(Buffer.from(new Uint8Array([1, 2, 3, 4, 5])));
+  mockPdfClose.mockResolvedValue(undefined);
+  mockTesseractRecognize.mockResolvedValue(mockOcrResults);
+  mockTesseractTerminate.mockResolvedValue(undefined);
+  mockHttpRecognize.mockResolvedValue(mockOcrResults);
+  mockPdfiumRenderPageToBuffer.mockResolvedValue(Buffer.from(new Uint8Array([1, 2, 3, 4, 5])));
+  mockPdfiumClose.mockResolvedValue(undefined);
 });
 
 describe("Parse tests", () => {
@@ -591,6 +645,26 @@ describe("Parse tests", () => {
         return typeof page.boundingBoxes != "undefined";
       }).length
     ).toBe(0);
+  });
+
+  it("cleans up converted files when parse fails after conversion", async () => {
+    mockPdfExtractAllPages.mockRejectedValueOnce(new Error("extract failed"));
+
+    const liteparse = new LiteParse({ ocrEnabled: false, outputFormat: "text" });
+
+    await expect(liteparse.parse("/tmp/test.docx")).rejects.toThrow("extract failed");
+    expect(mockCleanupConversionFiles).toHaveBeenCalledWith("/tmp/converted.pdf");
+    expect(mockPdfClose).toHaveBeenCalledWith(mockPdfDocument);
+  });
+
+  it("terminates the OCR engine when parse fails after OCR is enabled", async () => {
+    mockPdfExtractAllPages.mockRejectedValueOnce(new Error("extract failed"));
+
+    const liteparse = new LiteParse({ ocrEnabled: true, outputFormat: "text" });
+
+    await expect(liteparse.parse("/tmp/test.docx")).rejects.toThrow("extract failed");
+    expect(mockTesseractTerminate).toHaveBeenCalled();
+    expect(mockCleanupConversionFiles).toHaveBeenCalledWith("/tmp/converted.pdf");
   });
 });
 
