@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { searchItems } from "./searchItems";
-import { JsonTextItem } from "../core/types";
+import { searchItems, searchTextLines } from "./searchItems";
+import { JsonTextItem, TextLine } from "../core/types";
 
 function item(
   text: string,
@@ -98,5 +98,93 @@ describe("searchItems", () => {
     expect(results).toHaveLength(1);
     expect(results[0].y).toBe(50);
     expect(results[0].height).toBe(27); // 65 + 12 - 50
+  });
+});
+
+function textLine(text: string, x: number, y: number, w: number, h: number, pageNum = 1): TextLine {
+  return { text, bbox: { x, y, w, h }, pageNum };
+}
+
+describe("searchTextLines", () => {
+  it("matches a phrase within a single line", () => {
+    const lines = [
+      textLine("The quick brown fox", 10, 100, 200, 12),
+      textLine("jumps over the lazy dog", 10, 115, 250, 12),
+    ];
+    const results = searchTextLines(lines, { phrase: "quick brown" });
+    expect(results).toHaveLength(1);
+    expect(results[0].text).toBe("The quick brown fox");
+    expect(results[0].bbox).toStrictEqual({ x: 10, y: 100, w: 200, h: 12 });
+  });
+
+  it("matches a phrase spanning multiple consecutive lines", () => {
+    const lines = [
+      textLine("This agreement shall be", 10, 100, 300, 12),
+      textLine("governed by the laws of", 10, 115, 300, 12),
+      textLine("the State of California.", 10, 130, 300, 12),
+    ];
+    // Phrase spans lines 1 and 2 (joined with \n)
+    const results = searchTextLines(lines, { phrase: "shall be\ngoverned by" });
+    expect(results).toHaveLength(2);
+    expect(results[0].text).toBe("This agreement shall be");
+    expect(results[1].text).toBe("governed by the laws of");
+    // Each result carries its own bbox
+    expect(results[0].bbox.y).toBe(100);
+    expect(results[1].bbox.y).toBe(115);
+  });
+
+  it("matches a phrase spanning three lines", () => {
+    const lines = [
+      textLine("Line one content", 10, 100, 200, 12),
+      textLine("Line two content", 10, 115, 200, 12),
+      textLine("Line three content", 10, 130, 200, 12),
+    ];
+    const results = searchTextLines(lines, {
+      phrase: "one content\nLine two content\nLine three",
+    });
+    expect(results).toHaveLength(3);
+  });
+
+  it("returns empty array when no match", () => {
+    const lines = [textLine("hello world", 10, 100, 100, 12)];
+    const results = searchTextLines(lines, { phrase: "goodbye" });
+    expect(results).toHaveLength(0);
+  });
+
+  it("is case-insensitive by default", () => {
+    const lines = [textLine("Revenue Growth Report", 10, 100, 200, 12)];
+    const results = searchTextLines(lines, { phrase: "revenue growth" });
+    expect(results).toHaveLength(1);
+  });
+
+  it("respects caseSensitive option", () => {
+    const lines = [textLine("pH Level measurement", 10, 100, 200, 12)];
+    expect(searchTextLines(lines, { phrase: "pH", caseSensitive: true })).toHaveLength(1);
+    expect(searchTextLines(lines, { phrase: "ph", caseSensitive: true })).toHaveLength(0);
+    expect(searchTextLines(lines, { phrase: "PH", caseSensitive: true })).toHaveLength(0);
+  });
+
+  it("finds multiple occurrences across different lines", () => {
+    const lines = [
+      textLine("The defendant argued that", 10, 100, 300, 12),
+      textLine("the evidence was insufficient.", 10, 115, 300, 12),
+      textLine("The plaintiff argued that", 10, 145, 300, 12),
+      textLine("the evidence was sufficient.", 10, 160, 300, 12),
+    ];
+    const results = searchTextLines(lines, { phrase: "argued that" });
+    expect(results).toHaveLength(2);
+    expect(results[0].bbox.y).toBe(100);
+    expect(results[1].bbox.y).toBe(145);
+  });
+
+  it("preserves lineNumber on matched lines", () => {
+    const line1 = textLine("Section 1. Definitions.", 80, 100, 300, 12);
+    line1.lineNumber = 1;
+    const line2 = textLine("Section 2. Obligations.", 80, 115, 300, 12);
+    line2.lineNumber = 2;
+
+    const results = searchTextLines([line1, line2], { phrase: "Obligations" });
+    expect(results).toHaveLength(1);
+    expect(results[0].lineNumber).toBe(2);
   });
 });

@@ -1,4 +1,4 @@
-import { JsonTextItem, SearchItemsOptions } from "../core/types.js";
+import { JsonTextItem, SearchItemsOptions, TextLine } from "../core/types.js";
 
 /**
  * Search text items for matches, returning synthetic merged items for each match.
@@ -93,4 +93,77 @@ export function searchItems(items: JsonTextItem[], options: SearchItemsOptions):
   }
 
   return results;
+}
+
+/**
+ * Search text lines for a phrase, returning all lines that participate in the match.
+ *
+ * Handles phrases that span multiple consecutive lines by concatenating adjacent
+ * line texts with `"\n"` separators (matching the format of {@link ParsedPage.text}).
+ * Returns the individual {@link TextLine} entries so the consumer can highlight
+ * each line separately with its own bounding box.
+ *
+ * Requires {@link LiteParseConfig.textLineTracking} to be enabled during parsing.
+ *
+ * @example
+ * ```typescript
+ * import { LiteParse, searchTextLines } from "@llamaindex/liteparse";
+ *
+ * const parser = new LiteParse({ textLineTracking: true, outputFormat: "json" });
+ * const result = await parser.parse("contract.pdf");
+ *
+ * for (const page of result.pages) {
+ *   const matches = searchTextLines(page.textLines!, { phrase: "governing law" });
+ *   for (const line of matches) {
+ *     console.log(`Line "${line.text}" at (${line.bbox.x}, ${line.bbox.y})`);
+ *   }
+ * }
+ * ```
+ */
+export function searchTextLines(textLines: TextLine[], options: SearchItemsOptions): TextLine[] {
+  const caseSensitive = options.caseSensitive ?? false;
+  const normalize = caseSensitive ? (s: string) => s : (s: string) => s.toLowerCase();
+  const query = normalize(options.phrase);
+
+  const matchedIndices = new Set<number>();
+
+  let start = 0;
+  while (start < textLines.length) {
+    let combined = "";
+    let found = false;
+    for (let end = start; end < textLines.length; end++) {
+      if (end > start) combined += "\n";
+      combined += textLines[end].text;
+
+      if (normalize(combined).includes(query)) {
+        // Narrow from the left: drop leading lines that aren't part of the match
+        let narrowed = combined;
+        let s = start;
+        while (s < end) {
+          const without = narrowed.slice(textLines[s].text.length + 1); // +1 for "\n"
+          if (normalize(without).includes(query)) {
+            narrowed = without;
+            s++;
+          } else {
+            break;
+          }
+        }
+
+        for (let i = s; i <= end; i++) {
+          matchedIndices.add(i);
+        }
+        start = end + 1;
+        found = true;
+        break;
+      }
+
+      // Stop expanding if combined text is much longer than query
+      if (combined.length > query.length * 3) break;
+    }
+    if (!found) start++;
+  }
+
+  return Array.from(matchedIndices)
+    .sort((a, b) => a - b)
+    .map((i) => textLines[i]);
 }

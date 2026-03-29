@@ -211,3 +211,48 @@ describe("confidence field", () => {
     expect(item.confidence).toBe(1.0);
   });
 });
+
+describe("textLines in JSON output", () => {
+  it("includes textLines when present on page", () => {
+    const pageWithTextLines = {
+      ...mixedPage,
+      textLines: [
+        {
+          text: "Native text",
+          bbox: { x: 10, y: 20, w: 100, h: 15 },
+          pageNum: 1,
+        },
+        {
+          text: "OCR detected text",
+          bbox: { x: 10, y: 50, w: 150, h: 20 },
+          lineNumber: 5,
+          pageNum: 1,
+        },
+      ],
+    };
+    const result = buildJSON([pageWithTextLines]);
+    expect(result.pages[0].textLines).toBeDefined();
+    expect(result.pages[0].textLines!.length).toBe(2);
+    expect(result.pages[0].textLines![0]).toStrictEqual({
+      text: "Native text",
+      x: 10,
+      y: 20,
+      width: 100,
+      height: 15,
+      lineNumber: undefined,
+    });
+    expect(result.pages[0].textLines![1]).toStrictEqual({
+      text: "OCR detected text",
+      x: 10,
+      y: 50,
+      width: 150,
+      height: 20,
+      lineNumber: 5,
+    });
+  });
+
+  it("omits textLines when not present on page", () => {
+    const result = buildJSON([mixedPage]);
+    expect(result.pages[0].textLines).toBeUndefined();
+  });
+});

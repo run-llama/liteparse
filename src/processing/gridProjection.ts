@@ -1,7 +1,13 @@
 import { strToSubscriptString, strToPostScript } from "./textUtils.js";
 import { buildBbox } from "./bbox.js";
 import { cleanRawText } from "./cleanText.js";
-import { ProjectionTextBox, Coordinates, LiteParseConfig, ParsedPage } from "../core/types.js";
+import {
+  ProjectionTextBox,
+  Coordinates,
+  LiteParseConfig,
+  ParsedPage,
+  TextLine,
+} from "../core/types.js";
 import { PageData } from "../engines/pdf/interface.js";
 
 import { applyMarkupTags } from "./markupUtils.js";
@@ -1185,7 +1191,8 @@ function renderFlowingBlock(
   lines: ProjectionTextBox[][],
   block: LineRange,
   rawLines: string[],
-  medianWidth: number
+  medianWidth: number,
+  rawLineBoxes?: ProjectionTextBox[][]
 ): void {
   // Find the block's left margin
   let minX = Infinity;
@@ -1204,6 +1211,10 @@ function renderFlowingBlock(
     if (line.length === 0) continue;
 
     rawLines[lineIndex] = renderLineAsFlowingText(line, minX, medianWidth);
+    if (rawLineBoxes) {
+      if (!rawLineBoxes[lineIndex]) rawLineBoxes[lineIndex] = [];
+      rawLineBoxes[lineIndex].push(...line);
+    }
   }
 }
 
@@ -1234,7 +1245,8 @@ export function projectToGrid(
   projectionBoxes: ProjectionTextBox[],
   prevAnchors: PrevAnchors,
   totalPages: number
-): { text: string; prevAnchors: PrevAnchors } {
+): { text: string; prevAnchors: PrevAnchors; rawLineBoxes?: ProjectionTextBox[][] } {
+  const trackLines = config.textLineTracking;
   // detect '.' garbage in the lines
   let dotCount = 0;
   for (const bbox of projectionBoxes) {
@@ -1311,6 +1323,7 @@ export function projectToGrid(
   };
 
   const rawLines: string[] = [];
+  const rawLineBoxes: ProjectionTextBox[][] | undefined = trackLines ? [] : undefined;
   const rawLinesDelta = [];
 
   const blocks: LineRange[] = [];
@@ -1356,7 +1369,7 @@ export function projectToGrid(
         const sizes = getMedianTextBoxSize(blockLines.flat());
         medianWidth = sizes.width;
       }
-      renderFlowingBlock(lines, block, rawLines, medianWidth);
+      renderFlowingBlock(lines, block, rawLines, medianWidth, rawLineBoxes);
       continue;
     }
 
@@ -1495,6 +1508,10 @@ export function projectToGrid(
           rawLinesDelta[lineIndex] = 0;
         }
         rawLines[lineIndex] = renderLineAsFlowingText(line, blockMinX, medianWidth);
+        if (rawLineBoxes) {
+          if (!rawLineBoxes[lineIndex]) rawLineBoxes[lineIndex] = [];
+          rawLineBoxes[lineIndex].push(...line);
+        }
         flowingLines.add(lineIndex);
       }
 
@@ -1607,6 +1624,10 @@ export function projectToGrid(
           }
 
           rawLines[lineIndex] += bbox.str;
+          if (rawLineBoxes) {
+            if (!rawLineBoxes[lineIndex]) rawLineBoxes[lineIndex] = [];
+            rawLineBoxes[lineIndex].push(bbox);
+          }
 
           bbox.rendered = true;
           hasChanged = true;
@@ -1693,6 +1714,10 @@ export function projectToGrid(
             rawLines[lineIndex] += " ".repeat(targetX - rawLines[lineIndex].length);
           }
           rawLines[lineIndex] += currentLeftSnapBox.bbox.str;
+          if (rawLineBoxes) {
+            if (!rawLineBoxes[lineIndex]) rawLineBoxes[lineIndex] = [];
+            rawLineBoxes[lineIndex].push(currentLeftSnapBox.bbox);
+          }
           currentLeftSnapBox.bbox.rendered = true;
 
           let nextBbox: ProjectionTextBox | null = null;
@@ -1783,6 +1808,10 @@ export function projectToGrid(
             );
           }
           rawLines[lineIndex] += currentRightSnapBox.bbox.str;
+          if (rawLineBoxes) {
+            if (!rawLineBoxes[lineIndex]) rawLineBoxes[lineIndex] = [];
+            rawLineBoxes[lineIndex].push(currentRightSnapBox.bbox);
+          }
           currentRightSnapBox.bbox.rendered = true;
 
           let nextBbox: ProjectionTextBox | null = null;
@@ -1873,6 +1902,11 @@ export function projectToGrid(
             );
           }
           rawLines[currentCenterSnapBox.lineIndex] += currentCenterSnapBox.bbox.str;
+          if (rawLineBoxes) {
+            if (!rawLineBoxes[currentCenterSnapBox.lineIndex])
+              rawLineBoxes[currentCenterSnapBox.lineIndex] = [];
+            rawLineBoxes[currentCenterSnapBox.lineIndex].push(currentCenterSnapBox.bbox);
+          }
           currentCenterSnapBox.bbox.rendered = true;
         }
         snapMaps.center.shift();
@@ -1884,7 +1918,7 @@ export function projectToGrid(
 
   const text = rawLines.join("\n");
   // OSS: Return text instead of mutating page object
-  return {
+  const result: { text: string; prevAnchors: PrevAnchors; rawLineBoxes?: ProjectionTextBox[][] } = {
     text,
     prevAnchors: {
       forwardAnchorLeft: forwardAnchors.left,
@@ -1892,6 +1926,144 @@ export function projectToGrid(
       forwardAnchorCenter: forwardAnchors.center,
     },
   };
+  if (rawLineBoxes) {
+    result.rawLineBoxes = rawLineBoxes;
+  }
+  return result;
+}
+
+/**
+ * Compute the union bounding box of multiple ProjectionTextBox items.
+ * Uses pageBbox (original PDF coords) when available, falls back to x/y/w/h.
+ */
+function unionBbox(boxes: ProjectionTextBox[]): Coordinates {
+  let minX = Infinity,
+    minY = Infinity,
+    maxX = -Infinity,
+    maxY = -Infinity;
+  for (const box of boxes) {
+    const bx = box.pageBbox?.x ?? box.x;
+    const by = box.pageBbox?.y ?? box.y;
+    const bw = box.pageBbox?.w ?? box.w;
+    const bh = box.pageBbox?.h ?? box.h;
+    minX = Math.min(minX, bx);
+    minY = Math.min(minY, by);
+    maxX = Math.max(maxX, bx + bw);
+    maxY = Math.max(maxY, by + bh);
+  }
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+/**
+ * Build TextLine entries from raw line boxes and the cleaned page text.
+ * cleanRawText removes top/bottom empty lines and strips consistent left margin,
+ * but never reorders or merges lines — so we can map cleaned lines back to
+ * original rawLine indices via a simple offset.
+ */
+function buildTextLines(
+  rawText: string,
+  cleanedText: string,
+  rawLineBoxes: ProjectionTextBox[][],
+  pageNum: number,
+  pageWidth: number
+): TextLine[] {
+  const rawLines = rawText.split("\n");
+  const cleanedLines = cleanedText.split("\n");
+
+  // Find the top-margin offset: first non-empty raw line index
+  let topOffset = 0;
+  for (let i = 0; i < rawLines.length; i++) {
+    if (rawLines[i].trim().length > 0) {
+      topOffset = i;
+      break;
+    }
+  }
+
+  const textLines: TextLine[] = [];
+  for (let ci = 0; ci < cleanedLines.length; ci++) {
+    const lineText = cleanedLines[ci];
+    if (lineText.trim().length === 0) continue;
+
+    const rawIndex = topOffset + ci;
+    const boxes = rawLineBoxes[rawIndex];
+    if (!boxes || boxes.length === 0) continue;
+
+    textLines.push({
+      text: lineText,
+      bbox: unionBbox(boxes),
+      pageNum,
+    });
+  }
+
+  // Detect legal line numbers
+  detectLegalLineNumbers(textLines, rawLineBoxes, topOffset, cleanedLines.length, pageWidth);
+
+  return textLines;
+}
+
+/**
+ * Detect printed line numbers in the left margin of legal documents.
+ * Legal line numbers are sequential 1-3 digit numbers at a consistent
+ * x-position in the left margin (< 8% of page width).
+ */
+function detectLegalLineNumbers(
+  textLines: TextLine[],
+  rawLineBoxes: ProjectionTextBox[][],
+  topOffset: number,
+  cleanedLineCount: number,
+  pageWidth: number
+): void {
+  // Build a mapping from textLine index to rawLineBoxes index
+  const candidates: { textLineIdx: number; value: number; x: number }[] = [];
+  let textLineIdx = 0;
+
+  for (let ci = 0; ci < cleanedLineCount; ci++) {
+    const rawIndex = topOffset + ci;
+    const boxes = rawLineBoxes[rawIndex];
+    if (!boxes || boxes.length === 0) continue;
+
+    // This cleaned line produced a textLine entry; check its first box
+    if (textLineIdx >= textLines.length) break;
+
+    const first = boxes[0];
+    const trimmed = first.str.trim();
+    const firstX = first.pageBbox?.x ?? first.x;
+    const firstW = first.pageBbox?.w ?? first.w;
+
+    if (firstX < pageWidth * 0.08 && firstW < pageWidth * 0.05 && /^\d{1,3}$/.test(trimmed)) {
+      candidates.push({ textLineIdx, value: parseInt(trimmed), x: firstX });
+    }
+
+    textLineIdx++;
+  }
+
+  // Need enough candidates to confidently detect legal line numbers
+  if (candidates.length < 5) return;
+
+  // Check consistent x-position
+  const xPositions = candidates.map((c) => c.x).sort((a, b) => a - b);
+  const medianX = xPositions[Math.floor(xPositions.length / 2)];
+  const consistent = candidates.filter((c) => Math.abs(c.x - medianX) < 3);
+
+  if (consistent.length < 5) return;
+
+  // Check for sequential values (allowing small gaps for blank lines)
+  let sequential = 0;
+  for (let i = 1; i < consistent.length; i++) {
+    if (
+      consistent[i].value > consistent[i - 1].value &&
+      consistent[i].value - consistent[i - 1].value <= 3
+    ) {
+      sequential++;
+    }
+  }
+
+  if (sequential / (consistent.length - 1) < 0.7) return;
+
+  // Apply detected line numbers
+  for (const cand of consistent) {
+    textLines[cand.textLineIdx].lineNumber = cand.value;
+  }
 }
 
 export function projectPagesToGrid(pages: PageData[], config: LiteParseConfig): ParsedPage[] {
@@ -1902,19 +2074,19 @@ export function projectPagesToGrid(pages: PageData[], config: LiteParseConfig): 
   };
 
   const results: ParsedPage[] = [];
+  // Store raw text and rawLineBoxes per page index for post-clean textLine building
+  const pageRawData: { rawText: string; rawLineBoxes: ProjectionTextBox[][] }[] = [];
 
   for (const page of pages) {
     // Build projection boxes from text items
     const projectionBoxes = buildBbox(page, config);
 
     // Project to grid
-    const { text, prevAnchors: newAnchors } = projectToGrid(
-      config,
-      page,
-      projectionBoxes,
-      prevAnchors,
-      pages.length
-    );
+    const {
+      text,
+      prevAnchors: newAnchors,
+      rawLineBoxes,
+    } = projectToGrid(config, page, projectionBoxes, prevAnchors, pages.length);
 
     // Update forward anchors if preserving across pages
     if (config.preserveLayoutAlignmentAcrossPages) {
@@ -1929,6 +2101,9 @@ export function projectPagesToGrid(pages: PageData[], config: LiteParseConfig): 
       }
     }
 
+    // Store raw data for textLine building after cleaning
+    pageRawData.push({ rawText: text, rawLineBoxes: rawLineBoxes ?? [] });
+
     // Build result page
     results.push({
       pageNum: page.pageNum,
@@ -1942,6 +2117,21 @@ export function projectPagesToGrid(pages: PageData[], config: LiteParseConfig): 
 
   // Clean raw text (margin detection, etc)
   cleanRawText(results, config);
+
+  // Build textLines after cleaning so line text matches final output
+  if (config.textLineTracking) {
+    for (let i = 0; i < results.length; i++) {
+      const page = results[i];
+      const { rawText, rawLineBoxes } = pageRawData[i];
+      page.textLines = buildTextLines(
+        rawText,
+        page.text,
+        rawLineBoxes,
+        page.pageNum,
+        pages[i].width
+      );
+    }
+  }
 
   return results;
 }

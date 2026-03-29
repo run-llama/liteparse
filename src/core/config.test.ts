@@ -19,4 +19,7 @@ describe("test config", () => {
     expect(config.ocrServerUrl).toBe(user_config.ocrServerUrl);
     expect(config.dpi).toBe(user_config.dpi);
   });
+  it("defaults textLineTracking to false", () => {
+    expect(DEFAULT_CONFIG.textLineTracking).toBe(false);
+  });
 });

@@ -27,6 +27,7 @@ interface ParseCommandOptions {
   preciseBbox?: boolean;
   preserveSmallText?: boolean;
   password?: string;
+  textLineTracking?: boolean;
   config?: string;
   quiet?: boolean;
 }
@@ -81,6 +82,7 @@ program
   .option("--dpi <dpi>", "DPI for rendering", DEFAULT_DPI.toString())
   .option("--no-precise-bbox", "Disable precise bounding boxes")
   .option("--preserve-small-text", "Preserve very small text")
+  .option("--text-line-tracking", "Track text line bounding box coordinates")
   .option("--password <password>", "Password for encrypted/protected documents")
   .option("--config <file>", "Config file (JSON)")
   .option("-q, --quiet", "Suppress progress output")
@@ -125,6 +127,7 @@ program
         dpi: parseInt(options.dpi || DEFAULT_DPI.toString()),
         preciseBoundingBox: options.preciseBbox !== false,
         preserveVerySmallText: options.preserveSmallText || false,
+        textLineTracking: options.textLineTracking || false,
         password: options.password,
       };
 

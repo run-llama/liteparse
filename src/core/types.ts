@@ -136,6 +136,17 @@ export interface LiteParseConfig {
    * @defaultValue `undefined`
    */
   password?: string;
+
+  /**
+   * Track the mapping between reconstructed text lines and their original PDF
+   * bounding box coordinates. When enabled, each {@link ParsedPage} includes a
+   * `textLines` array where every entry carries the line text, the union bounding
+   * box of all source text items on that line, and an optional detected printed
+   * line number (for legal documents with numbered margins).
+   *
+   * @defaultValue `false`
+   */
+  textLineTracking: boolean;
 }
 
 /**
@@ -235,6 +246,39 @@ export interface Coordinates {
 }
 
 /**
+ * A reconstructed line of text with its original PDF bounding box coordinates.
+ * Produced when {@link LiteParseConfig.textLineTracking} is enabled.
+ */
+export interface TextLine {
+  /** The text content of this line (matches the corresponding line in {@link ParsedPage.text}). */
+  text: string;
+  /** Union bounding box of all source text items on this line, in PDF points. */
+  bbox: Coordinates;
+  /** Detected printed line number from the document margin (e.g., legal documents). */
+  lineNumber?: number;
+  /** 1-indexed page number this line belongs to. */
+  pageNum: number;
+}
+
+/**
+ * JSON representation of a {@link TextLine} for structured output.
+ */
+export interface JsonTextLine {
+  /** The text content of this line. */
+  text: string;
+  /** X coordinate of the bounding box top-left corner, in PDF points. */
+  x: number;
+  /** Y coordinate of the bounding box top-left corner, in PDF points. */
+  y: number;
+  /** Width of the bounding box in PDF points. */
+  width: number;
+  /** Height of the bounding box in PDF points. */
+  height: number;
+  /** Detected printed line number from the document margin. */
+  lineNumber?: number;
+}
+
+/**
  * Raw OCR detection result before conversion to {@link TextItem}.
  * @internal
  */
@@ -286,6 +330,11 @@ export interface ParsedPage {
    * Present when {@link LiteParseConfig.preciseBoundingBox} is enabled.
    */
   boundingBoxes?: BoundingBox[];
+  /**
+   * Reconstructed text lines with their original PDF bounding box coordinates.
+   * Present when {@link LiteParseConfig.textLineTracking} is enabled.
+   */
+  textLines?: TextLine[];
 }
 
 /**
@@ -345,6 +394,8 @@ export interface ParseResultJson {
      * @deprecated Use `textItems` coordinates instead. Will be removed in v2.0.
      */
     boundingBoxes: BoundingBox[];
+    /** Text lines with bounding boxes. Present when {@link LiteParseConfig.textLineTracking} is enabled. */
+    textLines?: JsonTextLine[];
   }>;
 }
 

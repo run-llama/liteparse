@@ -13,7 +13,7 @@
  * ```
  */
 export { LiteParse } from "./core/parser.js";
-export { searchItems } from "./processing/searchItems.js";
+export { searchItems, searchTextLines } from "./processing/searchItems.js";
 export type {
   LiteParseConfig,
   LiteParseInput,
@@ -27,4 +27,6 @@ export type {
   SearchItemsOptions,
   ScreenshotResult,
   MarkupData,
+  TextLine,
+  JsonTextLine,
 } from "./core/types.js";
