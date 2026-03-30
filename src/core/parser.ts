@@ -107,6 +107,7 @@ export class LiteParse {
     let cleanupPath: string | undefined;
     let parseError: unknown;
     let cleanupError: unknown;
+    let ocrUsed = false;
 
     const recordCleanupError = (error: unknown) => {
       if (cleanupError === undefined) {
@@ -183,6 +184,7 @@ export class LiteParse {
 
       // run BEFORE grid projection
       if (this.ocrEngine) {
+        ocrUsed = true;
         await this.runOCR(doc, pages, log);
       }
 
@@ -226,7 +228,7 @@ export class LiteParse {
         });
       }
 
-      if (this.ocrEngine && "terminate" in this.ocrEngine) {
+      if (ocrUsed && this.ocrEngine && "terminate" in this.ocrEngine) {
         await cleanupResource(async () => {
           await (this.ocrEngine as TesseractEngine).terminate();
         });

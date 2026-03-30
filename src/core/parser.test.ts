@@ -559,6 +559,7 @@ describe("Parse tests", () => {
     expect(result.json).toBeUndefined();
     expect(result.text).toBe(mockParsedPages.map((p) => p.text).join("\n\n"));
     expect(result.pages).toStrictEqual(mockParsedPagesWithBoundingBoxesOcr);
+    expect(mockTesseractTerminate).toHaveBeenCalled();
   });
 
   it("test parse with OCR (tesseract) and json format", async () => {
@@ -657,13 +658,13 @@ describe("Parse tests", () => {
     expect(mockPdfClose).toHaveBeenCalledWith(mockPdfDocument);
   });
 
-  it("terminates the OCR engine when parse fails after OCR is enabled", async () => {
+  it("does not terminate the OCR engine when parse fails before OCR starts", async () => {
     mockPdfExtractAllPages.mockRejectedValueOnce(new Error("extract failed"));
 
     const liteparse = new LiteParse({ ocrEnabled: true, outputFormat: "text" });
 
     await expect(liteparse.parse("/tmp/test.docx")).rejects.toThrow("extract failed");
-    expect(mockTesseractTerminate).toHaveBeenCalled();
+    expect(mockTesseractTerminate).not.toHaveBeenCalled();
     expect(mockCleanupConversionFiles).toHaveBeenCalledWith("/tmp/converted.pdf");
   });
 });
