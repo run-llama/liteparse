@@ -34,6 +34,20 @@ for (const page of result.pages) {
 }
 ```
 
+### Reading-order text
+
+The `ordered` format groups nearby text into content blobs and sorts them in reading order, producing clean flowing text without spatial whitespace:
+
+```typescript
+const parser = new LiteParse({ outputFormat: "ordered" });
+const result = await parser.parse("document.pdf");
+
+// Clean text without column padding or whitespace formatting
+console.log(result.text);
+```
+
+This will save tokens in LLM applications, at the risk of losing some layout cues in the overall text structure.
+
 ### JSON output with bounding boxes
 
 ```typescript

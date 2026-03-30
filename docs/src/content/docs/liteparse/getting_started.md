@@ -34,6 +34,9 @@ lit parse document.pdf -o output.txt
 # Get structured JSON with bounding boxes
 lit parse document.pdf --format json -o output.json
 
+# Reading-order text
+lit parse document.pdf --format ordered
+
 # Parse only specific pages
 lit parse document.pdf --target-pages "1-5,10,15-20"
 ```

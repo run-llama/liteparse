@@ -28,7 +28,7 @@ hard stuff so your models see clean, structured data and markdown.
   - **HTTP Servers**: Plug in any OCR server (EasyOCR, PaddleOCR, custom)
   - **Standard API**: Simple, well-defined OCR API specification
 - **Screenshot Generation**: Generate high-quality page screenshots for LLM agents
-- **Multiple Output Formats**: JSON and Text
+- **Multiple Output Formats**: JSON, Text, and Ordered (reading-order text for LLMs)
 - **Bounding Boxes**: Precise text positioning information
 - **Standalone Binary**: No cloud dependencies, runs entirely locally
 - **Multi-platform**: Linux, macOS (Intel/ARM), Windows
@@ -90,7 +90,10 @@ Or copy-pasting the [`SKILL.md`](https://github.com/run-llama/llamaparse-agent-s
 lit parse document.pdf
 
 # Parse with specific format
-lit parse document.pdf --format json -o output.md
+lit parse document.pdf --format json -o output.json
+
+# Parse in flattened reading order
+lit parse document.pdf --format ordered
 
 # Parse specific pages
 lit parse document.pdf --target-pages "1-5,10,15-20"
@@ -184,7 +187,7 @@ Parse a document file (PDF, DOCX, XLSX, PPTX, images, etc.)
 
 Options:
   -o, --output <file>     Output file path
-  --format <format>       Output format: json|text (default: "text")
+  --format <format>       Output format: json|text|ordered (default: "text")
   --ocr-server-url <url>  HTTP OCR server URL (uses Tesseract if not provided)
   --no-ocr                Disable OCR
   --ocr-language <lang>   OCR language(s) (default: "en")
@@ -209,7 +212,7 @@ Usage: lit batch-parse [options] <input-dir> <output-dir>
 Parse multiple documents in batch mode (reuses PDF engine for efficiency)
 
 Options:
-  --format <format>       Output format: json|text (default: "text")
+  --format <format>       Output format: json|text|ordered (default: "text")
   --ocr-server-url <url>  HTTP OCR server URL (uses Tesseract if not provided)
   --no-ocr                Disable OCR
   --ocr-language <lang>   OCR language(s) (default: "en")

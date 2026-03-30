@@ -26,7 +26,7 @@ lit parse [options] <file>
 | Option | Description | Default |
 |--------|-------------|---------|
 | `-o, --output <file>` | Write output to a file instead of stdout | — |
-| `--format <format>` | Output format: `json` or `text` | `text` |
+| `--format <format>` | Output format: `json`, `text`, or `ordered` | `text` |
 | `--ocr-server-url <url>` | HTTP OCR server URL | — (uses Tesseract) |
 | `--no-ocr` | Disable OCR entirely | — |
 | `--ocr-language <lang>` | OCR language code | `en` |
@@ -40,11 +40,20 @@ lit parse [options] <file>
 | `--config <file>` | JSON config file path | — |
 | `-q, --quiet` | Suppress progress output | — |
 
+#### Output formats
+
+- **`text`** (default) — Plain text with spatial layout preserved. Whitespace is used to represent column alignment, indentation, and other formatting.
+- **`json`** — Structured JSON with per-page text items, bounding boxes, and metadata. Best for programmatic access to text positions.
+- **`ordered`** — Plain text with content grouped into blobs and sorted in reading order (top-to-bottom, left-to-right). Produces clean flowing text without spatial whitespace. Best for feeding text to LLMs or search indexes.
+
 ### Examples
 
 ```bash
-# Basic text parsing
+# Basic text parsing with spatial layout
 lit parse report.pdf
+
+# Reading-order text output
+lit parse report.pdf --format ordered
 
 # JSON output with bounding boxes
 lit parse report.pdf --format json -o report.json
@@ -86,7 +95,7 @@ lit batch-parse [options] <input-dir> <output-dir>
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--format <format>` | Output format: `json` or `text` | `text` |
+| `--format <format>` | Output format: `json`, `text`, or `ordered` | `text` |
 | `--ocr-server-url <url>` | HTTP OCR server URL | — (uses Tesseract) |
 | `--no-ocr` | Disable OCR entirely | — |
 | `--ocr-language <lang>` | OCR language code | `en` |
