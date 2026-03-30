@@ -3,8 +3,11 @@
  *
  * - `"json"` — Structured JSON with per-page text items, bounding boxes, and metadata.
  * - `"text"` — Plain text with spatial layout preserved.
+ * - `"ordered"` — Plain text with content blobs sorted in reading order (top-to-bottom,
+ *   left-to-right). Produces clean flowing text without spatial formatting. Best for
+ *   feeding text to LLMs or search indexes.
  */
-export type OutputFormat = "json" | "text";
+export type OutputFormat = "json" | "text" | "ordered";
 
 /**
  * Accepted input types for {@link LiteParse.parse} and {@link LiteParse.screenshot}.

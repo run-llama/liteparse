@@ -68,7 +68,7 @@ program
   .command("parse <file>")
   .description("Parse a document file (PDF, DOCX, XLSX, PPTX, images, etc.)")
   .option("-o, --output <file>", "Output file path")
-  .option("--format <format>", "Output format: json|text", DEFAULT_OUTPUT_FORMAT)
+  .option("--format <format>", "Output format: json|text|ordered", DEFAULT_OUTPUT_FORMAT)
   .option("--ocr-server-url <url>", "HTTP OCR server URL (uses Tesseract if not provided)")
   .option("--no-ocr", "Disable OCR")
   .option("--ocr-language <lang>", "OCR language(s)", DEFAULT_LANGUAGE)
@@ -157,6 +157,7 @@ program
           output = JSON.stringify(result.json, null, 2);
           break;
         case "text":
+        case "ordered":
         default:
           output = result.text;
           break;
@@ -310,7 +311,7 @@ const SUPPORTED_EXTENSIONS = new Set([
 program
   .command("batch-parse <input-dir> <output-dir>")
   .description("Parse multiple documents in batch mode")
-  .option("--format <format>", "Output format: json|text", DEFAULT_OUTPUT_FORMAT)
+  .option("--format <format>", "Output format: json|text|ordered", DEFAULT_OUTPUT_FORMAT)
   .option("--ocr-server-url <url>", "HTTP OCR server URL (uses Tesseract if not provided)")
   .option("--no-ocr", "Disable OCR")
   .option("--ocr-language <lang>", "OCR language(s)", DEFAULT_LANGUAGE)

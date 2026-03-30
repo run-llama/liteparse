@@ -14,6 +14,7 @@ import { OcrEngine } from "../engines/ocr/interface.js";
 import { TesseractEngine } from "../engines/ocr/tesseract.js";
 import { HttpOcrEngine } from "../engines/ocr/http-simple.js";
 import { projectPagesToGrid } from "../processing/grid.js";
+import { projectPagesOrdered } from "../processing/orderedProjection.js";
 import { buildBoundingBoxes } from "../processing/bbox.js";
 import { formatJSON } from "../output/json.js";
 import {
@@ -170,8 +171,11 @@ export class LiteParse {
         await this.runOCR(doc, pages, log);
       }
 
-      // Process pages with complete grid projection (after OCR)
-      const processedPages = projectPagesToGrid(pages, this.config);
+      // Process pages: ordered mode uses flood-fill grouping, others use grid projection
+      const processedPages =
+        this.config.outputFormat === "ordered"
+          ? projectPagesOrdered(pages, this.config)
+          : projectPagesToGrid(pages, this.config);
 
       // Build bounding boxes if enabled
       if (this.config.preciseBoundingBox) {
@@ -194,6 +198,7 @@ export class LiteParse {
           result.json = JSON.parse(formatJSON(result));
           break;
         case "text":
+        case "ordered":
           // Already in text format
           break;
       }
