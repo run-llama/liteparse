@@ -288,6 +288,22 @@ describe("test convertBufferToPdf", () => {
       force: true,
     });
   });
+
+  it("does not mask passthrough content when temp cleanup fails", async () => {
+    const zipBytes = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+
+    const { convertBufferToPdf } = await import("./convertToPdf");
+    const fsModule = await import("fs");
+    vi.mocked(fsModule.promises.rm).mockImplementationOnce(async () => {
+      throw new Error("cleanup failed");
+    });
+
+    const result = await convertBufferToPdf(zipBytes);
+
+    expect(result).toStrictEqual({
+      content: "hello world",
+    });
+  });
 });
 
 describe("test guessExtensionFromBuffer", () => {
