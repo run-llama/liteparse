@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "liteparse-pypdf-compatible"
+version = "0.1.0"
+description = "Drop-in pypdf replacement powered by LiteParse for higher quality text extraction"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Logan Markewich", email = "logan@runllama.ai" },
+]
+keywords = ["pdf", "parsing", "pypdf", "drop-in", "text-extraction", "liteparse"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Text Processing",
+    "Typing :: Typed",
+]
+dependencies = [
+    "liteparse>=1.0.0",
+    "pypdf>=3.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/run-llama/liteparse"
+Repository = "https://github.com/run-llama/liteparse"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "mypy>=1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["liteparse_pypdf"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
