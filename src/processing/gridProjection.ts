@@ -910,8 +910,7 @@ export function bboxToLine(
   for (const bbox of textBbox) {
     if (!previousBbox) {
       currentLine.push(bbox);
-    }
-    else {
+    } else {
       const lineMinY = Math.min(...currentLine.map((v) => v.y));
       const lineMaxY = Math.max(...currentLine.map((v) => v.y + v.h));
 
@@ -947,9 +946,7 @@ export function bboxToLine(
       //
       // Primary: item's Y must be close to existing items' Y positions
       const TIGHT_Y_TOLERANCE = Math.max(medianHeight * 0.3, 2.0);
-      const yCloseToLineItems = currentLine.some(
-        (v) => Math.abs(bbox.y - v.y) < TIGHT_Y_TOLERANCE
-      );
+      const yCloseToLineItems = currentLine.some((v) => Math.abs(bbox.y - v.y) < TIGHT_Y_TOLERANCE);
 
       // Fallback for subscripts/superscripts: allow larger Y offset but only
       // if the item is X-adjacent to an existing item on the line (within
@@ -960,8 +957,7 @@ export function bboxToLine(
         bbox.y + bbox.h * 0.5 >= lineMinY &&
         bbox.y + bbox.h * 0.5 <= lineMaxY &&
         currentLine.some((v) => {
-          const xGap =
-            Math.max(bbox.x, v.x) - Math.min(bbox.x + bbox.w, v.x + v.w);
+          const xGap = Math.max(bbox.x, v.x) - Math.min(bbox.x + bbox.w, v.x + v.w);
           return xGap < medianWidth * 3;
         });
 
@@ -1895,7 +1891,10 @@ export function projectToGrid(
               }
             }
             // Cap left forward anchor used in right-snap lineMax calculation
-            lastSnapLeft = Math.min(lastSnapLeft, Math.round(v.bbox.x / medianWidth) + MAX_FORWARD_ANCHOR_EXCESS);
+            lastSnapLeft = Math.min(
+              lastSnapLeft,
+              Math.round(v.bbox.x / medianWidth) + MAX_FORWARD_ANCHOR_EXCESS
+            );
             return (
               Math.max(
                 lastSnapLeft,
