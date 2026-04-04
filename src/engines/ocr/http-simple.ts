@@ -75,11 +75,6 @@ export class HttpOcrEngine implements OcrEngine {
   }
 
   async recognizeBatch(images: (string | Buffer)[], options: OcrOptions): Promise<OcrResult[][]> {
-    const results: OcrResult[][] = [];
-    for (const image of images) {
-      const result = await this.recognize(image, options);
-      results.push(result);
-    }
-    return results;
+    return Promise.all(images.map((image) => this.recognize(image, options)));
   }
 }
