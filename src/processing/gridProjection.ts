@@ -10,6 +10,9 @@ import { applyMarkupTags } from "./markupUtils.js";
 const FLOATING_SPACES = 2;
 // Minimum spaces between snapped columns
 const COLUMN_SPACES = 4;
+// Maximum characters a forward anchor can push a target beyond its proportional pixel position.
+// Prevents header text (which tends to be wider) from inflating data column spacing.
+const MAX_FORWARD_ANCHOR_EXCESS = 6;
 
 // --- Flowing text detection thresholds ---
 // Max total anchors (left+right+center) before block is considered structured
@@ -783,6 +786,7 @@ export function bboxToLine(
     const midpoint = pageWidth * 0.5;
     const marginZoneLeft = midpoint - 5;
     const marginZoneRight = midpoint + 20;
+    const marginCandidates: ProjectionTextBox[] = [];
     for (const bbox of textBbox) {
       const bboxCenter = bbox.x + bbox.w / 2;
       // Check if item is in the margin zone and looks like a line number
@@ -792,19 +796,56 @@ export function bboxToLine(
         bbox.str.trim().match(/^\d{1,2}[O]?$/) && // 1-2 digits, possibly with O (OCR error for 0)
         bbox.w < 15 // Line numbers are narrow
       ) {
-        // Mark as margin item - will be placed on its own line
-        bbox.isMarginLineNumber = true;
+        marginCandidates.push(bbox);
+      }
+    }
+    // Only flag candidates that are isolated on their visual line.
+    // If a candidate shares a Y-row with multiple other non-candidate items,
+    // it's likely table data (e.g., a number in a column near the page center),
+    // not a margin line number.
+    for (const candidate of marginCandidates) {
+      const sameRowItems = textBbox.filter(
+        (b) =>
+          b !== candidate &&
+          Math.abs(b.y - candidate.y) < Y_SORT_TOLERANCE &&
+          !marginCandidates.includes(b)
+      );
+      // Margin line numbers typically appear between two columns of text,
+      // so there should be very few other items on the same row.
+      if (sameRowItems.length <= 2) {
+        candidate.isMarginLineNumber = true;
       }
     }
   }
 
-  // sort lines on first y axis then x axis (top - left)
-  // Use Y tolerance so items on same visual line sort by x regardless of tiny y differences
-  textBbox.sort((a, b) => {
-    if (Math.abs(a.y - b.y) < Y_SORT_TOLERANCE) {
-      return a.x - b.x;
+  // Sort items top-to-bottom, left-to-right using transitive Y-clustering.
+  // A naive tolerance-based sort (sort by x when |a.y - b.y| < tolerance) is
+  // non-transitive and can interleave items from different visual rows when
+  // row spacing is close to the tolerance threshold.
+  //
+  // Instead, we:
+  // 1. Sort by Y only
+  // 2. Sweep through to assign Y-cluster IDs (items within tolerance of
+  //    the cluster's min Y belong to the same cluster)
+  // 3. Sort by (cluster ID, x) — this is fully transitive
+  const ySorted = [...textBbox].sort((a, b) => a.y - b.y);
+
+  let clusterId = 0;
+  let clusterMinY = ySorted.length > 0 ? ySorted[0].y : 0;
+  const clusterIds = new WeakMap<ProjectionTextBox, number>();
+  for (const item of ySorted) {
+    if (item.y - clusterMinY >= Y_SORT_TOLERANCE) {
+      clusterId++;
+      clusterMinY = item.y;
     }
-    return a.y - b.y;
+    clusterIds.set(item, clusterId);
+  }
+
+  textBbox.sort((a, b) => {
+    const ca = clusterIds.get(a)!;
+    const cb = clusterIds.get(b)!;
+    if (ca !== cb) return ca - cb;
+    return a.x - b.x;
   });
 
   function canMergeMarkup(previousBbox: ProjectionTextBox, bbox: ProjectionTextBox): boolean {
@@ -869,9 +910,7 @@ export function bboxToLine(
   for (const bbox of textBbox) {
     if (!previousBbox) {
       currentLine.push(bbox);
-    }
-    // This is where we define how line are build. to be improved
-    else {
+    } else {
       const lineMinY = Math.min(...currentLine.map((v) => v.y));
       const lineMaxY = Math.max(...currentLine.map((v) => v.y + v.h));
 
@@ -900,12 +939,32 @@ export function bboxToLine(
       const yTolerance = bbox.rotated ? Math.max(medianHeight * 2, 20) : 0;
       const yWithinTolerance = bbox.rotated && Math.abs(bbox.y - lineMinY) < yTolerance;
 
+      // Y-proximity check using item positions (not expanding bbox ranges).
+      // The old approach used lineMinY/lineMaxY (including full item heights),
+      // which caused items on adjacent visual lines to be merged when their
+      // bounding boxes overlapped in Y (e.g., 8pt text with ~5pt line gap).
+      //
+      // Primary: item's Y must be close to existing items' Y positions
+      const TIGHT_Y_TOLERANCE = Math.max(medianHeight * 0.3, 2.0);
+      const yCloseToLineItems = currentLine.some((v) => Math.abs(bbox.y - v.y) < TIGHT_Y_TOLERANCE);
+
+      // Fallback for subscripts/superscripts: allow larger Y offset but only
+      // if the item is X-adjacent to an existing item on the line (within
+      // a few character widths). This prevents far-away items on adjacent
+      // visual lines from being absorbed.
+      const yBboxOverlapAndXAdjacent =
+        !yCloseToLineItems &&
+        bbox.y + bbox.h * 0.5 >= lineMinY &&
+        bbox.y + bbox.h * 0.5 <= lineMaxY &&
+        currentLine.some((v) => {
+          const xGap = Math.max(bbox.x, v.x) - Math.min(bbox.x + bbox.w, v.x + v.w);
+          return xGap < medianWidth * 3;
+        });
+
       if (
         !lineCollide &&
         !marginMismatch &&
-        (yWithinTolerance ||
-          (bbox.y + bbox.h * 0.5 >= lineMinY && bbox.y + bbox.h * 0.5 <= lineMaxY) ||
-          (bbox.y >= lineMinY && bbox.y <= lineMaxY))
+        (yWithinTolerance || yCloseToLineItems || yBboxOverlapAndXAdjacent)
       ) {
         currentLine.push(bbox);
       } else {
@@ -1009,39 +1068,66 @@ export function bboxToLine(
     }
   }
 
+  // Merge standalone sign characters (+/-) with their following number.
+  // In financial tables, PDF often splits "+  2,629" into separate items: "+" and "2,629".
+  // If left separate, they snap to different anchor columns, inflating the gap.
+  const signPattern = /^[+\-−]$/;
+  for (const line of lines) {
+    for (let i = 0; i < line.length - 1; i++) {
+      const signItem = line[i];
+      const numItem = line[i + 1];
+      if (
+        signPattern.test(signItem.str.trim()) &&
+        numericPattern.test(numItem.str.trim()) &&
+        numItem.x - (signItem.x + signItem.w) < medianWidth * 20
+      ) {
+        // Merge: extend sign item to cover both, combine strings with space
+        const gap = numItem.x - (signItem.x + signItem.w);
+        const spaces = gap > mergeThreshold ? " " : "";
+        signItem.str = signItem.str + spaces + numItem.str;
+        signItem.w = numItem.x + numItem.w - signItem.x;
+        signItem.strLength = signItem.str.length;
+        signItem.pageBbox = mergePageBbox(signItem, numItem);
+        line.splice(i + 1, 1);
+        // Don't decrement i — check if the merged item can further merge
+      }
+    }
+  }
+
   // check if we can merge the lines together
+  // Only merge lines whose item Y positions are actually close (same visual row),
+  // not just lines whose full bbox Y ranges happen to overlap due to font height.
+  const MERGE_Y_TOLERANCE = Math.max(medianHeight * 0.3, 2.0);
   for (let i = 1; i < lines.length - 1; i++) {
     const currentLine = lines[i];
     const previousLine = lines[i - 1];
 
-    const previousLineMinY = Math.min(...previousLine.map((v) => v.y));
-    const previousLineMaxY = Math.max(...previousLine.map((v) => v.y + v.h));
-    const currentLineMinY = Math.min(...currentLine.map((v) => v.y));
-    const currentLineMaxY = Math.max(...currentLine.map((v) => v.y + v.h));
+    // Check if the lines' item Y positions are close enough to be the same visual row
+    const yClose = currentLine.some((cItem) =>
+      previousLine.some((pItem) => Math.abs(cItem.y - pItem.y) < MERGE_Y_TOLERANCE)
+    );
+    if (!yClose) continue;
 
-    // does the 2 line overlap?
-    if (previousLineMaxY > currentLineMinY && previousLineMinY < currentLineMaxY) {
-      // check the bboxes of current line and prevline do not overlap
-      let bboxOverlap = false;
-      for (const bbox of currentLine) {
-        for (const prevBbox of previousLine) {
-          if (bbox.x >= prevBbox.x && bbox.x <= prevBbox.x + prevBbox.w) {
-            bboxOverlap = true;
-            break;
-          }
-          if (prevBbox.x >= bbox.x && prevBbox.x <= bbox.x + bbox.w) {
-            bboxOverlap = true;
-            break;
-          }
+    // check the bboxes of current line and prevline do not overlap in X
+    let bboxOverlap = false;
+    for (const bbox of currentLine) {
+      for (const prevBbox of previousLine) {
+        if (bbox.x >= prevBbox.x && bbox.x <= prevBbox.x + prevBbox.w) {
+          bboxOverlap = true;
+          break;
+        }
+        if (prevBbox.x >= bbox.x && prevBbox.x <= bbox.x + bbox.w) {
+          bboxOverlap = true;
+          break;
         }
       }
+    }
 
-      // merge if no overlap
-      if (!bboxOverlap) {
-        previousLine.push(...currentLine);
-        previousLine.sort((a, b) => a.x - b.x);
-        lines.splice(i--, 1);
-      }
+    // merge if no overlap
+    if (!bboxOverlap) {
+      previousLine.push(...currentLine);
+      previousLine.sort((a, b) => a.x - b.x);
+      lines.splice(i--, 1);
     }
   }
 
@@ -1617,7 +1703,8 @@ export function projectToGrid(
             break;
           }
 
-          let targetX = Math.min(Math.round(bbox.x / medianWidth), COLUMN_SPACES);
+          const propTarget = Math.round(bbox.x / medianWidth);
+          let targetX = propTarget;
 
           let lastSnapLeft = 0;
           for (const key in forwardAnchors.left) {
@@ -1626,6 +1713,8 @@ export function projectToGrid(
               lastSnapLeft = Math.max(lastSnapLeft, forwardAnchors.left[key]);
             }
           }
+          // Cap forward anchor to prevent header inflation
+          lastSnapLeft = Math.min(lastSnapLeft, propTarget + MAX_FORWARD_ANCHOR_EXCESS);
           const lineMax = Math.max(
             lastSnapLeft,
             rawLines[lineIndex].trimEnd().length + (bbox.shouldSpace ?? 0)
@@ -1694,7 +1783,8 @@ export function projectToGrid(
           continue;
         }
 
-        let targetX = Math.min(Math.round(snapMaps.left[0] / medianWidth), COLUMN_SPACES);
+        const propTarget = Math.round(snapMaps.left[0] / medianWidth);
+        let targetX = propTarget;
         const lineMax = Math.max(
           ...thisTurnSnap.map((v) => {
             let spaceEnd = 0;
@@ -1721,13 +1811,19 @@ export function projectToGrid(
           forwardAnchors.left[snapMaps.left[0]] &&
           targetX < forwardAnchors.left[snapMaps.left[0]]
         ) {
-          targetX = forwardAnchors.left[snapMaps.left[0]];
+          targetX = Math.min(
+            forwardAnchors.left[snapMaps.left[0]],
+            Math.max(targetX, propTarget + MAX_FORWARD_ANCHOR_EXCESS)
+          );
         }
         if (
           prevAnchors.forwardAnchorLeft[snapMaps.left[0]] &&
           targetX < prevAnchors.forwardAnchorLeft[snapMaps.left[0]]
         ) {
-          targetX = prevAnchors.forwardAnchorLeft[snapMaps.left[0]];
+          targetX = Math.min(
+            prevAnchors.forwardAnchorLeft[snapMaps.left[0]],
+            Math.max(targetX, propTarget + MAX_FORWARD_ANCHOR_EXCESS)
+          );
         }
 
         forwardAnchors.left[snapMaps.left[0]] = targetX;
@@ -1784,7 +1880,8 @@ export function projectToGrid(
           continue;
         }
 
-        let targetX = Math.min(Math.round(snapMaps.right[0] / medianWidth), COLUMN_SPACES);
+        const propTarget = Math.round(snapMaps.right[0] / medianWidth);
+        let targetX = propTarget;
         const lineMax = Math.max(
           ...thisTurnSnap.map((v) => {
             let lastSnapLeft = 0;
@@ -1793,6 +1890,11 @@ export function projectToGrid(
                 lastSnapLeft = Math.max(lastSnapLeft, forwardAnchors.left[key]);
               }
             }
+            // Cap left forward anchor used in right-snap lineMax calculation
+            lastSnapLeft = Math.min(
+              lastSnapLeft,
+              Math.round(v.bbox.x / medianWidth) + MAX_FORWARD_ANCHOR_EXCESS
+            );
             return (
               Math.max(
                 lastSnapLeft,
@@ -1809,13 +1911,19 @@ export function projectToGrid(
           forwardAnchors.right[snapMaps.right[0]] &&
           targetX < forwardAnchors.right[snapMaps.right[0]]
         ) {
-          targetX = forwardAnchors.right[snapMaps.right[0]];
+          targetX = Math.min(
+            forwardAnchors.right[snapMaps.right[0]],
+            Math.max(targetX, propTarget + MAX_FORWARD_ANCHOR_EXCESS)
+          );
         }
         if (
           prevAnchors.forwardAnchorRight[snapMaps.right[0]] &&
           targetX < prevAnchors.forwardAnchorRight[snapMaps.right[0]]
         ) {
-          targetX = prevAnchors.forwardAnchorRight[snapMaps.right[0]];
+          targetX = Math.min(
+            prevAnchors.forwardAnchorRight[snapMaps.right[0]],
+            Math.max(targetX, propTarget + MAX_FORWARD_ANCHOR_EXCESS)
+          );
         }
         forwardAnchors.right[snapMaps.right[0]] = targetX;
 
@@ -1871,7 +1979,8 @@ export function projectToGrid(
           snapMaps.center.shift();
           continue;
         }
-        let targetX = Math.min(Math.round(snapMaps.center[0] / medianWidth), COLUMN_SPACES);
+        const propTarget = Math.round(snapMaps.center[0] / medianWidth);
+        let targetX = propTarget;
         const lineMax = Math.max(
           ...thisTurnSnap.map((v) => {
             let spaceEnd = 0;
@@ -1896,13 +2005,19 @@ export function projectToGrid(
           forwardAnchors.center[snapMaps.center[0]] &&
           targetX < forwardAnchors.center[snapMaps.center[0]]
         ) {
-          targetX = forwardAnchors.center[snapMaps.center[0]];
+          targetX = Math.min(
+            forwardAnchors.center[snapMaps.center[0]],
+            Math.max(targetX, propTarget + MAX_FORWARD_ANCHOR_EXCESS)
+          );
         }
         if (
           prevAnchors.forwardAnchorCenter[snapMaps.center[0]] &&
           targetX < prevAnchors.forwardAnchorCenter[snapMaps.center[0]]
         ) {
-          targetX = prevAnchors.forwardAnchorCenter[snapMaps.center[0]];
+          targetX = Math.min(
+            prevAnchors.forwardAnchorCenter[snapMaps.center[0]],
+            Math.max(targetX, propTarget + MAX_FORWARD_ANCHOR_EXCESS)
+          );
         }
         forwardAnchors.center[snapMaps.center[0]] = targetX;
         for (const currentCenterSnapBox of thisTurnSnap) {

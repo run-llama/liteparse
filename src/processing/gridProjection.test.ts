@@ -301,14 +301,14 @@ describe("test projectToGrid", () => {
     const prevAnchors = {
       forwardAnchorLeft: {
         "10": 1,
-        "300": 11,
+        "300": 30,
       },
       forwardAnchorRight: {},
       forwardAnchorCenter: {},
     };
     const totalPages = 1;
     const expectedOutput = {
-      text: " Name      Age\n Alice     30",
+      text: " Name                         Age\n Alice                        30",
       prevAnchors: prevAnchors,
     };
     const result = projectToGrid(config, page, projectionBoxes, prevAnchors, totalPages);
@@ -332,7 +332,7 @@ describe("test projectToGrid", () => {
     const prevAnchors = { forwardAnchorLeft: {}, forwardAnchorRight: {}, forwardAnchorCenter: {} };
     const totalPages = 1;
     const expectedOutput = {
-      text: " Revenue    500",
+      text: " Revenue                      500",
       prevAnchors: prevAnchors,
     };
     const result = projectToGrid(config, page, projectionBoxes, prevAnchors, totalPages);
