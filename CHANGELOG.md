@@ -1,5 +1,11 @@
 # @llamaindex/liteparse
 
+## 1.4.6
+
+### Patch Changes
+
+- [#120](https://github.com/run-llama/liteparse/pull/120) [`9cde441`](https://github.com/run-llama/liteparse/commit/9cde441b106b9dbee055b228bf011c197126bef5) Thanks [@apprakash](https://github.com/apprakash)! - fix(gridProjection): merge sub-pixel overlapping text runs in canMerge
+
 ## 1.4.5
 
 ### Patch Changes

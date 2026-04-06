@@ -1,6 +1,6 @@
 {
   "name": "@llamaindex/liteparse",
-  "version": "1.4.5",
+  "version": "1.4.6",
   "description": "Open-source PDF parsing with spatial text extraction and OCR processing",
   "type": "module",
   "main": "./dist/src/lib.js",
