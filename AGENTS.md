@@ -27,6 +27,9 @@ liteparse/
 │   ├── vendor/         # Bundled dependencies (PDF.js)
 │   ├── index.ts        # CLI entry point
 │   └── lib.ts          # Library public API
+├── packages/
+│   ├── python/          # Python wrapper package (liteparse)
+│   └── pypdf-compatible/ # pypdf drop-in replacement (liteparse-pypdf-compatible)
 ├── cli/                # CLI implementation
 ├── ocr/                # Example OCR server implementations
 │   ├── easyocr/        # EasyOCR wrapper server
@@ -117,6 +120,8 @@ Currently tested via manual verification with sample documents. The project woul
 - **CLI**: `src/index.ts` → `cli/parse.ts`
 - **Library**: `src/lib.ts` exports `LiteParse` class and types
 - **Main Class**: `src/core/parser.ts` contains `LiteParse` orchestrator
+- **Python Package**: `packages/python/` — CLI wrapper (`pip install liteparse`)
+- **pypdf Drop-in**: `packages/pypdf-compatible/` — pypdf-compatible wrapper (`pip install liteparse-pypdf-compatible`)
 
 ## Related Documentation
 
