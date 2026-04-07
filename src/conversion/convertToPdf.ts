@@ -510,5 +510,15 @@ export async function convertBufferToPdf(
   const tmpPath = path.join(tmpDir, `input${ext || ".bin"}`);
   await fs.writeFile(tmpPath, data);
 
-  return convertToPdf(tmpPath, password);
+  const result = await convertToPdf(tmpPath, password);
+
+  if ("content" in result || "code" in result) {
+    try {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    } catch {
+      // Best-effort cleanup: preserve the original passthrough/error result.
+    }
+  }
+
+  return result;
 }
