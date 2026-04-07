@@ -4,6 +4,8 @@
  * - `"json"` — Structured JSON with per-page text items, bounding boxes, and metadata.
  * - `"text"` — Plain text with spatial layout preserved.
  */
+import type { GridDebugConfig } from "../processing/gridDebugLogger.js";
+
 export type OutputFormat = "json" | "text";
 
 /**
@@ -136,6 +138,26 @@ export interface LiteParseConfig {
    * @defaultValue `undefined`
    */
   password?: string;
+
+  /**
+   * Debug configuration for grid projection. When enabled, logs detailed
+   * information about how text elements are snapped, anchored, and projected.
+   * Can also generate visual PNG overlays of the projection.
+   *
+   * @example
+   * ```typescript
+   * const parser = new LiteParse({
+   *   debug: {
+   *     enabled: true,
+   *     textFilter: ["Total", "Revenue"],
+   *     pageFilter: 2,
+   *     visualize: true,
+   *     visualizePath: "./debug-output",
+   *   }
+   * });
+   * ```
+   */
+  debug?: GridDebugConfig;
 }
 
 /**

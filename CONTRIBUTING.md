@@ -71,6 +71,55 @@ You can test your changes locally:
 ./dist/src/index.js screenshot document.pdf -o ./screenshots
 ```
 
+### Debugging Grid Projection
+
+When working on the grid projection algorithm (`src/processing/gridProjection.ts`), you can enable built-in debug logging and visual output instead of adding ad-hoc `console.log` statements.
+
+**Debug logging** traces every decision the projection makes — block detection, anchor extraction, snap assignment, rendering, and flowing text classification:
+
+```bash
+# Log all projection decisions to stderr
+./dist/src/index.js parse document.pdf --debug
+
+# Filter to a specific page
+./dist/src/index.js parse document.pdf --debug --debug-page 3
+
+# Filter to elements containing specific text
+./dist/src/index.js parse document.pdf --debug --debug-text-filter "Total" "Revenue"
+
+# Filter to a bounding region (x1,y1,x2,y2 in PDF points)
+./dist/src/index.js parse document.pdf --debug --debug-region "0,100,300,200"
+
+# Write debug log to a file
+./dist/src/index.js parse document.pdf --debug --debug-output ./debug-output
+```
+
+**Visual grid export** generates PNG images showing text boxes color-coded by snap type (blue=left, red=right, green=center, gray=floating, yellow=flowing) with anchor lines overlaid. This is useful for comparing against page screenshots to spot projection issues:
+
+```bash
+# Generate visualization PNGs (one per page)
+./dist/src/index.js parse document.pdf --debug-visualize
+
+# Specify output directory
+./dist/src/index.js parse document.pdf --debug-visualize --debug-output ./my-debug
+```
+
+These options are also available via the library API:
+
+```typescript
+const parser = new LiteParse({
+  debug: {
+    enabled: true,
+    textFilter: ["Total"],
+    pageFilter: 2,
+    visualize: true,
+    visualizePath: "./debug-output",
+  }
+});
+```
+
+See `src/processing/gridDebugLogger.ts` for the full `GridDebugConfig` interface and `src/processing/gridVisualizer.ts` for the visualization renderer.
+
 ## Making Changes
 
 ### Versioning & Changelogs

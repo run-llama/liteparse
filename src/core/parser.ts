@@ -172,7 +172,7 @@ export class LiteParse {
       }
 
       // Process pages with complete grid projection (after OCR)
-      const processedPages = projectPagesToGrid(pages, this.config);
+      const processedPages = await projectPagesToGrid(pages, this.config);
 
       // Build bounding boxes if enabled
       if (this.config.preciseBoundingBox) {

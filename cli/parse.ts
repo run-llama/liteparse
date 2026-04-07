@@ -1,4 +1,4 @@
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import fs from "fs/promises";
 import { existsSync, readdirSync, statSync } from "fs";
 import os from "os";
@@ -29,6 +29,12 @@ interface ParseCommandOptions {
   password?: string;
   config?: string;
   quiet?: boolean;
+  debug?: boolean;
+  debugVisualize?: boolean;
+  debugOutput?: string;
+  debugTextFilter?: string[];
+  debugPage?: string;
+  debugRegion?: string;
 }
 
 interface ScreenshotCommandOptions {
@@ -84,6 +90,18 @@ program
   .option("--password <password>", "Password for encrypted/protected documents")
   .option("--config <file>", "Config file (JSON)")
   .option("-q, --quiet", "Suppress progress output")
+  .addOption(new Option("--debug", "Enable grid projection debug logging").hideHelp())
+  .addOption(new Option("--debug-visualize", "Generate grid visualization PNGs").hideHelp())
+  .addOption(new Option("--debug-output <path>", "Output directory for debug files").hideHelp())
+  .addOption(
+    new Option("--debug-text-filter <texts...>", "Filter debug output by text content").hideHelp()
+  )
+  .addOption(
+    new Option("--debug-page <num>", "Filter debug output to specific page number").hideHelp()
+  )
+  .addOption(
+    new Option("--debug-region <coords>", 'Filter to bounding region "x1,y1,x2,y2"').hideHelp()
+  )
   .action(async (file: string, options: ParseCommandOptions) => {
     try {
       const quiet = options.quiet || false;
@@ -127,6 +145,24 @@ program
         preserveVerySmallText: options.preserveSmallText || false,
         password: options.password,
       };
+
+      // Build debug config if any debug flags are set
+      if (options.debug || options.debugVisualize) {
+        let regionFilter: { x1: number; y1: number; x2: number; y2: number } | undefined;
+        if (options.debugRegion) {
+          const [x1, y1, x2, y2] = options.debugRegion.split(",").map(Number);
+          regionFilter = { x1, y1, x2, y2 };
+        }
+        config.debug = {
+          enabled: true,
+          visualize: options.debugVisualize,
+          visualizePath: options.debugOutput ?? "./debug-output",
+          outputPath: options.debugOutput ? `${options.debugOutput}/debug.log` : undefined,
+          textFilter: options.debugTextFilter,
+          pageFilter: options.debugPage ? parseInt(options.debugPage) : undefined,
+          regionFilter,
+        };
+      }
 
       // Create parser
       const parser = new LiteParse(config);

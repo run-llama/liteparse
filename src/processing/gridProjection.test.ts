@@ -2,6 +2,7 @@ import { expect, describe, it } from "vitest";
 import { bboxToLine, projectPagesToGrid, projectToGrid } from "./gridProjection";
 import { ProjectionTextBox } from "../core/types";
 import { DEFAULT_CONFIG } from "../core/config";
+import { NOOP_LOGGER } from "./gridDebugLogger";
 
 describe("test bboxToLine", () => {
   it("test  same line that can merge", () => {
@@ -279,7 +280,14 @@ describe("test projectToGrid", () => {
         forwardAnchorCenter: {},
       },
     };
-    const result = projectToGrid(config, page, projectionBoxes, prevAnchors, totalPages);
+    const result = projectToGrid(
+      config,
+      page,
+      projectionBoxes,
+      prevAnchors,
+      totalPages,
+      NOOP_LOGGER
+    );
     expect(result).toStrictEqual(expectedOutput);
   });
 
@@ -311,7 +319,14 @@ describe("test projectToGrid", () => {
       text: " Name      Age\n Alice     30",
       prevAnchors: prevAnchors,
     };
-    const result = projectToGrid(config, page, projectionBoxes, prevAnchors, totalPages);
+    const result = projectToGrid(
+      config,
+      page,
+      projectionBoxes,
+      prevAnchors,
+      totalPages,
+      NOOP_LOGGER
+    );
     expect(result).toStrictEqual(expectedOutput);
   });
 
@@ -335,7 +350,14 @@ describe("test projectToGrid", () => {
       text: " Revenue    500",
       prevAnchors: prevAnchors,
     };
-    const result = projectToGrid(config, page, projectionBoxes, prevAnchors, totalPages);
+    const result = projectToGrid(
+      config,
+      page,
+      projectionBoxes,
+      prevAnchors,
+      totalPages,
+      NOOP_LOGGER
+    );
     expect(result).toStrictEqual(expectedOutput);
   });
 });
@@ -436,7 +458,7 @@ const mockPageData = [
 ];
 
 describe("test projectPagesToGrid", () => {
-  it("test pages projection", () => {
+  it("test pages projection", async () => {
     const config = { ...DEFAULT_CONFIG, preserveLayoutAlignmentAcrossPages: false };
     const expectedOutput = [
       {
@@ -515,7 +537,7 @@ describe("test projectPagesToGrid", () => {
         boundingBoxes: [],
       },
     ];
-    const result = projectPagesToGrid(mockPageData, config);
+    const result = await projectPagesToGrid(mockPageData, config);
     expect(result).toStrictEqual(expectedOutput);
   });
 });

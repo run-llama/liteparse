@@ -5,6 +5,8 @@ import { ProjectionTextBox, Coordinates, LiteParseConfig, ParsedPage } from "../
 import { PageData } from "../engines/pdf/interface.js";
 
 import { applyMarkupTags } from "./markupUtils.js";
+import { GridDebugLogger, createGridDebugLogger } from "./gridDebugLogger.js";
+import { renderAllVisualizations } from "./gridVisualizer.js";
 
 // Minimum spaces between unsnapped bboxes (likely justified text
 const FLOATING_SPACES = 2;
@@ -1287,7 +1289,8 @@ export function projectToGrid(
   page: PageData,
   projectionBoxes: ProjectionTextBox[],
   prevAnchors: PrevAnchors,
-  totalPages: number
+  totalPages: number,
+  logger: GridDebugLogger
 ): { text: string; prevAnchors: PrevAnchors } {
   // detect '.' garbage in the lines
   let dotCount = 0;
@@ -1340,6 +1343,11 @@ export function projectToGrid(
 
   handleRotationReadingOrder(projectionBoxes, page.height);
   const lines = bboxToLine(projectionBoxes, medianWidth, medianHeight, page.width);
+
+  // Log line composition
+  for (let i = 0; i < lines.length; i++) {
+    logger.logLineComposition(i, lines[i]);
+  }
 
   // remove unprojectable text and apply markup to final lines
   for (let i = 0; i < lines.length; ++i) {
@@ -1396,6 +1404,11 @@ export function projectToGrid(
     }
   }
 
+  // Log block assignments
+  for (let bi = 0; bi < blocks.length; bi++) {
+    logger.logBlock(bi, blocks[bi].start, blocks[bi].end);
+  }
+
   for (const block of blocks) {
     const blockLines = lines.slice(block.start, block.end);
     const { anchorLeft, anchorRight, anchorCenter } = extractAnchorsPointsFromLines(
@@ -1403,16 +1416,24 @@ export function projectToGrid(
       page
     );
 
+    logger.logAnchors(anchorLeft, anchorRight, anchorCenter);
+
     // Block-level classification: if entire block is clearly flowing text,
     // render it simply and skip grid projection
     if (isFlowingTextBlock(blockLines, anchorLeft, anchorRight, anchorCenter, page.width)) {
+      logger.logFlowingBlock(block.start, block.end);
       if (!config.preserveLayoutAlignmentAcrossPages) {
         const sizes = getMedianTextBoxSize(blockLines.flat());
         medianWidth = sizes.width;
       }
       renderFlowingBlock(lines, block, rawLines, medianWidth);
+      for (let li = block.start; li < block.end; li++) {
+        if (rawLines[li]) logger.captureRender(li, 0, rawLines[li], "flowing");
+      }
       continue;
     }
+
+    logger.logStructuredBlock(block.start, block.end);
 
     const snapMaps: SnapMaps = {
       left: [],
@@ -1505,6 +1526,7 @@ export function projectToGrid(
         }
 
         prevBbox = bbox;
+        logger.logSnapAssignment(bbox, lineIndex, boxIndex);
         if (!bbox.snap) {
           uniqueSnaps.add(Math.round(bbox.x));
         } else if (bbox.snap == "left") {
@@ -1542,7 +1564,7 @@ export function projectToGrid(
       const columnGapThreshold = medianWidth * FLOWING_COLUMN_GAP_MULTIPLIER;
 
       // Helper to mark and render a line as flowing
-      function markFlowing(lineIndex: number): void {
+      function markFlowing(lineIndex: number, reason: string): void {
         const line = lines[lineIndex];
         if (!rawLines[lineIndex]) {
           rawLines[lineIndex] = "";
@@ -1550,6 +1572,8 @@ export function projectToGrid(
         }
         rawLines[lineIndex] = renderLineAsFlowingText(line, blockMinX, medianWidth);
         flowingLines.add(lineIndex);
+        logger.logFlowingLine(lineIndex, reason);
+        logger.captureRender(lineIndex, 0, rawLines[lineIndex], "flowing");
       }
 
       // First pass: detect clearly flowing lines (wide, no column gaps, enough items)
@@ -1565,7 +1589,7 @@ export function projectToGrid(
           lineSpan > page.width * FLOWING_WIDE_LINE_RATIO &&
           lineMaxGap(line) < columnGapThreshold
         ) {
-          markFlowing(lineIndex);
+          markFlowing(lineIndex, "wide span, no column gaps");
         }
       }
 
@@ -1577,7 +1601,7 @@ export function projectToGrid(
         const line = lines[lineIndex];
         if (line.length === 0) continue;
         if (flowingLines.has(lineIndex - 1) && lineMaxGap(line) < columnGapThreshold) {
-          markFlowing(lineIndex);
+          markFlowing(lineIndex, `forward propagation from line ${lineIndex - 1}`);
         }
       }
       // Backward sweep: propagate flowing status upward
@@ -1586,7 +1610,7 @@ export function projectToGrid(
         const line = lines[lineIndex];
         if (line.length === 0) continue;
         if (flowingLines.has(lineIndex + 1) && lineMaxGap(line) < columnGapThreshold) {
-          markFlowing(lineIndex);
+          markFlowing(lineIndex, `backward propagation from line ${lineIndex + 1}`);
         }
       }
     }
@@ -1664,6 +1688,8 @@ export function projectToGrid(
 
           bbox.rendered = true;
           hasChanged = true;
+          logger.logRender(bbox, lineIndex, targetX, "floating");
+          logger.captureRender(lineIndex, targetX, bbox.str, "floating");
 
           let nextBbox: ProjectionTextBox | null = null;
           if (line.length > boxIndex + 1) {
@@ -1739,6 +1765,7 @@ export function projectToGrid(
         }
 
         forwardAnchors.left[snapMaps.left[0]] = targetX;
+        logger.logForwardAnchor("left", snapMaps.left[0], targetX);
 
         for (const currentLeftSnapBox of thisTurnSnap) {
           const lineIndex = currentLeftSnapBox.lineIndex;
@@ -1748,6 +1775,8 @@ export function projectToGrid(
           }
           rawLines[lineIndex] += currentLeftSnapBox.bbox.str;
           currentLeftSnapBox.bbox.rendered = true;
+          logger.logRender(currentLeftSnapBox.bbox, lineIndex, targetX, "left-snap");
+          logger.captureRender(lineIndex, targetX, currentLeftSnapBox.bbox.str, "left");
 
           let nextBbox: ProjectionTextBox | null = null;
           if (lines[lineIndex].length > currentLeftSnapBox.boxIndex + 1) {
@@ -1826,6 +1855,7 @@ export function projectToGrid(
           targetX = prevAnchors.forwardAnchorRight[snapMaps.right[0]];
         }
         forwardAnchors.right[snapMaps.right[0]] = targetX;
+        logger.logForwardAnchor("right", snapMaps.right[0], targetX);
 
         for (const currentRightSnapBox of thisTurnSnap) {
           const lineIndex = currentRightSnapBox.lineIndex;
@@ -1838,6 +1868,13 @@ export function projectToGrid(
           }
           rawLines[lineIndex] += currentRightSnapBox.bbox.str;
           currentRightSnapBox.bbox.rendered = true;
+          logger.logRender(currentRightSnapBox.bbox, lineIndex, targetX, "right-snap");
+          logger.captureRender(
+            lineIndex,
+            targetX - currentRightSnapBox.bbox.strLength,
+            currentRightSnapBox.bbox.str,
+            "right"
+          );
 
           let nextBbox: ProjectionTextBox | null = null;
           if (lines[lineIndex].length > currentRightSnapBox.boxIndex + 1) {
@@ -1913,6 +1950,7 @@ export function projectToGrid(
           targetX = prevAnchors.forwardAnchorCenter[snapMaps.center[0]];
         }
         forwardAnchors.center[snapMaps.center[0]] = targetX;
+        logger.logForwardAnchor("center", snapMaps.center[0], targetX);
         for (const currentCenterSnapBox of thisTurnSnap) {
           if (flowingLines.has(currentCenterSnapBox.lineIndex)) continue;
           if (
@@ -1928,6 +1966,18 @@ export function projectToGrid(
           }
           rawLines[currentCenterSnapBox.lineIndex] += currentCenterSnapBox.bbox.str;
           currentCenterSnapBox.bbox.rendered = true;
+          logger.logRender(
+            currentCenterSnapBox.bbox,
+            currentCenterSnapBox.lineIndex,
+            targetX,
+            "center-snap"
+          );
+          logger.captureRender(
+            currentCenterSnapBox.lineIndex,
+            targetX - Math.round(currentCenterSnapBox.bbox.strLength / 2),
+            currentCenterSnapBox.bbox.str,
+            "center"
+          );
         }
         snapMaps.center.shift();
       }
@@ -1935,6 +1985,7 @@ export function projectToGrid(
   }
 
   fixSparseBlocks(blocks, rawLines);
+  logger.captureRawLines(rawLines);
 
   const text = rawLines.join("\n");
   // OSS: Return text instead of mutating page object
@@ -1948,7 +1999,11 @@ export function projectToGrid(
   };
 }
 
-export function projectPagesToGrid(pages: PageData[], config: LiteParseConfig): ParsedPage[] {
+export async function projectPagesToGrid(
+  pages: PageData[],
+  config: LiteParseConfig
+): Promise<ParsedPage[]> {
+  const logger = createGridDebugLogger(config.debug);
   const prevAnchors: PrevAnchors = {
     forwardAnchorLeft: {},
     forwardAnchorRight: {},
@@ -1958,6 +2013,8 @@ export function projectPagesToGrid(pages: PageData[], config: LiteParseConfig): 
   const results: ParsedPage[] = [];
 
   for (const page of pages) {
+    logger.setPage(page.pageNum, page.width, page.height);
+
     // Build projection boxes from text items
     const projectionBoxes = buildBbox(page, config);
 
@@ -1967,7 +2024,8 @@ export function projectPagesToGrid(pages: PageData[], config: LiteParseConfig): 
       page,
       projectionBoxes,
       prevAnchors,
-      pages.length
+      pages.length,
+      logger
     );
 
     // Update forward anchors if preserving across pages
@@ -1996,6 +2054,18 @@ export function projectPagesToGrid(pages: PageData[], config: LiteParseConfig): 
 
   // Clean raw text (margin detection, etc)
   cleanRawText(results, config);
+
+  // Flush debug log and render visualizations
+  if (logger.enabled) {
+    await logger.flush();
+    if (logger.shouldVisualize) {
+      const vizPath = logger.debugConfig.visualizePath ?? "./debug-output";
+      const paths = await renderAllVisualizations(logger.visualizerPages, vizPath);
+      for (const p of paths) {
+        process.stderr.write(`[grid-debug] Visualization: ${p}\n`);
+      }
+    }
+  }
 
   return results;
 }

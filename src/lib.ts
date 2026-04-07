@@ -28,3 +28,4 @@ export type {
   ScreenshotResult,
   MarkupData,
 } from "./core/types.js";
+export type { GridDebugConfig } from "./processing/gridDebugLogger.js";

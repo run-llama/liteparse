@@ -6,10 +6,10 @@ import { DEFAULT_CONFIG } from "../core/config.js";
 /**
  * Projects text items onto a grid for spatial text extraction
  */
-export function projectPagesToGrid(
+export async function projectPagesToGrid(
   pages: PageData[],
   config?: Partial<LiteParseConfig>
-): ParsedPage[] {
+): Promise<ParsedPage[]> {
   const fullConfig = {
     ...DEFAULT_CONFIG,
     ...config,

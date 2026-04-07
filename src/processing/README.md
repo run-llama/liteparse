@@ -61,8 +61,8 @@ This is the core algorithm that converts raw PDF text items into readable, prope
 - `bboxToLine()` - Group text items into lines with Y-tolerance for subscripts
 - `extractAnchorsPointsFromLines()` - Identify alignment anchors and deduplicate
 - `tryAlignFloating()` - Align floating bboxes with anchors on adjacent lines
-- `projectToGrid()` - Main projection algorithm
-- `projectPagesToGrid()` - Process all pages with shared anchors
+- `projectToGrid()` - Main projection algorithm (accepts a `GridDebugLogger` for tracing)
+- `projectPagesToGrid()` - Process all pages with shared anchors, creates debug logger from config
 
 **Constants:**
 - `FLOATING_SPACES = 2` - Minimum spaces between floating text
@@ -76,6 +76,43 @@ This is the core algorithm that converts raw PDF text items into readable, prope
 - **Small text filtering**: Lines with >50% small text can be filtered (configurable)
 - **Rotation grouping**: Text is grouped by rotation value before processing, so rotated blocks stay together even when X coordinates overlap with non-rotated content
 - **Y-tolerance sorting**: Items within `Y_SORT_TOLERANCE` are considered same line, handling floating-point precision and subscripts/superscripts
+
+---
+
+### gridDebugLogger.ts
+**Targeted debug logging for grid projection.**
+
+Provides a `GridDebugLogger` class that traces projection decisions at every stage — block detection, anchor extraction, snap assignment, rendering, flowing text classification, and forward anchor updates. Uses a filter system to narrow output to specific elements.
+
+**`GridDebugConfig` options:**
+- `enabled` - Master switch
+- `textFilter` - Only log elements whose text contains these substrings (case-insensitive)
+- `lineFilter` - Only log elements on these line indices (0-based)
+- `pageFilter` - Only log elements on this page number (1-indexed)
+- `regionFilter` - Only log elements within a bounding region `{ x1, y1, x2, y2 }`
+- `outputPath` - Write log to a file instead of stderr
+- `visualize` - Generate PNG visualizations (see gridVisualizer.ts)
+- `visualizePath` - Directory for visualization PNGs (default: `./debug-output`)
+
+**Log phases:** `page`, `blocks`, `anchors`, `snap`, `render`, `flowing`, `forward-anchor`, `dedup`, `lines`
+
+When disabled, a zero-cost `NoopGridDebugLogger` singleton is used — no runtime overhead in production.
+
+---
+
+### gridVisualizer.ts
+**PNG visualization of projected text output.**
+
+Renders the projected text as a monospace character grid image using sharp with an SVG overlay. Each character is drawn at its grid position, color-coded by snap type:
+- **Blue** — left snap
+- **Red** — right snap
+- **Green** — center snap
+- **Gray** — floating (unsnapped)
+- **Yellow** — flowing text
+
+Text segments get colored background rectangles and colored text, making it easy to compare the projection output directly against the original PDF page screenshot. Includes a color legend.
+
+Called automatically when `debug.visualize` is enabled. Output files are named `page-{N}-grid.png` in the configured directory.
 
 ---
 
