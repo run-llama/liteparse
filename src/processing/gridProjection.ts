@@ -158,6 +158,82 @@ function canSnapLine(config: LiteParseConfig, line: ProjectionTextBox[]): boolea
   return true;
 }
 
+/**
+ * A line is "structured" (tabular) if it has 3+ items spanning a significant
+ * portion of the page width. Footnote/paragraph lines typically have 1-2 items.
+ */
+function isStructuredLine(line: ProjectionTextBox[], pageWidth: number): boolean {
+  if (line.length < 3) return false;
+  const leftEdge = line[0].x;
+  const rightEdge = line[line.length - 1].x + line[line.length - 1].w;
+  return (rightEdge - leftEdge) > pageWidth * 0.4;
+}
+
+/**
+ * Split blocks at structural transitions to prevent non-tabular content
+ * (e.g., footnotes) from inflating table column spacing via forward anchors.
+ *
+ * Detects transitions from "structured" lines (tables with many items spanning
+ * the page) to "non-structured" lines (footnotes/paragraphs with 1-2 items),
+ * and splits the block at the first blank line after the last structured line.
+ */
+function splitBlocksAtStructuralTransitions(
+  blocks: LineRange[],
+  lines: ProjectionTextBox[][],
+  pageWidth: number
+): LineRange[] {
+  const result: LineRange[] = [];
+
+  for (const block of blocks) {
+    // Find the last structured (tabular) line in this block
+    let lastStructuredLine = -1;
+    for (let li = block.start; li < block.end; li++) {
+      if (isStructuredLine(lines[li], pageWidth)) {
+        lastStructuredLine = li;
+      }
+    }
+
+    // No structured lines, or structured lines extend to near the end — no split
+    if (lastStructuredLine < 0 || lastStructuredLine >= block.end - 2) {
+      result.push(block);
+      continue;
+    }
+
+    // Find the first blank line after the last structured line
+    let splitAt = -1;
+    for (let li = lastStructuredLine + 1; li < block.end; li++) {
+      if (lines[li].length === 0) {
+        splitAt = li;
+        break;
+      }
+    }
+
+    if (splitAt < 0 || splitAt >= block.end - 1) {
+      result.push(block);
+      continue;
+    }
+
+    // Verify that content after the split point is non-structured
+    let hasStructuredAfterSplit = false;
+    for (let li = splitAt + 1; li < block.end; li++) {
+      if (isStructuredLine(lines[li], pageWidth)) {
+        hasStructuredAfterSplit = true;
+        break;
+      }
+    }
+
+    if (!hasStructuredAfterSplit) {
+      // Split: include the blank line in the first block
+      result.push({ start: block.start, end: splitAt + 1 });
+      result.push({ start: splitAt + 1, end: block.end });
+    } else {
+      result.push(block);
+    }
+  }
+
+  return result;
+}
+
 function fixSparseBlocks(blocks: LineRange[], rawLines: string[]) {
   // compress whitespace in blocks containing very sparse lines (>80% whitespace)
   const regexp = new RegExp(`\\s{${COLUMN_SPACES},}`, "g");
@@ -295,8 +371,10 @@ function extractAnchorsPointsFromLines(lines: ProjectionTextBox[][], page: PageD
       .sort((a, b) => a - b);
 
     // Merge nearby anchors within a tolerance
-    // Use 2 units as tolerance - this catches columns that are close but not exactly aligned
-    const MERGE_TOLERANCE = 2;
+    // Use 4 units (~1 character width) as tolerance - this catches columns that are
+    // close but not exactly aligned, including header labels that are slightly offset
+    // from their associated data column anchors
+    const MERGE_TOLERANCE = 4;
 
     for (let i = 0; i < sortedAnchors.length; i++) {
       const anchor = sortedAnchors[i];
@@ -800,14 +878,35 @@ export function bboxToLine(
     }
   }
 
-  // sort lines on first y axis then x axis (top - left)
-  // Use Y tolerance so items on same visual line sort by x regardless of tiny y differences
-  textBbox.sort((a, b) => {
-    if (Math.abs(a.y - b.y) < Y_SORT_TOLERANCE) {
-      return a.x - b.x;
+  // Sort items by y-cluster then x to ensure transitive sort order.
+  // A tolerance-based pairwise comparator is non-transitive: items at y=91, y=96, y=91
+  // can produce inconsistent orderings when some pairs are within tolerance and others
+  // are not. This causes items from different visual rows to interleave, breaking line
+  // assembly for multi-line table headers.
+  //
+  // Instead, we cluster items by y-coordinate (using a greedy sweep comparing to
+  // cluster start), then sort by (cluster_id, x) for a guaranteed transitive order.
+  {
+    const ySorted = [...textBbox].sort((a, b) => a.y - b.y);
+    const yClusterMap = new Map<ProjectionTextBox, number>();
+    let clusterId = 0;
+    let clusterStartY = ySorted[0]?.y ?? 0;
+
+    for (let i = 0; i < ySorted.length; i++) {
+      if (i > 0 && ySorted[i].y - clusterStartY > Y_SORT_TOLERANCE) {
+        clusterId++;
+        clusterStartY = ySorted[i].y;
+      }
+      yClusterMap.set(ySorted[i], clusterId);
     }
-    return a.y - b.y;
-  });
+
+    textBbox.sort((a, b) => {
+      const ca = yClusterMap.get(a)!;
+      const cb = yClusterMap.get(b)!;
+      if (ca !== cb) return ca - cb;
+      return a.x - b.x;
+    });
+  }
 
   function canMergeMarkup(previousBbox: ProjectionTextBox, bbox: ProjectionTextBox): boolean {
     if (!previousBbox.markup && !bbox.markup) {
@@ -1375,7 +1474,7 @@ export function projectToGrid(
   const rawLines: string[] = [];
   const rawLinesDelta = [];
 
-  const blocks: LineRange[] = [];
+  let blocks: LineRange[] = [];
   if (config.preserveLayoutAlignmentAcrossPages && totalPages > 1) {
     blocks.push({ start: 0, end: lines.length });
   } else {
@@ -1402,6 +1501,13 @@ export function projectToGrid(
     if (start > -1) {
       blocks.push({ start: start, end: lines.length });
     }
+
+    // Further split blocks at structural transitions (e.g., table → footnotes).
+    // Long footnote text in the same block as a table inflates forward anchors
+    // for table columns, causing excessive spacing. We detect transitions from
+    // multi-item "structured" lines (tables) to single/double-item "text" lines
+    // and split at the nearest blank line boundary.
+    blocks = splitBlocksAtStructuralTransitions(blocks, lines, page.width);
   }
 
   // Log block assignments
@@ -1826,7 +1932,7 @@ export function projectToGrid(
           ...thisTurnSnap.map((v) => {
             let lastSnapLeft = 0;
             for (const key in forwardAnchors.left) {
-              if (parseInt(key) <= v.bbox.x) {
+              if (parseFloat(key) <= v.bbox.x) {
                 lastSnapLeft = Math.max(lastSnapLeft, forwardAnchors.left[key]);
               }
             }
