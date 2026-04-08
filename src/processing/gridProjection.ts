@@ -1131,13 +1131,20 @@ function updateForwardAnchors(
   forwardAnchors: PageForwardAnchors,
   lineLength: number
 ): void {
+  // If this is the last item on the line (no nextBbox), don't propagate
+  // forward anchors. There's nothing to the right on this line that needs
+  // overlap protection, and propagating would let single-column text
+  // (e.g. footnotes) inflate distant data column positions.
+  if (!nextBbox) return;
+
   const rightBound = bbox.x + bbox.w;
   let targetLength = lineLength;
-  if (nextBbox && (nextBbox.shouldSpace ?? 0) > 0) {
+  if ((nextBbox.shouldSpace ?? 0) > 0) {
     targetLength += nextBbox.shouldSpace ?? 0;
   }
   updateForwardAnchorRightBound(snapMaps.left, forwardAnchors.left, rightBound, targetLength);
   updateForwardAnchorRightBound(snapMaps.right, forwardAnchors.right, rightBound, targetLength);
+
   // we do not update center anchors since centered text may span between snapped columns
   updateForwardAnchorRightBound(
     snapMaps.floating,
@@ -1466,6 +1473,17 @@ export function projectToGrid(
     const rightSnap: Snap[] = [];
     const centerSnap: Snap[] = [];
 
+    // Track left anchors with very few items. These are likely coincidental
+    // header alignments, not structural column boundaries. They should not
+    // propagate forward anchors that force subsequent columns rightward.
+    const MIN_LEFT_ANCHOR_ITEMS = 3;
+    const sparseLeftAnchors = new Set<number>();
+    for (const snap in anchorLeft) {
+      if (anchorLeft[snap].length < MIN_LEFT_ANCHOR_ITEMS) {
+        sparseLeftAnchors.add(parseFloat(snap));
+      }
+    }
+
     if (!config.preserveLayoutAlignmentAcrossPages) {
       const sizes = getMedianTextBoxSize(lines.slice(block.start, block.end).flat());
       medianWidth = sizes.width;
@@ -1654,7 +1672,8 @@ export function projectToGrid(
           let lastSnapLeft = 0;
           for (const key in forwardAnchors.left) {
             // Use parseFloat to preserve decimal precision from anchor keys
-            if (parseFloat(key) <= bbox.x) {
+            const keyVal = parseFloat(key);
+            if (keyVal <= bbox.x && !sparseLeftAnchors.has(keyVal)) {
               lastSnapLeft = Math.max(lastSnapLeft, forwardAnchors.left[key]);
             }
           }
@@ -1664,6 +1683,19 @@ export function projectToGrid(
           );
           if (targetX < lineMax) {
             targetX = lineMax;
+          }
+
+          // For floating items on lines with no rendered content (only block
+          // padding spaces), use the PDF coordinate position. This prevents
+          // header text on lines without snapped items from collapsing to
+          // the left margin.
+          let usedPdfFallback = false;
+          if (rawLines[lineIndex].trimEnd().length === 0) {
+            const pdfTargetX = Math.round(bbox.x / medianWidth);
+            if (pdfTargetX > targetX) {
+              targetX = pdfTargetX;
+              usedPdfFallback = true;
+            }
           }
 
           if (!bbox.forceUnsnapped) {
@@ -1695,7 +1727,7 @@ export function projectToGrid(
           if (line.length > boxIndex + 1) {
             nextBbox = line[boxIndex + 1];
           }
-          if (!bbox.forceUnsnapped) {
+          if (!bbox.forceUnsnapped && !usedPdfFallback) {
             updateForwardAnchors(
               bbox,
               nextBbox,
@@ -1722,6 +1754,7 @@ export function projectToGrid(
             thisTurnSnap.push(item);
           }
         }
+        const isSparseAnchor = sparseLeftAnchors.has(snapMaps.left[0]);
         hasChanged = true;
         if (!thisTurnSnap.length) {
           snapMaps.left.shift();
@@ -1764,7 +1797,9 @@ export function projectToGrid(
           targetX = prevAnchors.forwardAnchorLeft[snapMaps.left[0]];
         }
 
-        forwardAnchors.left[snapMaps.left[0]] = targetX;
+        if (!isSparseAnchor) {
+          forwardAnchors.left[snapMaps.left[0]] = targetX;
+        }
         logger.logForwardAnchor("left", snapMaps.left[0], targetX);
 
         for (const currentLeftSnapBox of thisTurnSnap) {
@@ -1782,20 +1817,27 @@ export function projectToGrid(
           if (lines[lineIndex].length > currentLeftSnapBox.boxIndex + 1) {
             nextBbox = lines[lineIndex][currentLeftSnapBox.boxIndex + 1];
           }
-          updateForwardAnchors(
-            currentLeftSnapBox.bbox,
-            nextBbox,
-            snapMaps,
-            forwardAnchors,
-            rawLines[lineIndex].length
-          );
+          // Don't propagate forward anchors from sparse left anchors —
+          // they would force all subsequent columns rightward based on
+          // a coincidental header alignment, not a structural column boundary.
+          if (!isSparseAnchor) {
+            updateForwardAnchors(
+              currentLeftSnapBox.bbox,
+              nextBbox,
+              snapMaps,
+              forwardAnchors,
+              rawLines[lineIndex].length
+            );
+          }
         }
 
-        for (let index = block.start; index < block.end; ++index) {
-          if (flowingLines.has(index)) continue;
-          const line = rawLines[index];
-          if (line.length < targetX) {
-            rawLines[index] += " ".repeat(targetX - line.length);
+        if (!isSparseAnchor) {
+          for (let index = block.start; index < block.end; ++index) {
+            if (flowingLines.has(index)) continue;
+            const line = rawLines[index];
+            if (line.length < targetX) {
+              rawLines[index] += " ".repeat(targetX - line.length);
+            }
           }
         }
         snapMaps.left.shift();
@@ -1822,11 +1864,16 @@ export function projectToGrid(
         }
 
         let targetX = Math.min(Math.round(snapMaps.right[0] / medianWidth), COLUMN_SPACES);
-        const lineMax = Math.max(
-          ...thisTurnSnap.map((v) => {
+        // Filter out single-item lines from lineMax: full-width text (footnotes,
+        // titles) that coincidentally matches this right anchor shouldn't inflate
+        // the column position for actual data values.
+        const lineMaxCandidates = thisTurnSnap
+          .filter((v) => lines[v.lineIndex].length > 1)
+          .map((v) => {
             let lastSnapLeft = 0;
             for (const key in forwardAnchors.left) {
-              if (parseInt(key) <= v.bbox.x) {
+              const keyVal = parseFloat(key);
+              if (keyVal <= v.bbox.x && !sparseLeftAnchors.has(keyVal)) {
                 lastSnapLeft = Math.max(lastSnapLeft, forwardAnchors.left[key]);
               }
             }
@@ -1836,8 +1883,10 @@ export function projectToGrid(
                 rawLines[v.lineIndex].trimEnd().length + (v.bbox.shouldSpace ?? 0)
               ) + v.bbox.strLength
             );
-          })
-        );
+          });
+        const lineMax = lineMaxCandidates.length > 0
+          ? Math.max(...lineMaxCandidates)
+          : 0;
 
         if (targetX < lineMax) {
           targetX = lineMax;

@@ -273,9 +273,7 @@ describe("test projectToGrid", () => {
     const expectedOutput = {
       text: " Hello\n World",
       prevAnchors: {
-        forwardAnchorLeft: {
-          "10": 1,
-        },
+        forwardAnchorLeft: {},
         forwardAnchorRight: {},
         forwardAnchorCenter: {},
       },
@@ -317,7 +315,11 @@ describe("test projectToGrid", () => {
     const totalPages = 1;
     const expectedOutput = {
       text: " Name      Age\n Alice     30",
-      prevAnchors: prevAnchors,
+      prevAnchors: {
+        forwardAnchorLeft: {},
+        forwardAnchorRight: {},
+        forwardAnchorCenter: {},
+      },
     };
     const result = projectToGrid(
       config,
