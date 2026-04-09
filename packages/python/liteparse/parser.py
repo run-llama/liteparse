@@ -340,7 +340,10 @@ class LiteParse:
             json_data = json.loads(stdout.decode("utf-8"))
             return _parse_json_result(json_data)
         except json.JSONDecodeError as e:
-            raise ParseError(f"Failed to parse CLI output: {e}")
+            raise ParseError(
+                f"Failed to parse CLI output: {e}",
+                stderr=stderr.decode("utf-8"),
+            )
 
     @staticmethod
     def _get_screenshot_result(
