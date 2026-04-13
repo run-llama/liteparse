@@ -1,5 +1,11 @@
 # @llamaindex/liteparse
 
+## 1.5.0
+
+### Minor Changes
+
+- [#130](https://github.com/run-llama/liteparse/pull/130) [`e29ba71`](https://github.com/run-llama/liteparse/commit/e29ba71853a011fd1bd0e3a4819e9783ef937155) Thanks [@logan-markewich](https://github.com/logan-markewich)! - Move to pdf.js v5
+
 ## 1.4.6
 
 ### Patch Changes
