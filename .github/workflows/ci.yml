@@ -58,3 +58,14 @@ jobs:
 
       - name: Run tests
         run: npm run test
+
+  # test that docker builds
+  build-docker-image:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the base Docker image
+        run: docker build .
+      - name: Build the full Docker image
+        run: docker build . -f full.Dockerfile
