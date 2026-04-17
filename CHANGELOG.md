@@ -1,5 +1,11 @@
 # @llamaindex/liteparse
 
+## 1.5.1
+
+### Patch Changes
+
+- [#137](https://github.com/run-llama/liteparse/pull/137) [`64579fb`](https://github.com/run-llama/liteparse/commit/64579fb5e9d77c02686338a5fd8e51a172c0ac3e) Thanks [@abhinab-choudhury](https://github.com/abhinab-choudhury)! - Update CLI version tag
+
 ## 1.5.0
 
 ### Minor Changes
