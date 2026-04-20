@@ -9,7 +9,7 @@ dependencies = [
     "fastapi>=0.132.0",
     "numpy>=2.4.2",
     "pillow>=12.1.1",
-    "python-multipart>=0.0.22",
+    "python-multipart>=0.0.26",
     "uvicorn>=0.41.0",
 ]
 
