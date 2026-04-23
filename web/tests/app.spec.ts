@@ -146,6 +146,46 @@ test("OCR toggle actually changes behavior on a scanned PDF", async ({ page }) =
   expect(withOcr.length).toBeGreaterThan(withoutOcr.length + 3);
 });
 
+test.describe("mobile viewport", () => {
+  test.use({ viewport: { width: 375, height: 812 } });
+
+  test("stacks the two result panes vertically and keeps touch targets sized", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    const textBox = await page.locator("#text-output").boundingBox();
+    const jsonBox = await page.locator("#json-output").boundingBox();
+    expect(textBox && jsonBox).toBeTruthy();
+    // JSON pane sits BELOW the text pane (stacked) rather than beside
+    expect(jsonBox!.y).toBeGreaterThan(textBox!.y + textBox!.height - 5);
+
+    // Parse button is at least 44px tall — touch-friendly
+    const parseBox = await page.locator("button#parse").boundingBox();
+    expect(parseBox!.height).toBeGreaterThanOrEqual(44);
+
+    // Viewport meta is present and sane
+    const viewportContent = await page
+      .locator('meta[name="viewport"]')
+      .getAttribute("content");
+    expect(viewportContent).toMatch(/width=device-width/);
+    expect(viewportContent).toMatch(/initial-scale=1/);
+
+    // Drop zone doesn't overflow the container
+    const zoneBox = await page.locator(".dropzone").boundingBox();
+    expect(zoneBox!.width).toBeLessThanOrEqual(375);
+  });
+
+  test("parses a PDF and renders results on mobile viewport", async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.goto("/");
+    await page.locator("input#file").setInputFiles(FIX("sample-text.pdf"));
+    await page.locator("button#parse").click();
+    await expect(page.locator("#text-output")).toHaveValue(/Hello from LiteParse/, {
+      timeout: 45_000,
+    });
+  });
+});
+
 test("renders page screenshots when the checkbox is set", async ({ page }) => {
   test.setTimeout(90_000);
   await page.goto("/");
