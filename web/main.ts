@@ -6,6 +6,48 @@ const statusEl = document.getElementById("status") as HTMLDivElement;
 const textOut = document.getElementById("text-output") as HTMLTextAreaElement;
 const jsonOut = document.getElementById("json-output") as HTMLTextAreaElement;
 const ocrToggle = document.getElementById("ocr") as HTMLInputElement;
+const dropzone = document.getElementById("dropzone") as HTMLLabelElement;
+const dropzoneBody = dropzone.querySelector(".dropzone-body") as HTMLDivElement;
+
+function renderFilename() {
+  const existing = dropzone.querySelector(".filename");
+  if (existing) existing.remove();
+  const file = fileInput.files?.[0];
+  if (!file) return;
+  const pill = document.createElement("div");
+  pill.className = "filename";
+  pill.textContent = file.name;
+  pill.title = file.name;
+  dropzoneBody.appendChild(pill);
+}
+
+dropzone.addEventListener("keydown", (e: KeyboardEvent) => {
+  if (e.key === "Enter" || e.key === " ") {
+    e.preventDefault();
+    fileInput.click();
+  }
+});
+
+for (const evt of ["dragenter", "dragover"] as const) {
+  dropzone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    dropzone.classList.add("dragover");
+  });
+}
+for (const evt of ["dragleave", "dragend", "drop"] as const) {
+  dropzone.addEventListener(evt, () => {
+    dropzone.classList.remove("dragover");
+  });
+}
+dropzone.addEventListener("drop", (e: DragEvent) => {
+  e.preventDefault();
+  const file = e.dataTransfer?.files?.[0];
+  if (!file) return;
+  const dt = new DataTransfer();
+  dt.items.add(file);
+  fileInput.files = dt.files;
+  fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+});
 
 function setStatus(msg: string, kind: "info" | "error" = "info") {
   statusEl.textContent = msg;
@@ -25,6 +67,7 @@ function isPdfBytes(bytes: Uint8Array): boolean {
 fileInput.addEventListener("change", () => {
   parseBtn.disabled = !fileInput.files || fileInput.files.length === 0;
   setStatus("");
+  renderFilename();
 });
 
 for (const btn of Array.from(

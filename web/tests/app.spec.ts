@@ -8,7 +8,9 @@ const FIX = (f: string) => resolve(HERE, "fixtures", f);
 test("loads the app shell", async ({ page }) => {
   await page.goto("/");
   await expect(page).toHaveTitle(/LiteParse/i);
-  await expect(page.locator("input[type=file]#file")).toBeVisible();
+  // The native file input is hidden behind a styled drop zone.
+  await expect(page.locator("input[type=file]#file")).toBeAttached();
+  await expect(page.locator(".dropzone")).toBeVisible();
   await expect(page.locator("input[type=checkbox]#ocr")).toBeVisible();
   await expect(page.locator("input[type=checkbox]#shots")).toBeVisible();
   await expect(page.locator("button#parse")).toBeVisible();
@@ -56,6 +58,45 @@ test("parses a text PDF with OCR off and renders both text and JSON", async ({ p
   expect(parsed.pages.length).toBeGreaterThan(0);
 });
 
+test("drop zone exists and shows the chosen filename without overflowing", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const zone = page.locator(".dropzone");
+  await expect(zone).toBeVisible();
+  await expect(zone).toContainText(/drag|drop|click/i);
+
+  // Before a file is chosen, no filename pill is shown
+  await expect(page.locator(".dropzone .filename")).toHaveCount(0);
+
+  await page
+    .locator("input#file")
+    .setInputFiles(FIX("sample-text.pdf"));
+  const pill = page.locator(".dropzone .filename");
+  await expect(pill).toBeVisible();
+  await expect(pill).toContainText("sample-text.pdf");
+
+  // The drop zone must not exceed the width of its container even if the
+  // filename is very long. Set a deliberately long filename and assert the
+  // .dropzone's clientWidth stays within its parent's bounds.
+  await page.evaluate(() => {
+    const input = document.getElementById("file") as HTMLInputElement;
+    const longName = "a".repeat(250) + ".pdf";
+    const file = new File([new Uint8Array([0x25, 0x50, 0x44, 0x46])], longName, {
+      type: "application/pdf",
+    });
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    input.files = dt.files;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await expect(page.locator(".dropzone .filename")).toContainText("aaaaa");
+
+  const containerWidth = await page.locator(".controls").evaluate((el) => el.clientWidth);
+  const zoneWidth = await zone.evaluate((el) => (el as HTMLElement).offsetWidth);
+  expect(zoneWidth).toBeLessThanOrEqual(containerWidth);
+});
+
 test("shows a status indicator while parsing", async ({ page }) => {
   await page.goto("/");
   await page.locator("input#file").setInputFiles(FIX("sample-text.pdf"));
@@ -68,6 +109,19 @@ test("shows a status indicator while parsing", async ({ page }) => {
     timeout: 45_000,
   });
   await expect(page.locator("#status")).not.toHaveText(/parsing/i);
+});
+
+test.skip("parses a scanned PDF with OCR on and extracts text via Tesseract", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  await page.goto("/");
+  await page.locator("input#ocr").check();
+  await page.locator("input#file").setInputFiles(FIX("sample-scanned.pdf"));
+  await page.locator("button#parse").click();
+  const textArea = page.locator("#text-output");
+  // First run may fetch traineddata from CDN; be generous.
+  await expect(textArea).toHaveValue(/OCR|TEST|PAGE/i, { timeout: 150_000 });
 });
 
 test("copy buttons copy the respective textarea and flash Copied!", async ({

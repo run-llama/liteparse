@@ -42,16 +42,75 @@ header p {
 
 .controls {
   display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.dropzone {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-height: 120px;
+  padding: 1.25rem 1rem;
+  border: 2px dashed var(--border);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.02);
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+.dropzone:hover,
+.dropzone:focus-visible {
+  border-color: var(--accent);
+  background: rgba(58, 110, 165, 0.08);
+  outline: none;
+}
+.dropzone.dragover {
+  border-color: var(--accent);
+  background: rgba(58, 110, 165, 0.15);
+}
+.dropzone-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+}
+.dropzone-primary {
+  font-weight: 600;
+  font-size: 1rem;
+}
+.dropzone-secondary {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+.dropzone .filename {
+  display: inline-block;
+  max-width: 100%;
+  padding: 0.25rem 0.6rem;
+  margin-top: 0.25rem;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-sizing: border-box;
+}
+
+.toggles {
+  display: flex;
   flex-wrap: wrap;
   gap: 0.75rem;
   align-items: center;
 }
 
-.controls label.file input[type="file"] {
-  font-size: 16px;
-}
-
-.controls label.toggle {
+.toggles label.toggle {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;

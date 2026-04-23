@@ -20,13 +20,18 @@
       </header>
 
       <section class="controls">
-        <label class="file">
-          <input type="file" accept="application/pdf" id="file" />
-          <span>Choose a PDF…</span>
+        <label class="dropzone" id="dropzone" tabindex="0">
+          <input type="file" accept="application/pdf" id="file" hidden />
+          <div class="dropzone-body">
+            <div class="dropzone-primary">Drop a PDF here or click to choose</div>
+            <div class="dropzone-secondary">Your file stays in your browser.</div>
+          </div>
         </label>
-        <label class="toggle"><input type="checkbox" id="ocr" /> Run OCR</label>
-        <label class="toggle"><input type="checkbox" id="shots" /> Render page screenshots</label>
-        <button id="parse" disabled>Parse</button>
+        <div class="toggles">
+          <label class="toggle"><input type="checkbox" id="ocr" /> Run OCR</label>
+          <label class="toggle"><input type="checkbox" id="shots" /> Render page screenshots</label>
+          <button id="parse" disabled>Parse</button>
+        </div>
       </section>
 
       <div id="status" role="status" aria-live="polite"></div>
