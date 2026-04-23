@@ -124,6 +124,28 @@ test("parses a scanned PDF with OCR on and extracts text via Tesseract", async (
   await expect(textArea).toHaveValue(/OCR|TEST|PAGE/i, { timeout: 150_000 });
 });
 
+test("OCR toggle actually changes behavior on a scanned PDF", async ({ page }) => {
+  test.setTimeout(180_000);
+  await page.goto("/");
+
+  // Pass 1: OCR off. Expect empty or near-empty text — no PDF text layer.
+  await page.locator("input#ocr").uncheck();
+  await page.locator("input#file").setInputFiles(FIX("sample-scanned.pdf"));
+  await page.locator("button#parse").click();
+  await expect(page.locator("#status")).toContainText(/Parsed/, { timeout: 60_000 });
+  const withoutOcr = await page.locator("#text-output").inputValue();
+  expect(withoutOcr.trim().length).toBeLessThan(5);
+
+  // Pass 2: OCR on. Expect non-trivial text.
+  await page.locator("input#ocr").check();
+  await page.locator("button#parse").click();
+  await expect(page.locator("#text-output")).toHaveValue(/OCR|TEST|PAGE/i, {
+    timeout: 150_000,
+  });
+  const withOcr = await page.locator("#text-output").inputValue();
+  expect(withOcr.length).toBeGreaterThan(withoutOcr.length + 3);
+});
+
 test("copy buttons copy the respective textarea and flash Copied!", async ({
   page,
   browserName,
