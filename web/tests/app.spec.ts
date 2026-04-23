@@ -56,6 +56,20 @@ test("parses a text PDF with OCR off and renders both text and JSON", async ({ p
   expect(parsed.pages.length).toBeGreaterThan(0);
 });
 
+test("shows a status indicator while parsing", async ({ page }) => {
+  await page.goto("/");
+  await page.locator("input#file").setInputFiles(FIX("sample-text.pdf"));
+  // Start parse and, without awaiting the click's full resolution,
+  // assert the status text appears.
+  const clickPromise = page.locator("button#parse").click();
+  await expect(page.locator("#status")).toHaveText(/parsing/i, { timeout: 5_000 });
+  await clickPromise;
+  await expect(page.locator("#text-output")).toHaveValue(/Hello from LiteParse/, {
+    timeout: 45_000,
+  });
+  await expect(page.locator("#status")).not.toHaveText(/parsing/i);
+});
+
 test("copy buttons copy the respective textarea and flash Copied!", async ({
   page,
   browserName,
