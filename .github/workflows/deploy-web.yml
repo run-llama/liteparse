@@ -27,8 +27,40 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Cache Vite optimized deps
+        uses: actions/cache@v4
+        with:
+          path: node_modules/.vite
+          key: vite-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vite.config.ts') }}
+          restore-keys: |
+            vite-${{ runner.os }}-
+
+      - name: Resolve Playwright version
+        id: pw
+        run: |
+          version=$(node -p "require('@playwright/test/package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          # Default Playwright browsers path on Linux runners.
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}-chromium-webkit
+          # No restore-keys: browser binaries are tied to a specific Playwright
+          # version, so a stale cache would break subtly instead of just
+          # forcing a fresh install.
+
       - name: Install Playwright browsers
+        if: steps.pw-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium webkit
+
+      - name: Install Playwright system deps (cache hit)
+        # Browser binaries cache, but system libs (ffmpeg, libatk, etc.) don't
+        # travel with the cache, so always run --install-deps on cache hits.
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium webkit
 
       - name: Run Playwright tests
         run: npx playwright test
@@ -60,6 +92,14 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Cache Vite optimized deps
+        uses: actions/cache@v4
+        with:
+          path: node_modules/.vite
+          key: vite-${{ runner.os }}-${{ hashFiles('package-lock.json', 'vite.config.ts') }}
+          restore-keys: |
+            vite-${{ runner.os }}-
 
       - name: Build web app
         # Project Pages live at /<repo>/, so set the base path accordingly
