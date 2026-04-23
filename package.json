@@ -60,6 +60,7 @@
     "eslint": "^10.0.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-prettier": "^5.5.5",
+    "pdf-lib": "^1.17.1",
     "prettier": "^3.8.1",
     "typedoc": "^0.28.17",
     "typedoc-plugin-markdown": "^4.10.0",
