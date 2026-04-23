@@ -2,6 +2,8 @@
 
 A single-page web app that runs LiteParse entirely in the browser. Pick a PDF, toggle OCR/screenshots, see the extracted text and pretty-printed JSON side by side. No server, no upload — the PDF stays on the user's machine.
 
+[Claude Code transcript that built this](https://gisthost.github.io/?d64889bfc1b897fea3867adfec62ed89/index.html).
+
 ## Run it
 
 From the repo root:
