@@ -55,3 +55,38 @@ test("parses a text PDF with OCR off and renders both text and JSON", async ({ p
   expect(Array.isArray(parsed.pages)).toBe(true);
   expect(parsed.pages.length).toBeGreaterThan(0);
 });
+
+test("copy buttons copy the respective textarea and flash Copied!", async ({
+  page,
+  browserName,
+}) => {
+  // Clipboard read permissions are chromium-only in Playwright; skip elsewhere.
+  test.skip(browserName !== "chromium", "clipboard API requires chromium permissions");
+  await page.goto("/");
+  await page.locator("input#file").setInputFiles(FIX("sample-text.pdf"));
+  await page.locator("button#parse").click();
+  await expect(page.locator("#text-output")).toHaveValue(/Hello from LiteParse/, {
+    timeout: 45_000,
+  });
+
+  const textCopy = page.locator("button.copy[data-target=text-output]");
+  const jsonCopy = page.locator("button.copy[data-target=json-output]");
+
+  // Initial label
+  await expect(textCopy).toHaveText("Copy");
+
+  // Copy text
+  await textCopy.click();
+  await expect(textCopy).toHaveText("Copied!");
+  const textClip = await page.evaluate(() => navigator.clipboard.readText());
+  expect(textClip).toBe(await page.locator("#text-output").inputValue());
+
+  // After the 1.5s window the label resets
+  await expect(textCopy).toHaveText("Copy", { timeout: 3000 });
+
+  // Copy JSON
+  await jsonCopy.click();
+  await expect(jsonCopy).toHaveText("Copied!");
+  const jsonClip = await page.evaluate(() => navigator.clipboard.readText());
+  expect(jsonClip).toBe(await page.locator("#json-output").inputValue());
+});

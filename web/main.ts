@@ -27,6 +27,31 @@ fileInput.addEventListener("change", () => {
   setStatus("");
 });
 
+for (const btn of Array.from(
+  document.querySelectorAll<HTMLButtonElement>("button.copy")
+)) {
+  btn.addEventListener("click", async () => {
+    const targetId = btn.dataset.target;
+    if (!targetId) return;
+    const target = document.getElementById(targetId) as HTMLTextAreaElement | null;
+    if (!target) return;
+    const text = target.value;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Fallback for browsers without clipboard API — select the text so the
+      // user can copy manually.
+      target.focus();
+      target.select();
+    }
+    const originalLabel = btn.textContent ?? "Copy";
+    btn.textContent = "Copied!";
+    window.setTimeout(() => {
+      btn.textContent = originalLabel;
+    }, 1500);
+  });
+}
+
 parseBtn.addEventListener("click", async () => {
   const file = fileInput.files?.[0];
   if (!file) return;
