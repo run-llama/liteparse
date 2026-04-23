@@ -35,6 +35,12 @@ pnpm-debug.log*
 screenshots/
 *.pdf
 !tests/fixtures/*.pdf
+!web/tests/fixtures/*.pdf
+
+# Vite / Playwright
+dist-web/
+playwright-report/
+test-results/
 
 # Temporary files
 tmp/
