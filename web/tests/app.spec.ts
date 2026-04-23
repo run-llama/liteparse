@@ -146,6 +146,27 @@ test("OCR toggle actually changes behavior on a scanned PDF", async ({ page }) =
   expect(withOcr.length).toBeGreaterThan(withoutOcr.length + 3);
 });
 
+test("reparsing replaces prior output", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto("/");
+
+  // First parse
+  await page.locator("input#file").setInputFiles(FIX("sample-text.pdf"));
+  await page.locator("button#parse").click();
+  await expect(page.locator("#text-output")).toHaveValue(/Hello from LiteParse/, {
+    timeout: 45_000,
+  });
+  const firstJson = await page.locator("#json-output").inputValue();
+  expect(firstJson.length).toBeGreaterThan(20);
+
+  // Second parse with a different (corrupt) file — expect error
+  await page.locator("input#file").setInputFiles(FIX("corrupt.pdf"));
+  await page.locator("button#parse").click();
+  // Text and JSON should be cleared before the error surfaces
+  await expect(page.locator("#text-output")).toHaveValue("");
+  await expect(page.locator("#json-output")).toHaveValue("");
+});
+
 test("surfaces parser errors in the status region", async ({ page }) => {
   await page.goto("/");
   await page.locator("input#file").setInputFiles(FIX("corrupt.pdf"));

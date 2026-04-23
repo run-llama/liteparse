@@ -58,7 +58,7 @@ jobs:
 
       - name: Add label for changed outputs (PR only)
         if: github.event_name == 'pull_request' && steps.compare.outputs.has_changes == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             github.rest.issues.addLabels({
@@ -71,7 +71,7 @@ jobs:
       - name: Check for approval label (PR only)
         id: check-approved
         if: github.event_name == 'pull_request' && steps.compare.outputs.has_changes == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const { data: labels } = await github.rest.issues.listLabelsOnIssue({
