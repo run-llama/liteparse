@@ -13,6 +13,8 @@ export async function importPdfJs() {
   return {
     fn: (pdfjs as { getDocument: (opts: unknown) => unknown }).getDocument,
     // Base URL for cmaps/standard_fonts/wasm assets — we staged them under /pdfjs/ in public/.
-    dir: "/pdfjs",
+    // Prefixed with Vite's BASE_URL so it resolves correctly when deployed to a sub-path
+    // (e.g. GitHub Pages project sites like /liteparse/).
+    dir: `${import.meta.env.BASE_URL}pdfjs`,
   };
 }

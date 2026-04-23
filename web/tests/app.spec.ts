@@ -111,7 +111,7 @@ test("shows a status indicator while parsing", async ({ page }) => {
   await expect(page.locator("#status")).not.toHaveText(/parsing/i);
 });
 
-test.skip("parses a scanned PDF with OCR on and extracts text via Tesseract", async ({
+test("parses a scanned PDF with OCR on and extracts text via Tesseract", async ({
   page,
 }) => {
   test.setTimeout(180_000);
@@ -120,7 +120,7 @@ test.skip("parses a scanned PDF with OCR on and extracts text via Tesseract", as
   await page.locator("input#file").setInputFiles(FIX("sample-scanned.pdf"));
   await page.locator("button#parse").click();
   const textArea = page.locator("#text-output");
-  // First run may fetch traineddata from CDN; be generous.
+  // First run may fetch traineddata from CDN; be generous on timeout.
   await expect(textArea).toHaveValue(/OCR|TEST|PAGE/i, { timeout: 150_000 });
 });
 

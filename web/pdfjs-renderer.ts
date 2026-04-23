@@ -31,10 +31,9 @@ export class PdfiumRenderer {
     }
     this.closeDocument();
     const { fn: getDocument } = await importPdfJs();
-    const data =
-      pdfInput instanceof Uint8Array
-        ? new Uint8Array(pdfInput.buffer, pdfInput.byteOffset, pdfInput.byteLength)
-        : new Uint8Array(pdfInput);
+    // Copy the bytes — pdf.js transfers the ArrayBuffer to its worker,
+    // which would detach the caller's view.
+    const data = new Uint8Array(pdfInput);
     const loadingTask = (
       getDocument as (opts: { data: Uint8Array }) => { promise: Promise<PdfJsDocument> }
     )({ data });
@@ -60,7 +59,14 @@ export class PdfiumRenderer {
     ctx.fillStyle = "#fff";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     await page.render({ canvasContext: ctx, viewport }).promise;
-    await page.cleanup().catch(() => {});
+    try {
+      const maybe = page.cleanup();
+      if (maybe && typeof (maybe as Promise<void>).then === "function") {
+        await (maybe as Promise<void>);
+      }
+    } catch {
+      // best-effort cleanup
+    }
     return { canvas, ctx, width: canvas.width, height: canvas.height };
   }
 
