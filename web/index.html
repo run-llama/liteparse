@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LiteParse — browser</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header>
+        <h1>LiteParse</h1>
+        <p>Parse PDFs in your browser. Nothing leaves your machine.</p>
+      </header>
+
+      <section class="controls">
+        <label class="file">
+          <input type="file" accept="application/pdf" id="file" />
+          <span>Choose a PDF…</span>
+        </label>
+        <label class="toggle"><input type="checkbox" id="ocr" checked /> Run OCR</label>
+        <label class="toggle"><input type="checkbox" id="shots" /> Render page screenshots</label>
+        <button id="parse" disabled>Parse</button>
+      </section>
+
+      <div id="status" role="status" aria-live="polite"></div>
+
+      <section class="results">
+        <div class="pane">
+          <div class="pane-header">
+            <h2>Text</h2>
+            <button class="copy" data-target="text-output">Copy</button>
+          </div>
+          <textarea
+            id="text-output"
+            readonly
+            placeholder="Extracted text will appear here…"
+          ></textarea>
+        </div>
+        <div class="pane">
+          <div class="pane-header">
+            <h2>JSON</h2>
+            <button class="copy" data-target="json-output">Copy</button>
+          </div>
+          <textarea
+            id="json-output"
+            readonly
+            placeholder="Pretty-printed JSON will appear here…"
+          ></textarea>
+        </div>
+      </section>
+
+      <section id="screenshots" class="screenshots" hidden></section>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
