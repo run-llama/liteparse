@@ -146,6 +146,19 @@ test("OCR toggle actually changes behavior on a scanned PDF", async ({ page }) =
   expect(withOcr.length).toBeGreaterThan(withoutOcr.length + 3);
 });
 
+test("surfaces parser errors in the status region", async ({ page }) => {
+  await page.goto("/");
+  await page.locator("input#file").setInputFiles(FIX("corrupt.pdf"));
+  await page.locator("button#parse").click();
+  const status = page.locator("#status");
+  await expect(status).toHaveClass(/error/, { timeout: 30_000 });
+  await expect(status).toContainText(/parse failed|error|invalid/i);
+  // Button is re-enabled so the user can try again
+  await expect(page.locator("button#parse")).toBeEnabled();
+  // Output stays empty
+  await expect(page.locator("#text-output")).toHaveValue("");
+});
+
 test("copy buttons copy the respective textarea and flash Copied!", async ({
   page,
   browserName,
