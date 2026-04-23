@@ -146,6 +146,32 @@ test("OCR toggle actually changes behavior on a scanned PDF", async ({ page }) =
   expect(withOcr.length).toBeGreaterThan(withoutOcr.length + 3);
 });
 
+test("renders page screenshots when the checkbox is set", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto("/");
+  await page.locator("input#shots").check();
+  await page.locator("input#file").setInputFiles(FIX("sample-text.pdf"));
+  await page.locator("button#parse").click();
+
+  const img = page.locator("#screenshots img").first();
+  await expect(img).toBeVisible({ timeout: 45_000 });
+  // Non-zero natural dimensions means the <img> actually decoded
+  const dims = await img.evaluate((el: HTMLImageElement) => ({
+    nw: el.naturalWidth,
+    nh: el.naturalHeight,
+    src: el.src.slice(0, 5),
+  }));
+  expect(dims.nw).toBeGreaterThan(0);
+  expect(dims.nh).toBeGreaterThan(0);
+  expect(dims.src).toBe("blob:");
+
+  // Unchecking and re-parsing removes the images
+  await page.locator("input#shots").uncheck();
+  await page.locator("button#parse").click();
+  await expect(page.locator("#status")).toContainText(/Parsed/, { timeout: 30_000 });
+  await expect(page.locator("#screenshots img")).toHaveCount(0);
+});
+
 test("reparsing replaces prior output", async ({ page }) => {
   test.setTimeout(90_000);
   await page.goto("/");

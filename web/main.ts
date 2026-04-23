@@ -6,8 +6,18 @@ const statusEl = document.getElementById("status") as HTMLDivElement;
 const textOut = document.getElementById("text-output") as HTMLTextAreaElement;
 const jsonOut = document.getElementById("json-output") as HTMLTextAreaElement;
 const ocrToggle = document.getElementById("ocr") as HTMLInputElement;
+const shotsToggle = document.getElementById("shots") as HTMLInputElement;
+const screenshotsEl = document.getElementById("screenshots") as HTMLElement;
 const dropzone = document.getElementById("dropzone") as HTMLLabelElement;
 const dropzoneBody = dropzone.querySelector(".dropzone-body") as HTMLDivElement;
+
+let currentScreenshotUrls: string[] = [];
+function clearScreenshots() {
+  for (const url of currentScreenshotUrls) URL.revokeObjectURL(url);
+  currentScreenshotUrls = [];
+  screenshotsEl.innerHTML = "";
+  screenshotsEl.hidden = true;
+}
 
 function renderFilename() {
   const existing = dropzone.querySelector(".filename");
@@ -101,6 +111,7 @@ parseBtn.addEventListener("click", async () => {
 
   textOut.value = "";
   jsonOut.value = "";
+  clearScreenshots();
 
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (!isPdfBytes(bytes)) {
@@ -121,6 +132,31 @@ parseBtn.addEventListener("click", async () => {
     textOut.value = result.text;
     jsonOut.value = JSON.stringify(result.json ?? result, null, 2);
     setStatus(`Parsed ${result.pages.length} page${result.pages.length === 1 ? "" : "s"}.`);
+
+    if (shotsToggle.checked) {
+      setStatus("Rendering screenshots…");
+      // parse() detached the bytes via the pdf.js worker transfer; pass
+      // a fresh copy to screenshot() so it can load its own doc.
+      const screenshotBytes = new Uint8Array(await file.arrayBuffer());
+      const shots = await parser.screenshot(screenshotBytes, undefined, true);
+      screenshotsEl.hidden = shots.length === 0;
+      for (const shot of shots) {
+        const blob = new Blob([shot.imageBuffer as unknown as BlobPart], {
+          type: "image/png",
+        });
+        const url = URL.createObjectURL(blob);
+        currentScreenshotUrls.push(url);
+        const img = document.createElement("img");
+        img.src = url;
+        img.alt = `Page ${shot.pageNum}`;
+        img.loading = "lazy";
+        screenshotsEl.appendChild(img);
+      }
+      setStatus(
+        `Parsed ${result.pages.length} page${result.pages.length === 1 ? "" : "s"}; ` +
+          `rendered ${shots.length} screenshot${shots.length === 1 ? "" : "s"}.`
+      );
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     setStatus(`Parse failed: ${msg}`, "error");

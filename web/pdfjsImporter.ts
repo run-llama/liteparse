@@ -2,6 +2,32 @@
 // No Node fs/url shims needed — the browser has DOMMatrix, Path2D, ImageData natively.
 // Vite will rewrite the `new URL(..., import.meta.url)` references into bundled asset URLs.
 
+// Safari < 17 / older iOS WebKit ship ReadableStream but not its
+// [Symbol.asyncIterator]. PDF.js does `for await (const v of readableStream)`
+// internally while streaming text content; without this polyfill the first
+// parse throws "undefined is not a function (near '...value of readableStream...')".
+// Install this BEFORE importing pdf.mjs so any early code paths see it.
+if (
+  typeof ReadableStream !== "undefined" &&
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  !(Symbol.asyncIterator in (ReadableStream.prototype as any))
+) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (ReadableStream.prototype as any)[Symbol.asyncIterator] = async function* iterator() {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const reader = (this as any).getReader();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        yield value;
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  };
+}
+
 // @ts-expect-error vendored ESM build has no types
 import * as pdfjs from "../src/vendor/pdfjs/pdf.mjs";
 
