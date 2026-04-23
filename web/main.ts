@@ -1,10 +1,11 @@
-// Entry point for the browser app.
+import { LiteParse } from "./liteparse-browser.js";
 
 const fileInput = document.getElementById("file") as HTMLInputElement;
 const parseBtn = document.getElementById("parse") as HTMLButtonElement;
 const statusEl = document.getElementById("status") as HTMLDivElement;
 const textOut = document.getElementById("text-output") as HTMLTextAreaElement;
 const jsonOut = document.getElementById("json-output") as HTMLTextAreaElement;
+const ocrToggle = document.getElementById("ocr") as HTMLInputElement;
 
 function setStatus(msg: string, kind: "info" | "error" = "info") {
   statusEl.textContent = msg;
@@ -39,5 +40,23 @@ parseBtn.addEventListener("click", async () => {
     return;
   }
 
-  setStatus("PDF validated. Parsing not wired yet.");
+  parseBtn.disabled = true;
+  setStatus("Parsing…");
+
+  try {
+    const parser = new LiteParse({
+      ocrEnabled: ocrToggle.checked,
+      outputFormat: "json",
+      preciseBoundingBox: false,
+    });
+    const result = await parser.parse(bytes, true);
+    textOut.value = result.text;
+    jsonOut.value = JSON.stringify(result.json ?? result, null, 2);
+    setStatus(`Parsed ${result.pages.length} page${result.pages.length === 1 ? "" : "s"}.`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    setStatus(`Parse failed: ${msg}`, "error");
+  } finally {
+    parseBtn.disabled = false;
+  }
 });

@@ -10,7 +10,13 @@
     <main class="app">
       <header>
         <h1>LiteParse</h1>
-        <p>Parse PDFs in your browser. Nothing leaves your machine.</p>
+        <p>
+          Browser demo of
+          <a href="https://github.com/run-llama/liteparse" target="_blank" rel="noopener">
+            LiteParse
+          </a>
+          — parse PDFs in your browser. Nothing leaves your machine.
+        </p>
       </header>
 
       <section class="controls">
@@ -18,7 +24,7 @@
           <input type="file" accept="application/pdf" id="file" />
           <span>Choose a PDF…</span>
         </label>
-        <label class="toggle"><input type="checkbox" id="ocr" checked /> Run OCR</label>
+        <label class="toggle"><input type="checkbox" id="ocr" /> Run OCR</label>
         <label class="toggle"><input type="checkbox" id="shots" /> Render page screenshots</label>
         <button id="parse" disabled>Parse</button>
       </section>

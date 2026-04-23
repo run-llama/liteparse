@@ -36,3 +36,22 @@ test("rejects non-PDF files with a clear error", async ({ page }) => {
   await expect(page.locator("#text-output")).toHaveValue("");
   await expect(page.locator("#json-output")).toHaveValue("");
 });
+
+test("parses a text PDF with OCR off and renders both text and JSON", async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.goto("/");
+  // OCR should already be unchecked by default
+  await page.locator("input#file").setInputFiles(FIX("sample-text.pdf"));
+  await page.locator("button#parse").click();
+
+  const textArea = page.locator("#text-output");
+  await expect(textArea).toHaveValue(/Hello from LiteParse/, { timeout: 45_000 });
+
+  const jsonArea = page.locator("#json-output");
+  const jsonValue = await jsonArea.inputValue();
+  expect(jsonValue.length).toBeGreaterThan(20);
+  expect(jsonValue).toContain("\n");
+  const parsed = JSON.parse(jsonValue);
+  expect(Array.isArray(parsed.pages)).toBe(true);
+  expect(parsed.pages.length).toBeGreaterThan(0);
+});

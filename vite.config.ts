@@ -1,8 +1,45 @@
-import { defineConfig } from "vite";
-import { resolve } from "node:path";
+import { defineConfig, type Plugin } from "vite";
+import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = (p: string) => resolve(fileURLToPath(new URL(".", import.meta.url)), p);
+
+const FILE_REDIRECTS: Array<{ match: RegExp; target: string }> = [
+  { match: /\/engines\/pdf\/pdfium-renderer(\.js|\.ts)?$/, target: here("web/pdfjs-renderer.ts") },
+  { match: /\/engines\/pdf\/pdfjsImporter(\.js|\.ts)?$/, target: here("web/pdfjsImporter.ts") },
+  { match: /\/engines\/ocr\/http-simple(\.js|\.ts)?$/, target: here("web/stubs/http-simple.ts") },
+  { match: /\/conversion\/convertToPdf(\.js|\.ts)?$/, target: here("web/stubs/convertToPdf.ts") },
+  {
+    match: /\/processing\/gridDebugLogger(\.js|\.ts)?$/,
+    target: here("web/stubs/gridDebugLogger.ts"),
+  },
+  {
+    match: /\/processing\/gridVisualizer(\.js|\.ts)?$/,
+    target: here("web/stubs/gridVisualizer.ts"),
+  },
+];
+
+// Rewrites relative imports of Node-only source files to their browser
+// replacements. Runs at resolveId so it catches `../engines/pdf/pdfium-renderer.js`
+// from parser.ts and `./pdfium-renderer.js` from pdfjs.ts alike.
+function liteparseNodeRedirects(): Plugin {
+  return {
+    name: "liteparse-node-redirects",
+    enforce: "pre",
+    async resolveId(source, importer) {
+      if (!importer) return null;
+      // Resolve relative to the importer so we match on absolute path
+      const importerDir = dirname(importer);
+      const absolutePath = source.startsWith(".") ? resolve(importerDir, source) : source;
+      for (const { match, target } of FILE_REDIRECTS) {
+        if (match.test(absolutePath) || match.test(source)) {
+          return target;
+        }
+      }
+      return null;
+    },
+  };
+}
 
 export default defineConfig({
   root: "web",
@@ -16,11 +53,11 @@ export default defineConfig({
     fs: { allow: [".."] },
   },
   optimizeDeps: {
-    exclude: ["tesseract.js"],
+    include: ["tesseract.js"],
   },
+  plugins: [liteparseNodeRedirects()],
   resolve: {
     alias: [
-      // Node-only modules that show up in the import graph but are never executed in browser
       { find: "node:fs/promises", replacement: here("web/stubs/empty.ts") },
       { find: "node:fs", replacement: here("web/stubs/empty.ts") },
       { find: "node:url", replacement: here("web/stubs/node-url.ts") },
@@ -35,31 +72,6 @@ export default defineConfig({
       { find: "form-data", replacement: here("web/stubs/empty.ts") },
       { find: "axios", replacement: here("web/stubs/empty.ts") },
       { find: "file-type", replacement: here("web/stubs/file-type.ts") },
-      // File-level redirects
-      {
-        find: here("src/engines/pdf/pdfium-renderer.ts"),
-        replacement: here("web/pdfjs-renderer.ts"),
-      },
-      {
-        find: here("src/engines/pdf/pdfjsImporter.ts"),
-        replacement: here("web/pdfjsImporter.ts"),
-      },
-      {
-        find: here("src/engines/ocr/http-simple.ts"),
-        replacement: here("web/stubs/http-simple.ts"),
-      },
-      {
-        find: here("src/conversion/convertToPdf.ts"),
-        replacement: here("web/stubs/convertToPdf.ts"),
-      },
-      {
-        find: here("src/processing/gridDebugLogger.ts"),
-        replacement: here("web/stubs/gridDebugLogger.ts"),
-      },
-      {
-        find: here("src/processing/gridVisualizer.ts"),
-        replacement: here("web/stubs/gridVisualizer.ts"),
-      },
     ],
   },
   define: {

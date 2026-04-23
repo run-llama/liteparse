@@ -1,5 +1,4 @@
 // Browser stub — debug logger does nothing. Parser never enables debug in the UI.
-import type { ProjectionTextBox } from "../../src/core/types.js";
 
 export interface GridDebugConfig {
   enabled: boolean;
@@ -46,38 +45,32 @@ export interface VisualizerPageData {
   rawLines: string[];
 }
 
+// No-op debug logger. Every method called by gridProjection.ts must exist,
+// even if it does nothing, otherwise `TypeError: logger.X is not a function`.
 export class GridDebugLogger {
   enabled = false;
-  capturePages = false;
-  traceEnabled = false;
-  log(_: unknown): void {}
-  logLine(): void {}
-  logBox(_phase: string, _box: ProjectionTextBox, _msg: string, _data?: unknown): void {}
-  logPhase(_phase: string, _msg: string, _data?: unknown): void {}
-  logAnchor(): void {}
-  logRender(): void {}
-  logTrace(): void {}
-  startPage(_pageNum: number): void {}
-  recordSegment(_seg: RenderedSegment): void {}
-  recordRawLines(_lines: string[]): void {}
-  finishPage(): void {}
-  getCapturedPages(): VisualizerPageData[] {
-    return [];
-  }
+  shouldVisualize = false;
+  debugConfig: GridDebugConfig = { enabled: false };
+  visualizerPages: VisualizerPageData[] = [];
+
+  setPage(_pageNum: number): void {}
+  captureRawLines(_lines: string[]): void {}
+  captureRender(..._args: unknown[]): void {}
+  logAnchors(..._args: unknown[]): void {}
+  logBlock(..._args: unknown[]): void {}
+  logBlockContext(..._args: unknown[]): void {}
+  logFlowingBlock(..._args: unknown[]): void {}
+  logFlowingLine(..._args: unknown[]): void {}
+  logForwardAnchor(..._args: unknown[]): void {}
+  logForwardAnchorMutation(..._args: unknown[]): void {}
+  logLineComposition(..._args: unknown[]): void {}
+  logRender(..._args: unknown[]): void {}
+  logRenderTrace(..._args: unknown[]): void {}
+  logSnapAssignment(..._args: unknown[]): void {}
+  logStructuredBlock(..._args: unknown[]): void {}
   async flush(): Promise<void> {}
-  shouldLogText(_text: string): boolean {
-    return false;
-  }
-  shouldLogLine(_lineIndex: number): boolean {
-    return false;
-  }
-  shouldLogPage(_pageNum: number): boolean {
-    return false;
-  }
-  shouldLogRegion(): boolean {
-    return false;
-  }
 }
+
 export class NoopGridDebugLogger extends GridDebugLogger {}
 export const NOOP_LOGGER = new NoopGridDebugLogger();
 export function createGridDebugLogger(_config?: GridDebugConfig): GridDebugLogger {
