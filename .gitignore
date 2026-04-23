@@ -75,3 +75,4 @@ ltt/
 .docs-preview/
 docs/src/content/docs/liteparse/api.md
 docs/src/content/docs/liteparse/.api-tmp/
+.playwright-mcp/
