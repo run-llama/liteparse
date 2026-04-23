@@ -25,3 +25,14 @@ test("parse button is disabled until a file is picked", async ({ page }) => {
   await page.locator("input[type=file]#file").setInputFiles(FIX("sample-text.pdf"));
   await expect(parseBtn).toBeEnabled();
 });
+
+test("rejects non-PDF files with a clear error", async ({ page }) => {
+  await page.goto("/");
+  await page.locator("input#file").setInputFiles(FIX("not-a-pdf.txt"));
+  await page.locator("button#parse").click();
+  const status = page.locator("#status");
+  await expect(status).toContainText(/PDF/i);
+  await expect(status).toHaveClass(/error/);
+  await expect(page.locator("#text-output")).toHaveValue("");
+  await expect(page.locator("#json-output")).toHaveValue("");
+});
