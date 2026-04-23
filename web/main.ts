@@ -1,3 +1,8 @@
-// Entry point for the browser app. Wired up incrementally by the test suite.
+// Entry point for the browser app.
 
-export {};
+const fileInput = document.getElementById("file") as HTMLInputElement;
+const parseBtn = document.getElementById("parse") as HTMLButtonElement;
+
+fileInput.addEventListener("change", () => {
+  parseBtn.disabled = !fileInput.files || fileInput.files.length === 0;
+});
