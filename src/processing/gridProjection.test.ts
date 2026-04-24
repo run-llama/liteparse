@@ -575,12 +575,13 @@ describe("visibleCharCount", () => {
 
   it("excludes Thai upper-vowel combining marks", () => {
     // 'สวัสดี': ส ว ั ส ด ี  (6 code-points; ั U+0E31 and ี U+0E35 are combining)
-    const str = "สวัสดี";
-    const result = visibleCharCount(str);
-    expect(result).toBeLessThan(str.length);
-    expect(result).toBeGreaterThan(0);
+    expect(visibleCharCount("สวัสดี")).toBe(4);
   });
 
+  it("counts Thai spacing vowels as visible characters", () => {
+    // 'กา': ก า  (2 code-points; า U+0E32 is a spacing vowel and should remain visible)
+    expect(visibleCharCount("กา")).toBe(2);
+  });
   it("returns at least 1 for a string of only combining marks", () => {
     expect(visibleCharCount("\u0E31")).toBe(1);
   });
