@@ -1,5 +1,5 @@
 import { expect, describe, it } from "vitest";
-import { bboxToLine, projectPagesToGrid, projectToGrid } from "./gridProjection";
+import { bboxToLine, projectPagesToGrid, projectToGrid, containsThai, visibleCharCount } from "./gridProjection";
 import { ProjectionTextBox } from "../core/types";
 import { DEFAULT_CONFIG } from "../core/config";
 import { NOOP_LOGGER } from "./gridDebugLogger";
@@ -539,5 +539,101 @@ describe("test projectPagesToGrid", () => {
     ];
     const result = await projectPagesToGrid(mockPageData, config);
     expect(result).toStrictEqual(expectedOutput);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Thai script handling
+// ---------------------------------------------------------------------------
+
+describe("containsThai", () => {
+  it("returns true for a pure Thai string", () => {
+    expect(containsThai("สวัสดี")).toBe(true);
+  });
+
+  it("returns true for a mixed Thai/Latin string", () => {
+    expect(containsThai("Hello สวัสดี World")).toBe(true);
+  });
+
+  it("returns false for a pure Latin string", () => {
+    expect(containsThai("Hello World")).toBe(false);
+  });
+
+  it("returns false for an empty string", () => {
+    expect(containsThai("")).toBe(false);
+  });
+
+  it("returns false for CJK characters", () => {
+    expect(containsThai("你好世界")).toBe(false);
+  });
+});
+
+describe("visibleCharCount", () => {
+  it("returns str.length for pure ASCII", () => {
+    expect(visibleCharCount("Hello")).toBe(5);
+  });
+
+  it("excludes Thai upper-vowel combining marks", () => {
+    // 'สวัสดี': ส ว ั ส ด ี  (6 code-points; ั U+0E31 and ี U+0E35 are combining)
+    const str = "สวัสดี";
+    const result = visibleCharCount(str);
+    expect(result).toBeLessThan(str.length);
+    expect(result).toBeGreaterThan(0);
+  });
+
+  it("returns at least 1 for a string of only combining marks", () => {
+    expect(visibleCharCount("\u0E31")).toBe(1);
+  });
+
+  it("excludes Latin combining diacritical marks", () => {
+    // 'e' + combining acute (U+0301) → 1 visible char
+    expect(visibleCharCount("e\u0301")).toBe(1);
+  });
+
+  it("counts correctly for a plain Thai consonant sequence (no combining)", () => {
+    expect(visibleCharCount("กขค")).toBe(3);
+  });
+});
+
+describe("Thai bboxToLine — same-line grouping with stacked diacritics", () => {
+  it("groups adjacent Thai syllable clusters that have slightly different Y positions", () => {
+    // Real-world case: PDF engine emits Thai syllable clusters as separate bboxes
+    // where above-vowels cause the bbox Y to shift upward slightly.
+    // Cluster A: consonant+below-vowel (normal baseline, y=100, h=14)
+    // Cluster B: consonant+above-vowel (bbox pushed up, y=97, h=17) — same visual line
+    // Both midpoints fall within each other's Y band → standard logic handles it.
+    // But a taller cluster seeding the line can leave a short cluster just outside.
+    //
+    // This test uses non-overlapping X positions so lineCollide=false.
+    const textBbox: ProjectionTextBox[] = [
+      { str: "กา",  x: 0,  y: 100, w: 18, h: 14, strLength: 2 }, // consonant + sara aa (below)
+      { str: "ดี",  x: 20, y: 96,  w: 18, h: 18, strLength: 2 }, // consonant + sara ii (above) → bbox taller, shifted up
+      { str: "ครับ", x: 40, y: 100, w: 30, h: 14, strLength: 4 },
+    ];
+    const result = bboxToLine(textBbox, 10, 14);
+    // All three should be on ONE line (may be merged into fewer items due to adjacency)
+    expect(result.length).toBe(1);
+  });
+
+  it("groups a Thai item whose Y start equals lineMaxY (boundary case)", () => {
+    // When a combining-vowel token seeds the line with a narrow band,
+    // the next base-consonant token's Y may exactly equal lineMaxY.
+    // The condition bbox.y <= lineMaxY should include this boundary.
+    const textBbox: ProjectionTextBox[] = [
+      { str: "\u0E35", x: 0,  y: 94, w: 8,  h: 6,  strLength: 1 },  // sara ii (above-vowel, narrow)
+      { str: "ก",     x: 20, y: 100, w: 10, h: 14, strLength: 1 },  // ko kai, x=20 (no X overlap)
+    ];
+    const result = bboxToLine(textBbox, 10, 14);
+    expect(result.length).toBe(1);
+    expect(result[0].length).toBe(2);
+  });
+
+  it("does NOT incorrectly merge Latin items on genuinely different lines", () => {
+    const textBbox: ProjectionTextBox[] = [
+      { str: "Line1", x: 0, y: 10, w: 50, h: 12, strLength: 5 },
+      { str: "Line2", x: 0, y: 30, w: 50, h: 12, strLength: 5 },
+    ];
+    const result = bboxToLine(textBbox, 10, 12);
+    expect(result.length).toBe(2);
   });
 });
