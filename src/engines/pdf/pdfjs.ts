@@ -669,13 +669,18 @@ export class PdfJsEngine implements PdfEngine {
       data = new Uint8Array(await fs.readFile(input));
       this.currentPdfPath = input;
     } else {
-      // pdf.js requires a plain Uint8Array, not a Buffer subclass
-      data = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+      // pdf.js requires a plain Uint8Array, not a Buffer subclass. Copy
+      // rather than view-on-input, because pdf.js transfers the underlying
+      // ArrayBuffer to its worker — which would detach the caller's view
+      // and any downstream consumer (e.g. the OCR renderer) would see zero
+      // bytes. A fresh Uint8Array owns its own ArrayBuffer.
+      data = new Uint8Array(input);
       this.currentPdfPath = null;
     }
 
-    // Store data for buffer-based rendering
-    this.currentPdfData = data;
+    // Store data for buffer-based rendering. Keep a separate copy so the
+    // one we hand to pdf.js can be transferred without affecting this one.
+    this.currentPdfData = new Uint8Array(data);
 
     const loadingTask = getDocument({
       data,

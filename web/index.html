@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LiteParse — browser</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header>
+        <h1>LiteParse</h1>
+        <p>
+          Browser demo of
+          <a href="https://github.com/run-llama/liteparse" target="_blank" rel="noopener">
+            LiteParse
+          </a>
+          — parse PDFs in your browser. Nothing leaves your machine.
+        </p>
+      </header>
+
+      <section class="controls">
+        <label class="dropzone" id="dropzone" tabindex="0">
+          <input type="file" accept="application/pdf" id="file" hidden />
+          <div class="dropzone-body">
+            <div class="dropzone-primary">Drop a PDF here or click to choose</div>
+            <div class="dropzone-secondary">Your file stays in your browser.</div>
+          </div>
+        </label>
+        <div class="toggles">
+          <label class="toggle"><input type="checkbox" id="ocr" /> Run OCR</label>
+          <label class="toggle"><input type="checkbox" id="shots" /> Render page screenshots</label>
+          <button id="parse" disabled>Parse</button>
+        </div>
+      </section>
+
+      <div id="status" role="status" aria-live="polite"></div>
+
+      <section class="results">
+        <div class="pane">
+          <div class="pane-header">
+            <h2>Text</h2>
+            <button class="copy" data-target="text-output">Copy</button>
+          </div>
+          <textarea
+            id="text-output"
+            readonly
+            placeholder="Extracted text will appear here…"
+          ></textarea>
+        </div>
+        <div class="pane">
+          <div class="pane-header">
+            <h2>JSON</h2>
+            <button class="copy" data-target="json-output">Copy</button>
+          </div>
+          <textarea
+            id="json-output"
+            readonly
+            placeholder="Pretty-printed JSON will appear here…"
+          ></textarea>
+        </div>
+      </section>
+
+      <section id="screenshots" class="screenshots" hidden></section>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

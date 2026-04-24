@@ -35,12 +35,19 @@ pnpm-debug.log*
 screenshots/
 *.pdf
 !tests/fixtures/*.pdf
+!web/tests/fixtures/*.pdf
+
+# Vite / Playwright
+dist-web/
+playwright-report/
+test-results/
 
 # Temporary files
 tmp/
 temp/
 *.txt
 *.png
+!web/tests/fixtures/*.txt
 deno.json
 
 # Python files
@@ -69,3 +76,4 @@ ltt/
 .docs-preview/
 docs/src/content/docs/liteparse/api.md
 docs/src/content/docs/liteparse/.api-tmp/
+.playwright-mcp/
