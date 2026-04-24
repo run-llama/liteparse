@@ -4,6 +4,69 @@ import { cleanRawText } from "./cleanText.js";
 import { ProjectionTextBox, Coordinates, LiteParseConfig, ParsedPage } from "../core/types.js";
 import { PageData } from "../engines/pdf/interface.js";
 
+// ---------------------------------------------------------------------------
+// Complex-script helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true when the string contains one or more Thai characters
+ * (Unicode block U+0E00–U+0E7F).
+ *
+ * Thai (and similar abugida scripts) have several properties that require
+ * special handling throughout the grid-projection pipeline:
+ *  1. Words are **not separated by spaces**, so a paragraph appears as a
+ *     dense run with very few anchor points — easily mis-classified as a
+ *     structured/tabular block.
+ *  2. **Combining vowels and tone marks** sit above or below the base
+ *     consonant and are encoded as separate Unicode code-points.  Using
+ *     `str.length` to count "characters" therefore over-counts, producing
+ *     an artificially small `medianWidth` estimate that skews every
+ *     downstream spacing calculation.
+ *  3. The taller vertical extent caused by stacked diacritics shifts the
+ *     bbox upward (lower `y`), so the standard midpoint test
+ *     (`bbox.y + bbox.h * 0.5`) may fall *outside* the visual text band,
+ *     preventing items on the same line from being grouped correctly.
+ */
+export function containsThai(str: string): boolean {
+  for (let i = 0; i < str.length; i++) {
+    const cp = str.charCodeAt(i);
+    if (cp >= 0x0e00 && cp <= 0x0e7f) return true;
+  }
+  return false;
+}
+
+/**
+ * Count the number of **visible base characters** in a string, excluding
+ * Thai (and general Unicode) combining / zero-width characters.
+ *
+ * This gives a more accurate character-width estimate for scripts that
+ * stack diacritics on top of base glyphs (Thai, Devanagari, Arabic, …).
+ *
+ * For pure-ASCII / Latin text the result equals `str.length`, so this
+ * function is safe to use as a drop-in replacement everywhere.
+ */
+export function visibleCharCount(str: string): number {
+  let count = 0;
+  for (const ch of str) {
+    const cp = ch.codePointAt(0)!;
+    // Skip Thai tone marks & upper/lower vowel signs (combining diacritics)
+    // U+0E30–U+0E3A  lower vowels / short-a / sara
+    // U+0E40–U+0E44  leading vowels (written before the consonant)
+    // U+0E47–U+0E4E  maitaikhu, mai ek/tho/tri/jattawa, thanthacat, nikhahit
+    const isThaiCombining =
+      (cp >= 0x0e30 && cp <= 0x0e3a) || (cp >= 0x0e47 && cp <= 0x0e4e);
+    // General Unicode combining characters (Mn = non-spacing mark)
+    // Quick range check covers the most common combining blocks
+    const isGeneralCombining =
+      (cp >= 0x0300 && cp <= 0x036f) || // Combining Diacritical Marks
+      (cp >= 0x1ab0 && cp <= 0x1aff) || // Combining Diacritical Marks Extended
+      (cp >= 0x1dc0 && cp <= 0x1dff) || // Combining Diacritical Marks Supplement
+      (cp >= 0xfe20 && cp <= 0xfe2f); // Combining Half Marks
+    if (!isThaiCombining && !isGeneralCombining) count++;
+  }
+  return Math.max(count, 1); // never return 0
+}
+
 import { applyMarkupTags } from "./markupUtils.js";
 import { GridDebugLogger, createGridDebugLogger } from "./gridDebugLogger.js";
 import { renderAllVisualizations } from "./gridVisualizer.js";
@@ -916,10 +979,21 @@ export function bboxToLine(
       const yTolerance = bbox.rotated ? Math.max(medianHeight * 2, 20) : 0;
       const yWithinTolerance = bbox.rotated && Math.abs(bbox.y - lineMinY) < yTolerance;
 
+      // Thai (and other stacked-diacritic scripts) extend the bbox upward so that
+      // the midpoint of the bbox can fall *above* the text band of adjacent items on
+      // the same visual line.  When a combining-mark token (tiny bbox, high y) seeds
+      // the line, the following base-consonant token has its top just at or below
+      // lineMaxY — well within the same visual row.  Allow it by checking whether
+      // the Thai token's TOP starts within half a median line-height of lineMaxY.
+      const bboxHasThai = containsThai(bbox.str);
+      const thaiBottomInLine =
+        bboxHasThai && bbox.y < lineMaxY + medianHeight * 0.5;
+
       if (
         !lineCollide &&
         !marginMismatch &&
         (yWithinTolerance ||
+          thaiBottomInLine ||
           (bbox.y + bbox.h * 0.5 >= lineMinY && bbox.y + bbox.h * 0.5 <= lineMaxY) ||
           (bbox.y >= lineMinY && bbox.y <= lineMaxY))
       ) {
@@ -1311,19 +1385,42 @@ function isFlowingTextBlock(
   // Count non-empty lines and how many span most of the page width
   let nonEmptyLines = 0;
   let wideLines = 0;
+  // Track whether any line in this block contains Thai text
+  let blockHasThai = false;
   for (const line of blockLines) {
     if (line.length === 0) continue;
     nonEmptyLines++;
     const lineStart = line[0].x;
     const lineEnd = line[line.length - 1].x + line[line.length - 1].w;
     if (lineEnd - lineStart > pageWidth * FLOWING_WIDE_LINE_RATIO) wideLines++;
+    if (!blockHasThai && line.some((b) => containsThai(b.str))) blockHasThai = true;
   }
 
   // Need enough lines to confidently classify
   if (nonEmptyLines < FLOWING_MIN_LINES) return false;
 
+  // Thai paragraphs have no inter-word spaces, so PDF engines often emit each
+  // syllable cluster as a tiny separate bbox.  The resulting lines are shorter
+  // than Latin paragraphs relative to page width, making them fail the standard
+  // FLOWING_WIDE_LINE_RATIO threshold.  Use a relaxed threshold (0.3 instead of
+  // 0.5) so Thai prose is correctly identified as flowing text rather than being
+  // sent through the structured-grid path where it breaks apart.
+  const wideLineRatio = blockHasThai ? 0.3 : FLOWING_WIDE_LINE_RATIO;
+  const wideLineThreshold = blockHasThai ? 0.4 : FLOWING_WIDE_LINE_THRESHOLD;
+
+  // Count wide lines with the (possibly relaxed) ratio
+  if (blockHasThai) {
+    wideLines = 0;
+    for (const line of blockLines) {
+      if (line.length === 0) continue;
+      const lineStart = line[0].x;
+      const lineEnd = line[line.length - 1].x + line[line.length - 1].w;
+      if (lineEnd - lineStart > pageWidth * wideLineRatio) wideLines++;
+    }
+  }
+
   // Majority of lines should span most of page width for flowing text
-  return wideLines / nonEmptyLines > FLOWING_WIDE_LINE_THRESHOLD;
+  return wideLines / nonEmptyLines > wideLineThreshold;
 }
 
 /**
@@ -1431,7 +1528,7 @@ export function projectToGrid(
       w: bbox.w,
       h: bbox.h,
       r: bbox.r,
-      strLength: bbox.str.length,
+      strLength: visibleCharCount(bbox.str),
     });
   }
 
