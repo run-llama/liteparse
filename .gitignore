@@ -4,6 +4,7 @@ pnpm-lock.yaml
 
 # Build output
 dist/
+dist-browser-compat/
 bin/
 sea-prep.blob
 sea-config.json

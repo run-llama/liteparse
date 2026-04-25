@@ -1,0 +1,39 @@
+name: Browser Compatibility
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  browser-bundle:
+    runs-on: ubuntu-latest
+    name: Verify browser bundle builds
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Build browser bundle with Vite
+        run: npx vite build --config scripts/browser-compat/vite.config.ts
+
+      - name: Verify bundle was produced
+        run: |
+          if [ ! -d dist-browser-compat ]; then
+            echo "❌ dist-browser-compat directory not found"
+            exit 1
+          fi
+          JS_FILES=$(find dist-browser-compat -name "*.js" | wc -l)
+          if [ "$JS_FILES" -eq 0 ]; then
+            echo "❌ No JS files in dist-browser-compat"
+            exit 1
+          fi
+          echo "✅ Browser bundle produced ($JS_FILES JS file(s))"
+          du -sh dist-browser-compat/

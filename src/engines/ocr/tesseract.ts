@@ -12,7 +12,9 @@ export class TesseractEngine implements OcrEngine {
   constructor(concurrency: number = 4, tessdataPath?: string) {
     this.concurrency = concurrency;
     // Use explicit path, then TESSDATA_PREFIX env var, then let tesseract.js default (CDN)
-    this.tessdataPath = tessdataPath || process.env.TESSDATA_PREFIX || undefined;
+    const envPath =
+      typeof process !== "undefined" && process.env ? process.env.TESSDATA_PREFIX : undefined;
+    this.tessdataPath = tessdataPath || envPath || undefined;
   }
 
   async initialize(language: string = "eng"): Promise<void> {

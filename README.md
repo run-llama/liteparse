@@ -172,6 +172,82 @@ Non-PDF buffers (images, Office documents) are written to a temp directory for f
 const screenshots = await parser.screenshot(pdfBytes, [1, 2, 3]);
 ```
 
+### Browser Usage
+
+LiteParse's core parsing engine (PDF.js text extraction, grid projection, OCR via Tesseract.js) can run in the browser. Since the library has Node-only dependencies (sharp, fs, child_process), you'll need a bundler like Vite to swap those out with browser stubs.
+
+#### Vite Configuration
+
+The key is a Vite plugin that redirects Node-only source files to browser-safe replacements, plus `resolve.alias` entries that stub out Node built-in modules:
+
+```typescript
+// vite.config.ts
+import { defineConfig, type Plugin } from "vite";
+import { resolve, dirname } from "node:path";
+
+// Node-only files → browser stubs (you write these)
+const FILE_REDIRECTS = [
+  { match: /\/engines\/pdf\/pdfium-renderer(\.js|\.ts)?$/, target: "stubs/pdfium-renderer.ts" },
+  { match: /\/engines\/pdf\/pdfjsImporter(\.js|\.ts)?$/,   target: "stubs/pdfjsImporter.ts" },
+  { match: /\/engines\/ocr\/http-simple(\.js|\.ts)?$/,     target: "stubs/http-simple.ts" },
+  { match: /\/conversion\/convertToPdf(\.js|\.ts)?$/,      target: "stubs/convertToPdf.ts" },
+  { match: /\/processing\/gridDebugLogger(\.js|\.ts)?$/,   target: "stubs/gridDebugLogger.ts" },
+  { match: /\/processing\/gridVisualizer(\.js|\.ts)?$/,    target: "stubs/gridVisualizer.ts" },
+];
+
+function liteparseNodeRedirects(): Plugin {
+  return {
+    name: "liteparse-node-redirects",
+    enforce: "pre",
+    async resolveId(source, importer) {
+      if (!importer) return null;
+      const abs = source.startsWith(".") ? resolve(dirname(importer), source) : source;
+      for (const { match, target } of FILE_REDIRECTS) {
+        if (match.test(abs) || match.test(source)) return resolve(target);
+      }
+      return null;
+    },
+  };
+}
+
+export default defineConfig({
+  plugins: [liteparseNodeRedirects()],
+  optimizeDeps: { include: ["tesseract.js"] },
+  resolve: {
+    alias: [
+      { find: "node:fs/promises", replacement: "stubs/empty.ts" },
+      { find: "node:fs",          replacement: "stubs/empty.ts" },
+      { find: "node:url",         replacement: "stubs/empty.ts" },
+      { find: "node:path",        replacement: "stubs/empty.ts" },
+      { find: "node:os",          replacement: "stubs/empty.ts" },
+      { find: "node:child_process", replacement: "stubs/empty.ts" },
+      { find: /^fs$/,             replacement: "stubs/empty.ts" },
+      { find: /^path$/,           replacement: "stubs/empty.ts" },
+      { find: /^os$/,             replacement: "stubs/empty.ts" },
+      { find: /^child_process$/,  replacement: "stubs/empty.ts" },
+      { find: "form-data",        replacement: "stubs/empty.ts" },
+      { find: "axios",            replacement: "stubs/empty.ts" },
+      { find: "file-type",        replacement: "stubs/file-type.ts" },
+    ],
+  },
+});
+```
+
+See [`scripts/browser-compat/`](scripts/browser-compat/) for a complete working example with all the stub files.
+
+#### What works in the browser
+
+- PDF parsing from `Uint8Array` input (use `file.arrayBuffer()` to get bytes from a `<input type="file">`)
+- OCR via Tesseract.js (runs in Web Workers, fetches language data from CDN on first use)
+- Text and JSON output formats
+
+#### What doesn't work
+
+- File path input (pass `Uint8Array` instead)
+- DOCX/XLSX/PPTX/image conversion (requires LibreOffice/ImageMagick)
+- HTTP OCR server backend
+- Screenshots (these use PDFium + sharp, which are native Node addons)
+
 ### CLI Options
 
 #### Parse Command
