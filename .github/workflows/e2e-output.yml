@@ -10,7 +10,8 @@ on:
 permissions:
   contents: read
   pull-requests: write
-
+  issues: write
+  
 jobs:
   compare-outputs:
     runs-on: ubuntu-latest
