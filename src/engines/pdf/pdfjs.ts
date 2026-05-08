@@ -159,7 +159,15 @@ function getOverlapArea(
  * Assigns the url property to matching text items.
  */
 function applyLinkAnnotationsToTextItems(
-  textItems: Array<{ x: number; y: number; w?: number; h?: number; width?: number; height?: number; url?: string }>,
+  textItems: Array<{
+    x: number;
+    y: number;
+    w?: number;
+    h?: number;
+    width?: number;
+    height?: number;
+    url?: string;
+  }>,
   annotations: Annotation[],
   viewportTransform: number[]
 ): void {
