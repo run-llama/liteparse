@@ -217,6 +217,9 @@ export function buildBbox(pageData: PageData, config: LiteParseConfig): Projecti
       vgap: item.vgap,
       isPlaceholder: item.isPlaceholder,
     };
+    if (item.url !== undefined) {
+      line.url = item.url;
+    }
 
     lines.push(line);
   }

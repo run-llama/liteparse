@@ -199,6 +199,8 @@ export interface TextItem {
   isPlaceholder?: boolean;
   /** Confidence score from 0.0 to 1.0. Native PDF text defaults to 1.0, OCR text reflects engine confidence. */
   confidence?: number;
+  /** Hyperlink URL if this text is a link annotation. */
+  url?: string;
 }
 
 /**
@@ -230,6 +232,8 @@ export interface ProjectionTextBox {
   vgap?: boolean;
   isPlaceholder?: boolean;
   fromOCR?: boolean;
+  /** Hyperlink URL if this text is a link annotation. */
+  url?: string;
 
   // Projection metadata
   snap?: "left" | "right" | "center";
@@ -330,6 +334,8 @@ export interface JsonTextItem {
   fontSize?: number;
   /** The OCR confidence (null if OCR wasn't used) */
   confidence?: number;
+  /** Hyperlink URL if this text is a link annotation. */
+  url?: string;
 }
 
 /**

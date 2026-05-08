@@ -24,7 +24,19 @@ interface PdfJsDocument {
 interface PdfJsPage {
   getViewport(params: { scale: number }): PdfJsViewport;
   getTextContent(): Promise<PdfJsTextContent>;
+  getAnnotations(): Promise<PdfJsAnnotation[]>;
   cleanup(): Promise<void>;
+}
+
+/** PDF.js annotation type */
+interface PdfJsAnnotation {
+  subtype: string;
+  url?: string;
+  dest?: unknown;
+  rect: number[];
+  flag?: unknown;
+  color?: number[];
+  borderStyle?: unknown;
 }
 
 /** PDF.js viewport type */
@@ -94,6 +106,92 @@ function applyTransformation(
     x: point.x * transform[0] + point.y * transform[2] + transform[4],
     y: point.x * transform[1] + point.y * transform[3] + transform[5],
   };
+}
+
+/**
+ * Transform PDF annotation rect [llx, lly, urx, ury] to screen coordinates.
+ * PDF uses bottom-left origin, screen uses top-left.
+ */
+function transformAnnotationRect(
+  rect: number[],
+  viewportTransform: number[]
+): { left: number; top: number; right: number; bottom: number; width: number; height: number } {
+  const ll = applyTransformation({ x: rect[0], y: rect[1] }, viewportTransform);
+  const ur = applyTransformation({ x: rect[2], y: rect[3] }, viewportTransform);
+
+  const left = Math.min(ll.x, ur.x);
+  const right = Math.max(ll.x, ur.x);
+  const top = Math.min(ll.y, ur.y);
+  const bottom = Math.max(ll.y, ur.y);
+
+  return {
+    left,
+    top,
+    right,
+    bottom,
+    width: right - left,
+    height: bottom - top,
+  };
+}
+
+/**
+ * Check if two bounding boxes overlap (for annotation <-> text item matching).
+ * Returns the overlap area.
+ */
+function getOverlapArea(
+  box1: { x: number; y: number; w: number; h: number },
+  box2: { x: number; y: number; w: number; h: number }
+): number {
+  const left = Math.max(box1.x, box2.x);
+  const right = Math.min(box1.x + box1.w, box2.x + box2.w);
+  const top = Math.max(box1.y, box2.y);
+  const bottom = Math.min(box1.y + box1.h, box2.y + box2.h);
+
+  if (left >= right || top >= bottom) {
+    return 0;
+  }
+
+  return (right - left) * (bottom - top);
+}
+
+/**
+ * Match link annotations to text items using spatial overlap.
+ * Assigns the url property to matching text items.
+ */
+function applyLinkAnnotationsToTextItems(
+  textItems: Array<{ x: number; y: number; w?: number; h?: number; width?: number; height?: number; url?: string }>,
+  annotations: Annotation[],
+  viewportTransform: number[]
+): void {
+  for (const annotation of annotations) {
+    if (!annotation.url || annotation.subtype !== "Link") {
+      continue;
+    }
+
+    const linkBox = transformAnnotationRect(annotation.rect, viewportTransform);
+
+    for (const item of textItems) {
+      const itemW = item.w || item.width || 0;
+      const itemH = item.h || item.height || 0;
+
+      const overlap = getOverlapArea(
+        { x: item.x, y: item.y, w: itemW, h: itemH },
+        { x: linkBox.left, y: linkBox.top, w: linkBox.width, h: linkBox.height }
+      );
+
+      const itemArea = itemW * itemH;
+      const linkArea = linkBox.width * linkBox.height;
+
+      if (overlap > 0) {
+        const itemOverlapRatio = itemArea > 0 ? overlap / itemArea : 0;
+        const linkOverlapRatio = linkArea > 0 ? overlap / linkArea : 0;
+
+        if (itemOverlapRatio >= 0.5 || linkOverlapRatio >= 0.25) {
+          item.url = annotation.url;
+        }
+      }
+    }
+  }
 }
 
 // Pre-compiled regex patterns for string decoding
@@ -834,9 +932,25 @@ export class PdfJsEngine implements PdfEngine {
       }
     }
 
-    // Skip annotation extraction - not currently used in processing pipeline
-    // Can be re-enabled if needed for link extraction, etc.
-    const annotations: Annotation[] = [];
+    // Extract link annotations and apply to text items
+    let annotations: Annotation[] = [];
+    try {
+      const pdfAnnotations = await page.getAnnotations();
+      annotations = pdfAnnotations
+        .filter((a) => a.subtype === "Link")
+        .map((a) => ({
+          type: "Link",
+          subtype: a.subtype,
+          url: a.url,
+          rect: a.rect,
+        }));
+
+      if (annotations.length > 0) {
+        applyLinkAnnotationsToTextItems(textItems, annotations, viewportTransform);
+      }
+    } catch {
+      // Annotation extraction is best-effort
+    }
 
     await page.cleanup();
 
