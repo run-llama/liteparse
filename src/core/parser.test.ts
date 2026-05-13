@@ -344,7 +344,7 @@ const {
 });
 
 import { LiteParse } from "./parser";
-import { LiteParseConfig, ScreenshotResult } from "./types";
+import { LiteParseConfig, ScreenshotResult, TextItem } from "./types";
 
 vi.mock("../conversion/convertToPdf.js", async () => {
   const actual = await vi.importActual<typeof import("../conversion/convertToPdf.js")>(
@@ -426,6 +426,7 @@ vi.mock("../processing/grid.js", async () => {
     ...actual,
     projectPagesToGrid: vi
       .fn()
+      .mockImplementation((pages) => structuredClone(pages))
       // these get modified, so we need to pass a deep copy of the array instead of the original one
       .mockImplementationOnce(() => structuredClone(mockParsedPages)) // no ocr - text
       .mockImplementationOnce(() => structuredClone(mockParsedPages)) // no ocr - json
@@ -595,6 +596,39 @@ describe("Parse tests", () => {
         return typeof page.boundingBoxes != "undefined";
       }).length
     ).toBe(0);
+  });
+
+  it("test ocrTextMode ocr-only uses only OCR text items", async () => {
+    const nativeTextItem: TextItem = {
+      str: "Native text",
+      x: 10,
+      y: 20,
+      width: 190,
+      height: 20,
+      w: 190,
+      h: 20,
+      fontName: "PDF",
+      fontSize: 20,
+      confidence: 1,
+    };
+
+    mockPages.forEach((page) => {
+      (page as { textItems: TextItem[] }).textItems = [nativeTextItem];
+    });
+
+    const config: Partial<LiteParseConfig> = {
+      ocrEnabled: true,
+      outputFormat: "text",
+      ocrTextMode: "ocr-only",
+    };
+    const liteparse = new LiteParse(config);
+    const result = await liteparse.parse("/tmp/test.docx");
+
+    expect(result.pages.at(0)!.textItems.map((item) => item.str)).toStrictEqual(
+      mockOcrResults.map((result) => result.text)
+    );
+    expect(result.pages.at(0)!.textItems.every((item) => item.fontName === "OCR")).toBe(true);
+    expect(result.pages.at(0)!.textItems.some((item) => item.fontName === "PDF")).toBe(false);
   });
 });
 

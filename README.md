@@ -264,6 +264,7 @@ Options:
   --ocr-server-url <url>  HTTP OCR server URL (uses Tesseract if not provided)
   --no-ocr                Disable OCR
   --ocr-language <lang>   OCR language(s) (default: "en")
+  --ocr-text-mode <mode>  How to combine native text and OCR text (choices: "merge", "ocr-only")
   --num-workers <n>       Number of pages to OCR in parallel (default: CPU cores - 1)
   --max-pages <n>         Max pages to parse (default: "10000")
   --target-pages <pages>  Target pages (e.g., "1-5,10,15-20")
@@ -289,6 +290,7 @@ Options:
   --ocr-server-url <url>  HTTP OCR server URL (uses Tesseract if not provided)
   --no-ocr                Disable OCR
   --ocr-language <lang>   OCR language(s) (default: "en")
+  --ocr-text-mode <mode>  How to combine native text and OCR text (choices: "merge", "ocr-only")
   --num-workers <n>       Number of pages to OCR in parallel (default: CPU cores - 1)
   --max-pages <n>         Max pages to parse per file (default: "10000")
   --dpi <dpi>             DPI for rendering (default: "150")
@@ -427,6 +429,7 @@ Create a `liteparse.config.json` file:
 {
   "ocrLanguage": "en",
   "ocrEnabled": true,
+  "ocrTextMode": "merge",
   "maxPages": 1000,
   "dpi": 150,
   "outputFormat": "json",
@@ -435,6 +438,8 @@ Create a `liteparse.config.json` file:
   "password": "optional_password"
 }
 ```
+
+Set `"ocrTextMode": "ocr-only"` to use only OCR text on pages where OCR runs. This can help with PDFs whose native text layer is corrupted or hidden.
 
 For HTTP OCR servers, just add `ocrServerUrl`:
 

@@ -9,6 +9,14 @@ import type { GridDebugConfig } from "../processing/gridDebugLogger.js";
 export type OutputFormat = "json" | "text";
 
 /**
+ * Controls how OCR text is combined with native PDF text on pages where OCR runs.
+ *
+ * - `"merge"` keeps existing behavior by adding non-overlapping OCR text to native text.
+ * - `"ocr-only"` uses OCR text only for OCR'd pages, useful for PDFs with bad hidden text layers.
+ */
+export type OcrTextMode = "merge" | "ocr-only";
+
+/**
  * Accepted input types for {@link LiteParse.parse} and {@link LiteParse.screenshot}.
  *
  * - `string` — A file path to a document on disk.
@@ -57,6 +65,14 @@ export interface LiteParseConfig {
    * @see {@link https://github.com/run-llama/liteparse/blob/main/OCR_API_SPEC.md | OCR API Specification}
    */
   ocrServerUrl?: string;
+
+  /**
+   * How OCR text should be combined with native PDF text on pages where OCR runs.
+   * Use `"ocr-only"` when native PDF text is corrupted or hidden text should be ignored.
+   *
+   * @defaultValue `"merge"`
+   */
+  ocrTextMode: OcrTextMode;
 
   /**
    * Path to a directory containing Tesseract `.traineddata` files.

@@ -4,7 +4,7 @@ import { existsSync, readdirSync, statSync } from "fs";
 import os from "os";
 import path from "path";
 import { LiteParse } from "../src/core/parser.js";
-import { LiteParseConfig, OutputFormat } from "../src/core/types.js";
+import { LiteParseConfig, OcrTextMode, OutputFormat } from "../src/core/types.js";
 import { performance } from "perf_hooks";
 import pkg from "../package.json" with { type: "json" };
 
@@ -21,6 +21,7 @@ interface ParseCommandOptions {
   ocrServerUrl?: string;
   ocr?: boolean;
   ocrLanguage?: string;
+  ocrTextMode?: string;
   numWorkers?: string;
   maxPages?: string;
   targetPages?: string;
@@ -54,6 +55,7 @@ interface BatchParseCommandOptions {
   ocrServerUrl?: string;
   ocr?: boolean;
   ocrLanguage?: string;
+  ocrTextMode?: string;
   numWorkers?: string;
   maxPages?: string;
   dpi?: string;
@@ -80,6 +82,12 @@ program
   .option("--ocr-server-url <url>", "HTTP OCR server URL (uses Tesseract if not provided)")
   .option("--no-ocr", "Disable OCR")
   .option("--ocr-language <lang>", "OCR language(s)", DEFAULT_LANGUAGE)
+  .addOption(
+    new Option("--ocr-text-mode <mode>", "How to combine native text and OCR text").choices([
+      "merge",
+      "ocr-only",
+    ])
+  )
   .option(
     "--num-workers <n>",
     "Number of pages to OCR in parallel. Defaults to number of CPU cores minus one."
@@ -148,6 +156,10 @@ program
         preserveVerySmallText: options.preserveSmallText || false,
         password: options.password,
       };
+
+      if (options.ocrTextMode) {
+        config.ocrTextMode = options.ocrTextMode as OcrTextMode;
+      }
 
       // Build debug config if any debug flags are set
       if (options.debug || options.debugTrace || options.debugVisualize) {
@@ -354,6 +366,12 @@ program
   .option("--ocr-server-url <url>", "HTTP OCR server URL (uses Tesseract if not provided)")
   .option("--no-ocr", "Disable OCR")
   .option("--ocr-language <lang>", "OCR language(s)", DEFAULT_LANGUAGE)
+  .addOption(
+    new Option("--ocr-text-mode <mode>", "How to combine native text and OCR text").choices([
+      "merge",
+      "ocr-only",
+    ])
+  )
   .option(
     "--num-workers <n>",
     "Number of pages to OCR in parallel. Defaults to number of CPU cores minus one."
@@ -432,6 +450,10 @@ program
         preciseBoundingBox: options.preciseBbox !== false,
         password: options.password,
       };
+
+      if (options.ocrTextMode) {
+        config.ocrTextMode = options.ocrTextMode as OcrTextMode;
+      }
 
       // Create a SINGLE parser instance for all files (key for batch efficiency)
       const parser = new LiteParse(config);
