@@ -1240,6 +1240,255 @@ fn line_has_column_gap(line: &[ProjectedTextItem], median_width: f32, page_width
     false
 }
 
+fn median_f32(values: &mut [f32]) -> Option<f32> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|a, b| a.total_cmp(b));
+    Some(values[values.len() / 2])
+}
+
+fn line_bounds(line: &[ProjectedTextItem]) -> Option<(f32, f32)> {
+    if line.is_empty() {
+        return None;
+    }
+    let min_x = line
+        .iter()
+        .map(|item| item.item.x)
+        .fold(f32::INFINITY, f32::min);
+    let max_x = line
+        .iter()
+        .map(|item| item.item.x + item.item.width)
+        .fold(f32::NEG_INFINITY, f32::max);
+    Some((min_x, max_x))
+}
+
+fn line_text_len(line: &[ProjectedTextItem]) -> usize {
+    line.iter().map(|item| item.item.text.chars().count()).sum()
+}
+
+fn best_column_gap(
+    line: &[ProjectedTextItem],
+    median_width: f32,
+    page_width: f32,
+) -> Option<(usize, f32)> {
+    if line.len() < 2 {
+        return None;
+    }
+
+    let midpoint = page_width * 0.5;
+    let mut best: Option<(usize, f32, f32)> = None;
+    for i in 1..line.len() {
+        let prev_end = line[i - 1].item.x + line[i - 1].item.width;
+        let cur_start = line[i].item.x;
+        let gap = cur_start - prev_end;
+        if gap > median_width * 2.0 && prev_end < midpoint && cur_start > midpoint {
+            let split_x = (prev_end + cur_start) * 0.5;
+            if best
+                .as_ref()
+                .map_or(true, |(_, best_gap, _)| gap > *best_gap)
+            {
+                best = Some((i, gap, split_x));
+            }
+        }
+    }
+
+    best.map(|(idx, _, split_x)| (idx, split_x))
+}
+
+fn detect_two_column_split(
+    run: &[Vec<ProjectedTextItem>],
+    median_width: f32,
+    page_width: f32,
+) -> Option<f32> {
+    if page_width <= 0.0 {
+        return None;
+    }
+
+    let non_empty_lines = run.iter().filter(|line| !line.is_empty()).count();
+    if non_empty_lines < 6 {
+        return None;
+    }
+
+    let mut split_candidates = Vec::new();
+    let mut left_spans = Vec::new();
+    let mut right_spans = Vec::new();
+    let mut left_text_lens = Vec::new();
+    let mut right_text_lens = Vec::new();
+
+    for line in run {
+        let Some((split_idx, split_x)) = best_column_gap(line, median_width, page_width) else {
+            continue;
+        };
+        let left = &line[..split_idx];
+        let right = &line[split_idx..];
+        let Some((left_min, left_max)) = line_bounds(left) else {
+            continue;
+        };
+        let Some((right_min, right_max)) = line_bounds(right) else {
+            continue;
+        };
+
+        split_candidates.push(split_x);
+        left_spans.push(left_max - left_min);
+        right_spans.push(right_max - right_min);
+        left_text_lens.push(line_text_len(left) as f32);
+        right_text_lens.push(line_text_len(right) as f32);
+    }
+
+    let column_gap_lines = split_candidates.len();
+    if column_gap_lines < 3 {
+        return None;
+    }
+    if column_gap_lines < 5 && column_gap_lines * 4 < non_empty_lines {
+        return None;
+    }
+
+    let left_span = median_f32(&mut left_spans)?;
+    let right_span = median_f32(&mut right_spans)?;
+    if left_span < page_width * 0.2 || right_span < page_width * 0.2 {
+        return None;
+    }
+
+    let left_len = median_f32(&mut left_text_lens)?;
+    let right_len = median_f32(&mut right_text_lens)?;
+    if left_len < 12.0 || right_len < 12.0 {
+        return None;
+    }
+
+    median_f32(&mut split_candidates)
+}
+
+fn split_line_by_column(
+    line: Vec<ProjectedTextItem>,
+    split_x: f32,
+) -> (
+    Vec<ProjectedTextItem>,
+    Vec<ProjectedTextItem>,
+    Option<Vec<ProjectedTextItem>>,
+) {
+    let Some((line_min, line_max)) = line_bounds(&line) else {
+        return (Vec::new(), Vec::new(), None);
+    };
+
+    let crosses_split = line_min < split_x && line_max > split_x;
+    let has_item_crossing_split = line
+        .iter()
+        .any(|item| item.item.x < split_x && item.item.x + item.item.width > split_x);
+    if crosses_split && has_item_crossing_split {
+        return (Vec::new(), Vec::new(), Some(line));
+    }
+
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for item in line {
+        let center = item.item.x + item.item.width * 0.5;
+        if center < split_x {
+            left.push(item);
+        } else {
+            right.push(item);
+        }
+    }
+
+    (left, right, None)
+}
+
+fn append_reflowed_columns(
+    output: &mut Vec<Vec<ProjectedTextItem>>,
+    left_lines: &mut Vec<Vec<ProjectedTextItem>>,
+    right_lines: &mut Vec<Vec<ProjectedTextItem>>,
+) {
+    normalize_right_column_origin(left_lines, right_lines);
+    output.append(left_lines);
+    output.append(right_lines);
+}
+
+fn min_x_for_lines(lines: &[Vec<ProjectedTextItem>]) -> Option<f32> {
+    lines
+        .iter()
+        .flat_map(|line| line.iter().map(|item| item.item.x))
+        .min_by(|a, b| a.total_cmp(b))
+}
+
+fn normalize_right_column_origin(
+    left_lines: &[Vec<ProjectedTextItem>],
+    right_lines: &mut [Vec<ProjectedTextItem>],
+) {
+    let Some(left_min_x) = min_x_for_lines(left_lines) else {
+        return;
+    };
+    let Some(right_min_x) = min_x_for_lines(right_lines) else {
+        return;
+    };
+    let offset = right_min_x - left_min_x;
+    if offset <= 0.0 {
+        return;
+    }
+
+    for line in right_lines {
+        for item in line {
+            item.item.x -= offset;
+        }
+    }
+}
+
+fn reflow_two_column_run(
+    run: Vec<Vec<ProjectedTextItem>>,
+    split_x: f32,
+) -> Vec<Vec<ProjectedTextItem>> {
+    let mut output = Vec::with_capacity(run.len());
+    let mut left_lines = Vec::new();
+    let mut right_lines = Vec::new();
+
+    for line in run {
+        let (left, right, full_width) = split_line_by_column(line, split_x);
+        if let Some(full_width) = full_width {
+            append_reflowed_columns(&mut output, &mut left_lines, &mut right_lines);
+            output.push(full_width);
+            continue;
+        }
+        if !left.is_empty() {
+            left_lines.push(left);
+        }
+        if !right.is_empty() {
+            right_lines.push(right);
+        }
+    }
+
+    append_reflowed_columns(&mut output, &mut left_lines, &mut right_lines);
+    output
+}
+
+fn reflow_multicolumn_text_runs(
+    lines: Vec<Vec<ProjectedTextItem>>,
+    median_width: f32,
+    page_width: f32,
+) -> Vec<Vec<ProjectedTextItem>> {
+    let mut output = Vec::with_capacity(lines.len());
+    let mut run = Vec::new();
+
+    for line in lines {
+        if line.is_empty() {
+            if let Some(split_x) = detect_two_column_split(&run, median_width, page_width) {
+                output.extend(reflow_two_column_run(std::mem::take(&mut run), split_x));
+            } else {
+                output.append(&mut run);
+            }
+            output.push(line);
+        } else {
+            run.push(line);
+        }
+    }
+
+    if let Some(split_x) = detect_two_column_split(&run, median_width, page_width) {
+        output.extend(reflow_two_column_run(run, split_x));
+    } else {
+        output.extend(run);
+    }
+
+    output
+}
+
 /// Check if a block of lines is flowing paragraph text (vs structured/tabular).
 fn is_flowing_text_block(
     lines: &[Vec<ProjectedTextItem>],
@@ -1551,6 +1800,7 @@ fn project_to_grid(
         median_height,
         page.page_width,
     );
+    lines = reflow_multicolumn_text_runs(lines, median_width, page.page_width);
     if lines.is_empty() {
         return (Vec::new(), String::new());
     }
@@ -2661,4 +2911,102 @@ pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_item(text: &str, x: f32, y: f32, width: f32) -> TextItem {
+        TextItem {
+            text: text.into(),
+            x,
+            y,
+            width,
+            height: 10.0,
+            ..Default::default()
+        }
+    }
+
+    fn project_text(items: Vec<TextItem>) -> String {
+        let page = Page {
+            page_number: 1,
+            page_width: 600.0,
+            page_height: 800.0,
+            text_items: items.clone(),
+        };
+        let projection_boxes = items
+            .into_iter()
+            .map(|item| ProjectedTextItem {
+                item,
+                snap: Snap::Left,
+                anchor: Anchor::Left,
+                is_dup: false,
+                rendered: false,
+                num_spaces: 0,
+                force_unsnapped: false,
+                is_margin_line_number: false,
+                rotated: false,
+                d: 0.0,
+            })
+            .collect();
+
+        let (_, text) = project_to_grid(&page, projection_boxes);
+        text
+    }
+
+    #[test]
+    fn reflows_prose_two_column_runs_in_reading_order() {
+        let items = vec![
+            text_item("left column first paragraph line one", 60.0, 100.0, 220.0),
+            text_item("right column first paragraph line one", 330.0, 100.0, 220.0),
+            text_item("left column first paragraph line two", 60.0, 112.0, 220.0),
+            text_item("right column first paragraph line two", 330.0, 112.0, 220.0),
+            text_item("left column first paragraph line three", 60.0, 124.0, 220.0),
+            text_item(
+                "right column first paragraph line three",
+                330.0,
+                124.0,
+                220.0,
+            ),
+            text_item("left column continuation line four", 60.0, 136.0, 220.0),
+            text_item("left column continuation line five", 60.0, 148.0, 220.0),
+            text_item("left column continuation line six", 60.0, 160.0, 220.0),
+        ];
+
+        let text = project_text(items);
+
+        assert!(
+            text.find("left column continuation line six").unwrap()
+                < text.find("right column first paragraph line one").unwrap()
+        );
+        let right_line = text
+            .lines()
+            .find(|line| line.contains("right column first paragraph line one"))
+            .unwrap();
+        assert!(right_line.len() - right_line.trim_start().len() <= 4);
+        assert!(!text.lines().any(|line| {
+            line.contains("left column first") && line.contains("right column first")
+        }));
+    }
+
+    #[test]
+    fn keeps_isolated_two_column_rows_visual() {
+        let items = vec![
+            text_item("body line before footer", 60.0, 100.0, 220.0),
+            text_item("414", 60.0, 130.0, 30.0),
+            text_item(
+                "Japan Marketing Academy Conference Proceedings",
+                330.0,
+                130.0,
+                220.0,
+            ),
+        ];
+
+        let text = project_text(items);
+
+        assert!(text.lines().any(|line| {
+            line.contains("414") && line.contains("Japan Marketing Academy Conference Proceedings")
+        }));
+    }
 }
