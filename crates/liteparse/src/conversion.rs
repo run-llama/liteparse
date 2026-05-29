@@ -427,7 +427,6 @@ pub async fn convert_office_document(
             ))
         })?;
     let user_profile_url = format!("-env:UserInstallation={user_profile_file_url}");
-    let infilter_arg;
     let mut args: Vec<&str> = vec![
         &user_profile_url,
         "--headless",
@@ -438,8 +437,34 @@ pub async fn convert_office_document(
         output_dir,
     ];
     if let Some(pw) = password {
-        infilter_arg = format!("--infilter=:{pw}");
-        args.push(&infilter_arg);
+        // Derive the LibreOffice filter name from the file extension so the
+        // DocumentOpenPassword option is associated with the correct input filter.
+        let ext = Path::new(file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let filter_name = match ext.as_str() {
+            "doc" | "docx" | "docm" | "dot" | "dotm" | "dotx" => "docx",
+            "xls" | "xlsx" | "xlsm" | "xlsb" => "xlsx",
+            "ppt" | "pptx" | "pptm" | "pot" | "potm" | "potx" => "pptx",
+            "odt" | "ott" => "odt",
+            "ods" | "ots" => "ods",
+            "odp" | "otp" => "odp",
+            "rtf" => "rtf",
+            "pages" => "pages",
+            _ => "",
+        };
+        if !filter_name.is_empty() {
+            // LibreOffice --infilter accepts "FilterName:option=value" to pass
+            // per-filter open options. DocumentOpenPassword is the standard option
+            // for supplying a document-open password (distinct from the
+            // write-protection password).  This replaces the previous broken
+            // approach of passing --infilter=:{pw} which treated the password
+            // itself as the filter type name.
+            let infilter_arg = format!("--infilter={filter_name}:DocumentOpenPassword={pw}");
+            args.push(&infilter_arg);
+        }
     }
     args.push(file_path);
 
