@@ -438,13 +438,45 @@ pub async fn convert_office_document(
         output_dir,
     ];
     if let Some(pw) = password {
-        infilter_arg = format!("--infilter=:{pw}");
+        let ext = Path::new(file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .unwrap_or_default();
+        let filter_name = libreoffice_filter_name(&ext).ok_or_else(|| {
+            LiteParseError::Conversion(format!(
+                "password-protected .{ext} files are not supported for LibreOffice conversion"
+            ))
+        })?;
+        // Pass both the filter name and the DocumentOpenPassword filter option.
+        // LibreOffice's --infilter flag accepts "FilterName:option=value" syntax.
+        infilter_arg = format!("--infilter={filter_name}:DocumentOpenPassword={pw}");
         args.push(&infilter_arg);
     }
     args.push(file_path);
 
     execute_command(&libre_office_cmd, args, 120_000).await?;
     find_pdf_in_dir(output_dir).await
+}
+
+/// Map a file extension to its LibreOffice import filter name.
+///
+/// Returns `None` for extensions that have no known filter name, which means
+/// password-based import is not supported for that format.
+fn libreoffice_filter_name(ext: &str) -> Option<&'static str> {
+    match ext {
+        "doc" | "dot" => Some("MS Word 97"),
+        "docx" | "docm" | "dotx" | "dotm" => Some("MS Word 2007 XML"),
+        "xls" | "xlt" => Some("MS Excel 97"),
+        "xlsx" | "xlsm" | "xlsb" | "xltx" | "xltm" => Some("Calc MS Excel 2007 XML"),
+        "ppt" | "pot" => Some("MS PowerPoint 97"),
+        "pptx" | "pptm" | "potx" | "potm" => Some("Impress MS PowerPoint 2007 XML"),
+        "odt" | "ott" => Some("writer8"),
+        "ods" | "ots" => Some("calc8"),
+        "odp" | "otp" => Some("impress8"),
+        "rtf" => Some("Rich Text Format"),
+        _ => None,
+    }
 }
 
 /// Scan `output_dir` for the first `.pdf` file and return its path.
