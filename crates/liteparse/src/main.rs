@@ -91,7 +91,7 @@ struct ParseCommand {
     num_workers: Option<usize>,
 
     /// Whether to auto-remove invalid table artifacts from raw OCR response
-    #[arg(long, default_value="true")]
+    #[arg(long, default_value = "true")]
     clean_artifacts: bool,
 }
 
