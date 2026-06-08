@@ -48,6 +48,7 @@ struct JsLiteParseConfig {
     preserve_very_small_text: Option<bool>,
     password: Option<String>,
     quiet: Option<bool>,
+    clean_artifacts: Option<bool>,
 }
 
 impl JsLiteParseConfig {
@@ -95,6 +96,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.quiet {
             cfg.quiet = v;
         }
+        if let Some(v) = self.clean_artifacts {
+            cfg.clean_artifacts = v;
+        }
         cfg.num_workers = 1;
         Ok(cfg)
     }
@@ -115,6 +119,7 @@ impl JsLiteParseConfig {
             preserve_very_small_text: Some(cfg.preserve_very_small_text),
             password: cfg.password.clone(),
             quiet: Some(cfg.quiet),
+            clean_artifacts: Some(cfg.clean_artifacts),
         }
     }
 }

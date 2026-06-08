@@ -176,6 +176,7 @@ impl LiteParse {
                 engine,
                 &self.config.ocr_language,
                 self.config.num_workers,
+                self.config.clean_artifacts,
             )
             .await?;
         }

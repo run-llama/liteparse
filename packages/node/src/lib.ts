@@ -27,6 +27,7 @@ export interface LiteParseConfig {
   password?: string;
   quiet: boolean;
   numWorkers: number;
+  cleanArtifacts: boolean;
 }
 
 export interface TextItem {
@@ -82,6 +83,7 @@ export class LiteParse {
       password: userConfig.password,
       quiet: userConfig.quiet,
       numWorkers: userConfig.numWorkers,
+      cleanArtifacts: userConfig.cleanArtifacts,
     };
 
     this._native = new native.LiteParse(nativeConfig);
@@ -101,6 +103,7 @@ export class LiteParse {
       password: resolved.password ?? undefined,
       quiet: resolved.quiet ?? false,
       numWorkers: resolved.numWorkers ?? 1,
+      cleanArtifacts: resolved.cleanArtifacts ?? true,
     };
   }
 

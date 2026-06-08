@@ -89,6 +89,10 @@ struct ParseCommand {
     /// Number of concurrent OCR workers (default: CPU cores - 1)
     #[arg(long)]
     num_workers: Option<usize>,
+
+    /// Whether to auto-remove invalid table artifacts from raw OCR response
+    #[arg(long, default_value="true")]
+    clean_artifacts: bool,
 }
 
 #[derive(Args, Debug)]
@@ -213,6 +217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 password: cmd.password,
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
+                clean_artifacts: cmd.clean_artifacts,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {

@@ -32,6 +32,7 @@ export interface LiteParseNativeConfig {
   password?: string;
   quiet?: boolean;
   numWorkers?: number;
+  cleanArtifacts?: boolean;
 }
 
 export interface NativeTextItem {

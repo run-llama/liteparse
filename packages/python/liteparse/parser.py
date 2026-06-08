@@ -76,6 +76,7 @@ class LiteParse:
         password: Optional[str] = None,
         quiet: Optional[bool] = None,
         num_workers: Optional[int] = None,
+        clean_artifacts: Optional[bool] = None,
     ):
         """
         Initialize LiteParse parser.
@@ -93,6 +94,7 @@ class LiteParse:
             password: Password for encrypted/protected documents
             quiet: Suppress progress output
             num_workers: Number of concurrent OCR workers (default: CPU cores - 1)
+            clean_artifacts: Whether to auto-remove invalid table artifacts from OCR (default: True)
         """
         kwargs = {}
         if ocr_enabled is not None:
@@ -119,6 +121,8 @@ class LiteParse:
             kwargs["quiet"] = quiet
         if num_workers is not None:
             kwargs["num_workers"] = num_workers
+        if clean_artifacts is not None:
+            kwargs["clean_artifacts"] = clean_artifacts
 
         self._native = _NativeLiteParse(**kwargs)
 
@@ -215,6 +219,7 @@ class LiteParse:
             password=cfg.password,
             quiet=cfg.quiet,
             num_workers=cfg.num_workers,
+            clean_artifacts=cfg.clean_artifacts,
         )
 
     def __repr__(self) -> str:

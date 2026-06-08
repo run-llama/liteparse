@@ -71,6 +71,7 @@ class LiteParseConfig:
     password: Optional[str]
     quiet: bool
     num_workers: int
+    clean_artifacts: bool
 
 
 class ParseError(Exception):

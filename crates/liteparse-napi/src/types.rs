@@ -35,6 +35,8 @@ pub struct JsLiteParseConfig {
     pub quiet: Option<bool>,
     /// Number of concurrent OCR workers (default: CPU cores - 1).
     pub num_workers: Option<u32>,
+    /// Whether to auto-remove invalid table artifacts from raw OCR response.
+    pub clean_artifacts: Option<bool>,
 }
 
 impl JsLiteParseConfig {
@@ -79,6 +81,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.num_workers {
             cfg.num_workers = v as usize;
         }
+        if let Some(v) = self.clean_artifacts {
+            cfg.clean_artifacts = v;
+        }
         cfg
     }
 
@@ -99,6 +104,7 @@ impl JsLiteParseConfig {
             password: cfg.password.clone(),
             quiet: Some(cfg.quiet),
             num_workers: Some(cfg.num_workers as u32),
+            clean_artifacts: Some(cfg.clean_artifacts),
         }
     }
 }

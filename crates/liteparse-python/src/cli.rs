@@ -54,6 +54,8 @@ struct ParseCommand {
     quiet: bool,
     #[arg(long)]
     num_workers: Option<usize>,
+    #[arg(long, default_value = "true")]
+    clean_artifacts: bool,
 }
 
 #[derive(Args, Debug)]
@@ -129,6 +131,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 password: cmd.password,
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
+                clean_artifacts: cmd.clean_artifacts,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {

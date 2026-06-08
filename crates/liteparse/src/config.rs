@@ -27,6 +27,8 @@ pub struct LiteParseConfig {
     pub quiet: bool,
     /// Number of concurrent OCR workers. Defaults to (number of CPU cores - 1), minimum 1.
     pub num_workers: usize,
+    /// Whether to auto-remove invalid table artifacts from raw OCR response
+    pub clean_artifacts: bool,
 }
 
 /// Supported output formats.
@@ -52,6 +54,7 @@ impl Default for LiteParseConfig {
             password: None,
             quiet: false,
             num_workers: default_num_workers(),
+            clean_artifacts: true,
         }
     }
 }

@@ -30,6 +30,7 @@ program
   .option("--config <file>", "JSON config file path")
   .option("-q, --quiet", "Suppress progress output")
   .option("--num-workers <n>", "Number of concurrent OCR workers", parseInt)
+  .option("--no-clean-artifacts", "Disable auto-removal of OCR table artifacts")
   .action(async (file: string, opts: Record<string, unknown>) => {
     try {
       const config: Partial<LiteParseConfig> = {};
@@ -55,6 +56,7 @@ program
       if (opts.password) config.password = opts.password as string;
       if (opts.quiet) config.quiet = true;
       if (opts.numWorkers) config.numWorkers = opts.numWorkers as number;
+      if (opts.cleanArtifacts === false) config.cleanArtifacts = false;
 
       // Default CLI output to text (library defaults to json)
       if (!config.outputFormat) config.outputFormat = "text";
