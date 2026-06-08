@@ -3,6 +3,7 @@ use crate::config::{LiteParseConfig, parse_target_pages};
 use crate::conversion;
 use crate::error::LiteParseError;
 use crate::extract;
+use crate::image_merge;
 use crate::ocr::OcrEngine;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::ocr::http_simple::HttpOcrEngine;
@@ -97,11 +98,12 @@ impl LiteParse {
             .transpose()
             .map_err(|e| format!("invalid --target-pages: {}", e))?;
 
-        // Extract text (and pre-render OCR pages in one PDF load when OCR is on).
+        // Extract text. Keep the PDF document open when OCR or inline image
+        // extraction needs rendering from the same loaded document.
         let password = self.config.password.as_deref();
-        let (mut pages, ocr_rendered) = if self.config.ocr_enabled {
+        let (mut pages, ocr_rendered) = if self.config.ocr_enabled || self.config.inline_images {
             let document = extract::load_document_from_input(&validated_input, password)?;
-            let pages = extract::extract_pages_from_document(
+            let mut pages = extract::extract_pages_from_document(
                 &document,
                 target_pages.as_deref(),
                 self.config.max_pages,
@@ -112,15 +114,33 @@ impl LiteParse {
                 t_extract.duration_since(t0).as_secs_f64() * 1000.0,
                 pages.len()
             ));
-            let rendered = ocr_merge::render_pages_for_ocr(&document, &pages, self.config.dpi)?;
-            log(&format!(
-                "[liteparse] ocr render: {:.1}ms ({} pages)",
-                web_time::Instant::now()
-                    .duration_since(t_extract)
-                    .as_secs_f64()
-                    * 1000.0,
-                rendered.len()
-            ));
+
+            if self.config.inline_images {
+                let t_images = web_time::Instant::now();
+                image_merge::extract_images_into_pages(&document, &mut pages)?;
+                log(&format!(
+                    "[liteparse] images: {:.1}ms",
+                    web_time::Instant::now()
+                        .duration_since(t_images)
+                        .as_secs_f64()
+                        * 1000.0
+                ));
+            }
+
+            let rendered = if self.config.ocr_enabled {
+                let rendered = ocr_merge::render_pages_for_ocr(&document, &pages, self.config.dpi)?;
+                log(&format!(
+                    "[liteparse] ocr render: {:.1}ms ({} pages)",
+                    web_time::Instant::now()
+                        .duration_since(t_extract)
+                        .as_secs_f64()
+                        * 1000.0,
+                    rendered.len()
+                ));
+                rendered
+            } else {
+                Vec::new()
+            };
             (pages, rendered)
         } else {
             let pages = extract::extract_pages_from_input(
@@ -184,6 +204,10 @@ impl LiteParse {
             "[liteparse] ocr: {:.1}ms",
             t_ocr.duration_since(t1).as_secs_f64() * 1000.0
         ));
+
+        if self.config.inline_images {
+            image_merge::add_inline_image_placeholders(&mut pages);
+        }
 
         // Grid projection
         let parsed_pages = projection::project_pages_to_grid(pages);

@@ -19,6 +19,7 @@ default = ["tesseract"]
 tesseract = ["dep:tesseract-rs"]
 
 [dependencies]
+base64 = "0.22"
 clap = { version = "4.5.55", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 infer = "0.19.0"

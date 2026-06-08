@@ -89,6 +89,10 @@ struct ParseCommand {
     /// Number of concurrent OCR workers (default: CPU cores - 1)
     #[arg(long)]
     num_workers: Option<usize>,
+
+    /// Inline embedded PDF images into text as base64 markdown data URI images
+    #[arg(long)]
+    inline_images: bool,
 }
 
 #[derive(Args, Debug)]
@@ -172,6 +176,10 @@ struct BatchParseCommand {
     /// Number of concurrent OCR workers (default: CPU cores - 1)
     #[arg(long)]
     num_workers: Option<usize>,
+
+    /// Inline embedded PDF images into text as base64 markdown data URI images
+    #[arg(long)]
+    inline_images: bool,
 }
 
 #[derive(Args, Debug)]
@@ -213,6 +221,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 password: cmd.password,
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
+                inline_images: cmd.inline_images,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {
@@ -295,6 +304,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 password: cmd.password,
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
+                inline_images: cmd.inline_images,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {

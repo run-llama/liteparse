@@ -32,6 +32,7 @@ export interface LiteParseNativeConfig {
   password?: string;
   quiet?: boolean;
   numWorkers?: number;
+  inlineImages?: boolean;
 }
 
 export interface NativeTextItem {
@@ -45,12 +46,22 @@ export interface NativeTextItem {
   confidence?: number;
 }
 
+export interface NativeImageItem {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  mimeType: string;
+  base64: string;
+}
+
 export interface NativeParsedPage {
   pageNum: number;
   width: number;
   height: number;
   text: string;
   textItems: NativeTextItem[];
+  images: NativeImageItem[];
 }
 
 export interface NativeParseResult {

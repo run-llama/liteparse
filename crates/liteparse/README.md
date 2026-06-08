@@ -59,6 +59,7 @@ let config = LiteParseConfig {
     preserve_very_small_text: false,      // Keep tiny text
     password: None,                       // Password for protected documents
     quiet: false,                         // Suppress progress output
+    inline_images: false,                 // Inline embedded images as base64 markdown images
     ..Default::default()
 };
 

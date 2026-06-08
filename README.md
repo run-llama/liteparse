@@ -201,6 +201,7 @@ Options:
       --preserve-small-text    Keep very small text
       --password <password>    Password for encrypted documents
       --num-workers <n>        Concurrent OCR workers [default: CPU cores - 1]
+      --inline-images          Inline embedded PDF images as base64 markdown images
   -q, --quiet                  Suppress progress output
   -h, --help                   Print help
 ```
@@ -222,6 +223,7 @@ Options:
       --extension <ext>        Only process files with this extension (e.g., ".pdf")
       --password <password>    Password for encrypted documents
       --num-workers <n>        Concurrent OCR workers
+      --inline-images          Inline embedded PDF images as base64 markdown images
   -q, --quiet                  Suppress progress output
   -h, --help                   Print help
 ```

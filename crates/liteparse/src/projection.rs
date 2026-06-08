@@ -1,3 +1,4 @@
+use crate::image_merge;
 use crate::types::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -2678,6 +2679,7 @@ pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
                 .collect();
 
             let (projected_items, text) = project_to_grid(&page, projection_boxes);
+            let text = image_merge::replace_image_placeholders(text, &page.images);
             ParsedPage {
                 page_number: page.page_number,
                 page_width: page.page_width,
@@ -2685,6 +2687,7 @@ pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
                 text,
                 text_items: projected_items
                     .into_iter()
+                    .filter(|proj| !image_merge::is_inline_image_placeholder(&proj.item))
                     .map(|proj| TextItem {
                         x: proj.orig_x,
                         y: proj.orig_y,
@@ -2694,6 +2697,7 @@ pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
                         ..proj.item
                     })
                     .collect(),
+                images: page.images,
             }
         })
         .collect()
@@ -2737,6 +2741,7 @@ mod tests {
             page_width: 612.0,
             page_height: 792.0,
             text_items: Vec::new(),
+            images: Vec::new(),
         };
         let projection_boxes = vec![
             projected_item("", 10.0, 0.0, 10.0),
@@ -2755,6 +2760,7 @@ mod tests {
             page_width: 612.0,
             page_height: 792.0,
             text_items: Vec::new(),
+            images: Vec::new(),
         }];
 
         let parsed = project_pages_to_grid(pages);
@@ -2789,6 +2795,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            images: Vec::new(),
         }];
 
         let parsed = project_pages_to_grid(pages);
@@ -2828,6 +2835,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            images: Vec::new(),
         }];
 
         let parsed = project_pages_to_grid(pages);

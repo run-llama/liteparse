@@ -46,6 +46,7 @@ All optional, camelCase:
 | `preserveVerySmallText` | `boolean` | `false` | Keep tiny text that's normally filtered |
 | `password` | `string` | — | Password for protected PDFs |
 | `quiet` | `boolean` | `false` | Suppress progress logging |
+| `inlineImages` | `boolean` | `false` | Inline embedded PDF images into text as base64 markdown images |
 | `ocrEngine` | `object` | — | JS-side OCR engine (see below) |
 
 ## OCR in the browser

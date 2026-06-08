@@ -48,6 +48,7 @@ struct JsLiteParseConfig {
     preserve_very_small_text: Option<bool>,
     password: Option<String>,
     quiet: Option<bool>,
+    inline_images: Option<bool>,
 }
 
 impl JsLiteParseConfig {
@@ -95,6 +96,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.quiet {
             cfg.quiet = v;
         }
+        if let Some(v) = self.inline_images {
+            cfg.inline_images = v;
+        }
         cfg.num_workers = 1;
         Ok(cfg)
     }
@@ -115,6 +119,7 @@ impl JsLiteParseConfig {
             preserve_very_small_text: Some(cfg.preserve_very_small_text),
             password: cfg.password.clone(),
             quiet: Some(cfg.quiet),
+            inline_images: Some(cfg.inline_images),
         }
     }
 }
@@ -141,12 +146,24 @@ struct JsTextItem<'a> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct JsImageItem<'a> {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    mime_type: &'a str,
+    base64: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct JsParsedPage<'a> {
     page_num: usize,
     width: f32,
     height: f32,
     text: &'a str,
     text_items: Vec<JsTextItem<'a>>,
+    images: Vec<JsImageItem<'a>>,
 }
 
 #[derive(Serialize)]
@@ -325,6 +342,18 @@ impl LiteParse {
                         font_name: i.font_name.as_deref(),
                         font_size: i.font_size,
                         confidence: i.confidence,
+                    })
+                    .collect(),
+                images: p
+                    .images
+                    .iter()
+                    .map(|i| JsImageItem {
+                        x: i.x,
+                        y: i.y,
+                        width: i.width,
+                        height: i.height,
+                        mime_type: &i.mime_type,
+                        base64: &i.base64,
                     })
                     .collect(),
             })

@@ -41,6 +41,7 @@ parser = LiteParse(
     password=None,                 # Password for protected documents
     quiet=False,                   # Suppress progress output
     num_workers=4,                 # Concurrent OCR workers
+    inline_images=False,           # Inline embedded images as base64 markdown images
 )
 ```
 

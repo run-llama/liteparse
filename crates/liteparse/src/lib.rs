@@ -9,7 +9,7 @@ pub use config::{LiteParseConfig, OutputFormat};
 pub use error::LiteParseError;
 pub use parser::{LiteParse, ParseResult, ScreenshotResult};
 pub use search::{SearchOptions, search_items};
-pub use types::{ParsedPage, TextItem};
+pub use types::{ImageItem, ParsedPage, TextItem};
 
 // ── Modules with user-facing types (visible in docs) ───────────────────
 pub mod config;
@@ -24,6 +24,8 @@ pub mod types;
 pub mod conversion;
 #[doc(hidden)]
 pub mod extract;
+#[doc(hidden)]
+pub mod image_merge;
 #[doc(hidden)]
 pub mod ocr;
 #[doc(hidden)]

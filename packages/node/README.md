@@ -42,6 +42,7 @@ const parser = new LiteParse({
   password: undefined,           // Password for protected documents
   quiet: false,                  // Suppress progress output
   numWorkers: 4,                 // Concurrent OCR workers
+  inlineImages: false,           // Inline embedded images as base64 markdown images
 });
 ```
 

@@ -76,6 +76,7 @@ class LiteParse:
         password: Optional[str] = None,
         quiet: Optional[bool] = None,
         num_workers: Optional[int] = None,
+        inline_images: Optional[bool] = None,
     ):
         """
         Initialize LiteParse parser.
@@ -93,6 +94,7 @@ class LiteParse:
             password: Password for encrypted/protected documents
             quiet: Suppress progress output
             num_workers: Number of concurrent OCR workers (default: CPU cores - 1)
+            inline_images: Inline embedded PDF images into text as base64 markdown images
         """
         kwargs = {}
         if ocr_enabled is not None:
@@ -119,6 +121,8 @@ class LiteParse:
             kwargs["quiet"] = quiet
         if num_workers is not None:
             kwargs["num_workers"] = num_workers
+        if inline_images is not None:
+            kwargs["inline_images"] = inline_images
 
         self._native = _NativeLiteParse(**kwargs)
 
@@ -215,6 +219,7 @@ class LiteParse:
             password=cfg.password,
             quiet=cfg.quiet,
             num_workers=cfg.num_workers,
+            inline_images=cfg.inline_images,
         )
 
     def __repr__(self) -> str:

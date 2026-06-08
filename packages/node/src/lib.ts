@@ -3,6 +3,7 @@ import {
   type LiteParseNative,
   type LiteParseNativeConfig,
   type NativeParseResult,
+  type NativeImageItem,
   type NativeParsedPage,
   type NativeTextItem,
 } from "./native.js";
@@ -27,6 +28,7 @@ export interface LiteParseConfig {
   password?: string;
   quiet: boolean;
   numWorkers: number;
+  inlineImages: boolean;
 }
 
 export interface TextItem {
@@ -40,12 +42,22 @@ export interface TextItem {
   confidence?: number;
 }
 
+export interface ImageItem {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  mimeType: string;
+  base64: string;
+}
+
 export interface ParsedPage {
   pageNum: number;
   width: number;
   height: number;
   text: string;
   textItems: TextItem[];
+  images: ImageItem[];
 }
 
 export interface ParseResult {
@@ -82,6 +94,7 @@ export class LiteParse {
       password: userConfig.password,
       quiet: userConfig.quiet,
       numWorkers: userConfig.numWorkers,
+      inlineImages: userConfig.inlineImages,
     };
 
     this._native = new native.LiteParse(nativeConfig);
@@ -101,6 +114,7 @@ export class LiteParse {
       password: resolved.password ?? undefined,
       quiet: resolved.quiet ?? false,
       numWorkers: resolved.numWorkers ?? 1,
+      inlineImages: resolved.inlineImages ?? false,
     };
   }
 
@@ -145,6 +159,18 @@ function toPage(p: NativeParsedPage): ParsedPage {
     height: p.height,
     text: p.text,
     textItems: p.textItems.map(toTextItem),
+    images: (p.images ?? []).map(toImageItem),
+  };
+}
+
+function toImageItem(item: NativeImageItem): ImageItem {
+  return {
+    x: item.x,
+    y: item.y,
+    width: item.width,
+    height: item.height,
+    mimeType: item.mimeType,
+    base64: item.base64,
   };
 }
 

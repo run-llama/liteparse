@@ -17,6 +17,14 @@ pub struct ImageBounds {
     pub height: f32,
 }
 
+/// Embedded image object metadata, including the image-object index needed
+/// to render the image via [`Page::render_image_object`].
+#[derive(Debug, Clone, Copy)]
+pub struct ImageObjectInfo {
+    pub image_obj_index: usize,
+    pub bounds: ImageBounds,
+}
+
 pub struct Page<'doc> {
     pub(crate) handle: pdfium_sys::FPDF_PAGE,
     pub(crate) doc_handle: pdfium_sys::FPDF_DOCUMENT,
@@ -152,10 +160,22 @@ impl Page<'_> {
     /// Filters out images smaller than `min_size_pt` and images covering more than
     /// `max_page_coverage` fraction of the page.
     pub fn image_bounds(&self, min_size_pt: f32, max_page_coverage: f32) -> Vec<ImageBounds> {
+        self.image_objects(min_size_pt, max_page_coverage)
+            .into_iter()
+            .map(|info| info.bounds)
+            .collect()
+    }
+
+    /// Extract embedded image object metadata on this page.
+    ///
+    /// The returned `image_obj_index` is the index among image objects only,
+    /// matching the index expected by [`Page::render_image_object`].
+    pub fn image_objects(&self, min_size_pt: f32, max_page_coverage: f32) -> Vec<ImageObjectInfo> {
         let page_width = self.width();
         let page_height = self.height();
         let obj_count = unsafe { ffi!(FPDFPage_CountObjects(self.handle)) };
         let mut results = Vec::new();
+        let mut image_idx = 0usize;
 
         for i in 0..obj_count {
             let obj = unsafe { ffi!(FPDFPage_GetObject(self.handle, i)) };
@@ -182,26 +202,29 @@ impl Page<'_> {
                 ))
             };
             if ok == 0 {
+                image_idx += 1;
                 continue;
             }
 
             let w = right - left;
             let h = top - bottom;
 
-            if w < min_size_pt || h < min_size_pt {
-                continue;
+            if w >= min_size_pt
+                && h >= min_size_pt
+                && !(w > page_width * max_page_coverage && h > page_height * max_page_coverage)
+            {
+                // Convert from PDF coords (bottom-left origin) to viewport (top-left origin)
+                results.push(ImageObjectInfo {
+                    image_obj_index: image_idx,
+                    bounds: ImageBounds {
+                        x: left,
+                        y: page_height - top,
+                        width: w,
+                        height: h,
+                    },
+                });
             }
-            if w > page_width * max_page_coverage && h > page_height * max_page_coverage {
-                continue;
-            }
-
-            // Convert from PDF coords (bottom-left origin) to viewport (top-left origin)
-            results.push(ImageBounds {
-                x: left,
-                y: page_height - top,
-                width: w,
-                height: h,
-            });
+            image_idx += 1;
         }
 
         results

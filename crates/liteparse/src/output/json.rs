@@ -2,6 +2,16 @@ use crate::types::ParsedPage;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
+pub(crate) struct JsonImageItem {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub mime_type: String,
+    pub base64: String,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct JsonTextItem {
     pub text: String,
     pub x: f32,
@@ -23,6 +33,8 @@ pub(crate) struct JsonPage {
     pub height: f32,
     pub text: String,
     pub text_items: Vec<JsonTextItem>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<JsonImageItem>,
 }
 
 #[derive(Debug, Serialize)]
@@ -52,6 +64,18 @@ pub(crate) fn build_json(pages: &[ParsedPage]) -> ParseResultJson {
                         font_name: item.font_name.clone(),
                         font_size: item.font_size,
                         confidence: item.confidence.or(Some(1.0)),
+                    })
+                    .collect(),
+                images: page
+                    .images
+                    .iter()
+                    .map(|image| JsonImageItem {
+                        x: image.x,
+                        y: image.y,
+                        width: image.width,
+                        height: image.height,
+                        mime_type: image.mime_type.clone(),
+                        base64: image.base64.clone(),
                     })
                     .collect(),
             })
@@ -91,6 +115,7 @@ mod tests {
             page_height: 792.0,
             text: "txt".into(),
             text_items: items,
+            images: vec![],
         }
     }
 

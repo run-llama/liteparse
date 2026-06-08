@@ -27,6 +27,9 @@ pub struct LiteParseConfig {
     pub quiet: bool,
     /// Number of concurrent OCR workers. Defaults to (number of CPU cores - 1), minimum 1.
     pub num_workers: usize,
+    /// Inline embedded PDF images into page text as markdown data URI images.
+    /// Disabled by default because it can make text/JSON output very large.
+    pub inline_images: bool,
 }
 
 /// Supported output formats.
@@ -52,6 +55,7 @@ impl Default for LiteParseConfig {
             password: None,
             quiet: false,
             num_workers: default_num_workers(),
+            inline_images: false,
         }
     }
 }
@@ -132,6 +136,7 @@ mod tests {
         assert_eq!(c.output_format, OutputFormat::Json);
         assert!(!c.preserve_very_small_text);
         assert!(!c.quiet);
+        assert!(!c.inline_images);
         assert!(c.password.is_none());
     }
 

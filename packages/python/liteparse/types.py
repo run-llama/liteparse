@@ -71,6 +71,7 @@ class LiteParseConfig:
     password: Optional[str]
     quiet: bool
     num_workers: int
+    inline_images: bool
 
 
 class ParseError(Exception):

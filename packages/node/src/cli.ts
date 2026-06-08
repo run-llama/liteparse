@@ -8,7 +8,7 @@ import { join, relative, parse as parsePath } from "node:path";
 program
   .name("liteparse")
   .description("Fast, lightweight PDF and document parsing")
-  .version("2.0.0");
+  .version("2.0.6");
 
 program
   .command("parse")
@@ -30,6 +30,7 @@ program
   .option("--config <file>", "JSON config file path")
   .option("-q, --quiet", "Suppress progress output")
   .option("--num-workers <n>", "Number of concurrent OCR workers", parseInt)
+  .option("--inline-images", "Inline embedded PDF images into text as base64 markdown images")
   .action(async (file: string, opts: Record<string, unknown>) => {
     try {
       const config: Partial<LiteParseConfig> = {};
@@ -55,6 +56,7 @@ program
       if (opts.password) config.password = opts.password as string;
       if (opts.quiet) config.quiet = true;
       if (opts.numWorkers) config.numWorkers = opts.numWorkers as number;
+      if (opts.inlineImages) config.inlineImages = true;
 
       // Default CLI output to text (library defaults to json)
       if (!config.outputFormat) config.outputFormat = "text";
@@ -72,6 +74,7 @@ program
                   height: p.height,
                   text: p.text,
                   textItems: p.textItems,
+                  images: p.images,
                 })),
               },
               null,
@@ -171,6 +174,7 @@ program
   .option("--password <password>", "Password for encrypted documents")
   .option("-q, --quiet", "Suppress progress output")
   .option("--num-workers <n>", "Number of concurrent OCR workers", parseInt)
+  .option("--inline-images", "Inline embedded PDF images into text as base64 markdown images")
   .action(
     async (
       inputDir: string,
@@ -190,6 +194,7 @@ program
         if (opts.password) config.password = opts.password as string;
         if (opts.quiet) config.quiet = true;
         if (opts.numWorkers) config.numWorkers = opts.numWorkers as number;
+        if (opts.inlineImages) config.inlineImages = true;
 
         const parser = new LiteParse(config);
         const outExt = format === "json" ? ".json" : ".txt";
@@ -246,6 +251,7 @@ program
                         height: p.height,
                         text: p.text,
                         textItems: p.textItems,
+                        images: p.images,
                       })),
                     },
                     null,

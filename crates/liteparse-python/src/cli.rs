@@ -54,6 +54,8 @@ struct ParseCommand {
     quiet: bool,
     #[arg(long)]
     num_workers: Option<usize>,
+    #[arg(long)]
+    inline_images: bool,
 }
 
 #[derive(Args, Debug)]
@@ -99,6 +101,8 @@ struct BatchParseCommand {
     quiet: bool,
     #[arg(long)]
     num_workers: Option<usize>,
+    #[arg(long)]
+    inline_images: bool,
 }
 
 fn parse_output_format(s: &str) -> Result<OutputFormat, String> {
@@ -129,6 +133,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 password: cmd.password,
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
+                inline_images: cmd.inline_images,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {
@@ -206,6 +211,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 password: cmd.password,
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
+                inline_images: cmd.inline_images,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {

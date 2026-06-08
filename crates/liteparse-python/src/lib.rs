@@ -214,6 +214,8 @@ struct PyLiteParseConfig {
     quiet: bool,
     #[pyo3(get)]
     num_workers: usize,
+    #[pyo3(get)]
+    inline_images: bool,
 }
 
 #[pymethods]
@@ -244,6 +246,7 @@ impl PyLiteParseConfig {
             password: cfg.password.clone(),
             quiet: cfg.quiet,
             num_workers: cfg.num_workers,
+            inline_images: cfg.inline_images,
         }
     }
 }
@@ -276,6 +279,7 @@ impl LiteParse {
         password = None,
         quiet = None,
         num_workers = None,
+        inline_images = None,
     ))]
     fn new(
         ocr_language: Option<String>,
@@ -290,6 +294,7 @@ impl LiteParse {
         password: Option<String>,
         quiet: Option<bool>,
         num_workers: Option<usize>,
+        inline_images: Option<bool>,
     ) -> PyResult<Self> {
         let mut cfg = LiteParseConfig::default();
         if let Some(v) = ocr_language {
@@ -330,6 +335,9 @@ impl LiteParse {
         }
         if let Some(v) = num_workers {
             cfg.num_workers = v;
+        }
+        if let Some(v) = inline_images {
+            cfg.inline_images = v;
         }
 
         let inner = liteparse::parser::LiteParse::new(cfg.clone());

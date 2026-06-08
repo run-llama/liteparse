@@ -55,6 +55,19 @@ pub struct TextItem {
     pub confidence: Option<f32>,
 }
 
+/// Represents an embedded image extracted from a PDF page.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ImageItem {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub mime_type: String,
+    pub base64: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+}
+
 #[doc(hidden)]
 #[derive(Debug, Serialize)]
 pub struct Page {
@@ -62,6 +75,8 @@ pub struct Page {
     pub page_width: f32,
     pub page_height: f32,
     pub text_items: Vec<TextItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageItem>,
 }
 
 /// Represents a fully parsed page with projected text layout.
@@ -72,6 +87,8 @@ pub struct ParsedPage {
     pub page_height: f32,
     pub text: String,
     pub text_items: Vec<TextItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageItem>,
 }
 
 #[doc(hidden)]
@@ -155,6 +172,7 @@ mod tests {
             page_width: 100.0,
             page_height: 200.0,
             text_items: vec![sample_item()],
+            images: Vec::new(),
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"page_number\":1"));

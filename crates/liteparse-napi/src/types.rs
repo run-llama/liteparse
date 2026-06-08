@@ -2,7 +2,7 @@ use napi_derive::napi;
 
 use liteparse::config::{LiteParseConfig, OutputFormat};
 use liteparse::parser::ParseResult;
-use liteparse::types::{ParsedPage, TextItem};
+use liteparse::types::{ImageItem, ParsedPage, TextItem};
 
 // ---------------------------------------------------------------------------
 // Config
@@ -35,6 +35,8 @@ pub struct JsLiteParseConfig {
     pub quiet: Option<bool>,
     /// Number of concurrent OCR workers (default: CPU cores - 1).
     pub num_workers: Option<u32>,
+    /// Inline embedded PDF images into text as base64 markdown data URI images.
+    pub inline_images: Option<bool>,
 }
 
 impl JsLiteParseConfig {
@@ -79,6 +81,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.num_workers {
             cfg.num_workers = v as usize;
         }
+        if let Some(v) = self.inline_images {
+            cfg.inline_images = v;
+        }
         cfg
     }
 
@@ -99,6 +104,7 @@ impl JsLiteParseConfig {
             password: cfg.password.clone(),
             quiet: Some(cfg.quiet),
             num_workers: Some(cfg.num_workers as u32),
+            inline_images: Some(cfg.inline_images),
         }
     }
 }
@@ -150,6 +156,34 @@ impl JsTextItem {
 }
 
 // ---------------------------------------------------------------------------
+// ImageItem
+// ---------------------------------------------------------------------------
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsImageItem {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub mime_type: String,
+    pub base64: String,
+}
+
+impl JsImageItem {
+    pub fn from_rust(item: &ImageItem) -> Self {
+        Self {
+            x: item.x as f64,
+            y: item.y as f64,
+            width: item.width as f64,
+            height: item.height as f64,
+            mime_type: item.mime_type.clone(),
+            base64: item.base64.clone(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ParsedPage
 // ---------------------------------------------------------------------------
 
@@ -161,6 +195,7 @@ pub struct JsParsedPage {
     pub height: f64,
     pub text: String,
     pub text_items: Vec<JsTextItem>,
+    pub images: Vec<JsImageItem>,
 }
 
 impl JsParsedPage {
@@ -171,6 +206,7 @@ impl JsParsedPage {
             height: page.page_height as f64,
             text: page.text.clone(),
             text_items: page.text_items.iter().map(JsTextItem::from_rust).collect(),
+            images: page.images.iter().map(JsImageItem::from_rust).collect(),
         }
     }
 }

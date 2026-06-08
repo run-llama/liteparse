@@ -62,6 +62,7 @@ pub(crate) fn extract_pages_from_document(
             page_width: page.width(),
             page_height: page.height(),
             text_items,
+            images: Vec::new(),
         });
     }
 
