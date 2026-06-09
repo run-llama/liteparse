@@ -1,0 +1,19 @@
+services:
+  easyocr:
+    build: .
+    container_name: easyocr
+    ports:
+      - "8828:8828"
+    volumes:
+      # Cache EasyOCR models to avoid re-downloading on restart
+      - easyocr_models:/root/.EasyOCR
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8828/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  easyocr_models:
