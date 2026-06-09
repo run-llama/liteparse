@@ -68,6 +68,32 @@ pub struct ImageItem {
     pub placeholder: Option<String>,
 }
 
+/// Supported chart types for detected visual charts.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChartType {
+    Bar,
+    Line,
+    Pie,
+    Radar,
+}
+
+/// Represents a detected visual chart and its text/structured representation.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChartItem {
+    pub page_number: usize,
+    pub chart_type: ChartType,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub ascii: String,
+    pub series: Vec<String>,
+    pub groups: Vec<String>,
+    pub values: Vec<Vec<f32>>,
+    pub max_value: f32,
+}
+
 #[doc(hidden)]
 #[derive(Debug, Serialize)]
 pub struct Page {
@@ -89,6 +115,8 @@ pub struct ParsedPage {
     pub text_items: Vec<TextItem>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub charts: Vec<ChartItem>,
 }
 
 #[doc(hidden)]

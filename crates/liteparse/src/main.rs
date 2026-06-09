@@ -93,6 +93,14 @@ struct ParseCommand {
     /// Inline embedded PDF images into text as base64 markdown data URI images
     #[arg(long)]
     inline_images: bool,
+
+    /// Detect supported vector charts and render them as ASCII charts
+    #[arg(long)]
+    detect_charts: bool,
+
+    /// DPI for chart detection rendering
+    #[arg(long, default_value = "100")]
+    chart_detection_dpi: f32,
 }
 
 #[derive(Args, Debug)]
@@ -180,6 +188,14 @@ struct BatchParseCommand {
     /// Inline embedded PDF images into text as base64 markdown data URI images
     #[arg(long)]
     inline_images: bool,
+
+    /// Detect supported vector charts and render them as ASCII charts
+    #[arg(long)]
+    detect_charts: bool,
+
+    /// DPI for chart detection rendering
+    #[arg(long, default_value = "100")]
+    chart_detection_dpi: f32,
 }
 
 #[derive(Args, Debug)]
@@ -222,6 +238,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
                 inline_images: cmd.inline_images,
+                detect_charts: cmd.detect_charts,
+                chart_detection_dpi: cmd.chart_detection_dpi,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {
@@ -305,6 +323,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
                 inline_images: cmd.inline_images,
+                detect_charts: cmd.detect_charts,
+                chart_detection_dpi: cmd.chart_detection_dpi,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {

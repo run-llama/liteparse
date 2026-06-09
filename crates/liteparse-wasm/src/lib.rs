@@ -18,7 +18,7 @@ use liteparse::config::{LiteParseConfig, OutputFormat};
 use liteparse::ocr::{OcrEngine, OcrOptions, OcrResult};
 use liteparse::parser::LiteParse as CoreLiteParse;
 use liteparse::search;
-use liteparse::types::PdfInput;
+use liteparse::types::{ChartType, PdfInput};
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -49,6 +49,8 @@ struct JsLiteParseConfig {
     password: Option<String>,
     quiet: Option<bool>,
     inline_images: Option<bool>,
+    detect_charts: Option<bool>,
+    chart_detection_dpi: Option<f32>,
 }
 
 impl JsLiteParseConfig {
@@ -99,6 +101,12 @@ impl JsLiteParseConfig {
         if let Some(v) = self.inline_images {
             cfg.inline_images = v;
         }
+        if let Some(v) = self.detect_charts {
+            cfg.detect_charts = v;
+        }
+        if let Some(v) = self.chart_detection_dpi {
+            cfg.chart_detection_dpi = v;
+        }
         cfg.num_workers = 1;
         Ok(cfg)
     }
@@ -120,6 +128,8 @@ impl JsLiteParseConfig {
             password: cfg.password.clone(),
             quiet: Some(cfg.quiet),
             inline_images: Some(cfg.inline_images),
+            detect_charts: Some(cfg.detect_charts),
+            chart_detection_dpi: Some(cfg.chart_detection_dpi),
         }
     }
 }
@@ -157,6 +167,20 @@ struct JsImageItem<'a> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct JsChartItem<'a> {
+    chart_type: &'a str,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    ascii: &'a str,
+    series: &'a [String],
+    groups: &'a [String],
+    values: &'a [Vec<f32>],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct JsParsedPage<'a> {
     page_num: usize,
     width: f32,
@@ -164,6 +188,7 @@ struct JsParsedPage<'a> {
     text: &'a str,
     text_items: Vec<JsTextItem<'a>>,
     images: Vec<JsImageItem<'a>>,
+    charts: Vec<JsChartItem<'a>>,
 }
 
 #[derive(Serialize)]
@@ -354,6 +379,26 @@ impl LiteParse {
                         height: i.height,
                         mime_type: &i.mime_type,
                         base64: &i.base64,
+                    })
+                    .collect(),
+                charts: p
+                    .charts
+                    .iter()
+                    .map(|c| JsChartItem {
+                        chart_type: match &c.chart_type {
+                            ChartType::Bar => "bar",
+                            ChartType::Line => "line",
+                            ChartType::Pie => "pie",
+                            ChartType::Radar => "radar",
+                        },
+                        x: c.x,
+                        y: c.y,
+                        width: c.width,
+                        height: c.height,
+                        ascii: &c.ascii,
+                        series: &c.series,
+                        groups: &c.groups,
+                        values: &c.values,
                     })
                     .collect(),
             })

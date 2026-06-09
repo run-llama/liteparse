@@ -77,6 +77,8 @@ class LiteParse:
         quiet: Optional[bool] = None,
         num_workers: Optional[int] = None,
         inline_images: Optional[bool] = None,
+        detect_charts: Optional[bool] = None,
+        chart_detection_dpi: Optional[float] = None,
     ):
         """
         Initialize LiteParse parser.
@@ -95,6 +97,8 @@ class LiteParse:
             quiet: Suppress progress output
             num_workers: Number of concurrent OCR workers (default: CPU cores - 1)
             inline_images: Inline embedded PDF images into text as base64 markdown images
+            detect_charts: Detect supported vector charts and render them as ASCII charts
+            chart_detection_dpi: DPI for chart detection rendering
         """
         kwargs = {}
         if ocr_enabled is not None:
@@ -123,6 +127,10 @@ class LiteParse:
             kwargs["num_workers"] = num_workers
         if inline_images is not None:
             kwargs["inline_images"] = inline_images
+        if detect_charts is not None:
+            kwargs["detect_charts"] = detect_charts
+        if chart_detection_dpi is not None:
+            kwargs["chart_detection_dpi"] = chart_detection_dpi
 
         self._native = _NativeLiteParse(**kwargs)
 
@@ -220,6 +228,8 @@ class LiteParse:
             quiet=cfg.quiet,
             num_workers=cfg.num_workers,
             inline_images=cfg.inline_images,
+            detect_charts=cfg.detect_charts,
+            chart_detection_dpi=cfg.chart_detection_dpi,
         )
 
     def __repr__(self) -> str:

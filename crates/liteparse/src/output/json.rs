@@ -1,4 +1,4 @@
-use crate::types::ParsedPage;
+use crate::types::{ChartType, ParsedPage};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -27,6 +27,19 @@ pub(crate) struct JsonTextItem {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct JsonChartItem {
+    pub chart_type: ChartType,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub ascii: String,
+    pub series: Vec<String>,
+    pub groups: Vec<String>,
+    pub values: Vec<Vec<f32>>,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct JsonPage {
     pub page: usize,
     pub width: f32,
@@ -35,6 +48,8 @@ pub(crate) struct JsonPage {
     pub text_items: Vec<JsonTextItem>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<JsonImageItem>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub charts: Vec<JsonChartItem>,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,6 +93,21 @@ pub(crate) fn build_json(pages: &[ParsedPage]) -> ParseResultJson {
                         base64: image.base64.clone(),
                     })
                     .collect(),
+                charts: page
+                    .charts
+                    .iter()
+                    .map(|chart| JsonChartItem {
+                        chart_type: chart.chart_type.clone(),
+                        x: chart.x,
+                        y: chart.y,
+                        width: chart.width,
+                        height: chart.height,
+                        ascii: chart.ascii.clone(),
+                        series: chart.series.clone(),
+                        groups: chart.groups.clone(),
+                        values: chart.values.clone(),
+                    })
+                    .collect(),
             })
             .collect(),
     }
@@ -116,6 +146,7 @@ mod tests {
             text: "txt".into(),
             text_items: items,
             images: vec![],
+            charts: vec![],
         }
     }
 

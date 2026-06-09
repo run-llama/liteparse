@@ -2,7 +2,7 @@ use napi_derive::napi;
 
 use liteparse::config::{LiteParseConfig, OutputFormat};
 use liteparse::parser::ParseResult;
-use liteparse::types::{ImageItem, ParsedPage, TextItem};
+use liteparse::types::{ChartItem, ChartType, ImageItem, ParsedPage, TextItem};
 
 // ---------------------------------------------------------------------------
 // Config
@@ -37,6 +37,10 @@ pub struct JsLiteParseConfig {
     pub num_workers: Option<u32>,
     /// Inline embedded PDF images into text as base64 markdown data URI images.
     pub inline_images: Option<bool>,
+    /// Detect supported vector charts and render them as ASCII charts.
+    pub detect_charts: Option<bool>,
+    /// DPI for chart detection rendering.
+    pub chart_detection_dpi: Option<f64>,
 }
 
 impl JsLiteParseConfig {
@@ -84,6 +88,12 @@ impl JsLiteParseConfig {
         if let Some(v) = self.inline_images {
             cfg.inline_images = v;
         }
+        if let Some(v) = self.detect_charts {
+            cfg.detect_charts = v;
+        }
+        if let Some(v) = self.chart_detection_dpi {
+            cfg.chart_detection_dpi = v as f32;
+        }
         cfg
     }
 
@@ -105,6 +115,8 @@ impl JsLiteParseConfig {
             quiet: Some(cfg.quiet),
             num_workers: Some(cfg.num_workers as u32),
             inline_images: Some(cfg.inline_images),
+            detect_charts: Some(cfg.detect_charts),
+            chart_detection_dpi: Some(cfg.chart_detection_dpi as f64),
         }
     }
 }
@@ -184,6 +196,50 @@ impl JsImageItem {
 }
 
 // ---------------------------------------------------------------------------
+// ChartItem
+// ---------------------------------------------------------------------------
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsChartItem {
+    pub chart_type: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub ascii: String,
+    pub series: Vec<String>,
+    pub groups: Vec<String>,
+    pub values: Vec<Vec<f64>>,
+}
+
+impl JsChartItem {
+    pub fn from_rust(item: &ChartItem) -> Self {
+        Self {
+            chart_type: match &item.chart_type {
+                ChartType::Bar => "bar",
+                ChartType::Line => "line",
+                ChartType::Pie => "pie",
+                ChartType::Radar => "radar",
+            }
+            .to_string(),
+            x: item.x as f64,
+            y: item.y as f64,
+            width: item.width as f64,
+            height: item.height as f64,
+            ascii: item.ascii.clone(),
+            series: item.series.clone(),
+            groups: item.groups.clone(),
+            values: item
+                .values
+                .iter()
+                .map(|row| row.iter().map(|v| *v as f64).collect())
+                .collect(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ParsedPage
 // ---------------------------------------------------------------------------
 
@@ -196,6 +252,7 @@ pub struct JsParsedPage {
     pub text: String,
     pub text_items: Vec<JsTextItem>,
     pub images: Vec<JsImageItem>,
+    pub charts: Vec<JsChartItem>,
 }
 
 impl JsParsedPage {
@@ -207,6 +264,7 @@ impl JsParsedPage {
             text: page.text.clone(),
             text_items: page.text_items.iter().map(JsTextItem::from_rust).collect(),
             images: page.images.iter().map(JsImageItem::from_rust).collect(),
+            charts: page.charts.iter().map(JsChartItem::from_rust).collect(),
         }
     }
 }

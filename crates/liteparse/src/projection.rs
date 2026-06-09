@@ -2698,6 +2698,7 @@ pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
                     })
                     .collect(),
                 images: page.images,
+                charts: Vec::new(),
             }
         })
         .collect()

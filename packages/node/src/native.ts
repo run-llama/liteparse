@@ -33,6 +33,8 @@ export interface LiteParseNativeConfig {
   quiet?: boolean;
   numWorkers?: number;
   inlineImages?: boolean;
+  detectCharts?: boolean;
+  chartDetectionDpi?: number;
 }
 
 export interface NativeTextItem {
@@ -55,6 +57,18 @@ export interface NativeImageItem {
   base64: string;
 }
 
+export interface NativeChartItem {
+  chartType: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  ascii: string;
+  series: string[];
+  groups: string[];
+  values: number[][];
+}
+
 export interface NativeParsedPage {
   pageNum: number;
   width: number;
@@ -62,6 +76,7 @@ export interface NativeParsedPage {
   text: string;
   textItems: NativeTextItem[];
   images: NativeImageItem[];
+  charts: NativeChartItem[];
 }
 
 export interface NativeParseResult {

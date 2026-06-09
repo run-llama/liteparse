@@ -56,6 +56,10 @@ struct ParseCommand {
     num_workers: Option<usize>,
     #[arg(long)]
     inline_images: bool,
+    #[arg(long)]
+    detect_charts: bool,
+    #[arg(long, default_value = "100")]
+    chart_detection_dpi: f32,
 }
 
 #[derive(Args, Debug)]
@@ -103,6 +107,10 @@ struct BatchParseCommand {
     num_workers: Option<usize>,
     #[arg(long)]
     inline_images: bool,
+    #[arg(long)]
+    detect_charts: bool,
+    #[arg(long, default_value = "100")]
+    chart_detection_dpi: f32,
 }
 
 fn parse_output_format(s: &str) -> Result<OutputFormat, String> {
@@ -134,6 +142,8 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
                 inline_images: cmd.inline_images,
+                detect_charts: cmd.detect_charts,
+                chart_detection_dpi: cmd.chart_detection_dpi,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {
@@ -212,6 +222,8 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
                 inline_images: cmd.inline_images,
+                detect_charts: cmd.detect_charts,
+                chart_detection_dpi: cmd.chart_detection_dpi,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {

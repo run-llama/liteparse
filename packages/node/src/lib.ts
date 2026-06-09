@@ -3,6 +3,7 @@ import {
   type LiteParseNative,
   type LiteParseNativeConfig,
   type NativeParseResult,
+  type NativeChartItem,
   type NativeImageItem,
   type NativeParsedPage,
   type NativeTextItem,
@@ -29,6 +30,8 @@ export interface LiteParseConfig {
   quiet: boolean;
   numWorkers: number;
   inlineImages: boolean;
+  detectCharts: boolean;
+  chartDetectionDpi: number;
 }
 
 export interface TextItem {
@@ -51,6 +54,18 @@ export interface ImageItem {
   base64: string;
 }
 
+export interface ChartItem {
+  chartType: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  ascii: string;
+  series: string[];
+  groups: string[];
+  values: number[][];
+}
+
 export interface ParsedPage {
   pageNum: number;
   width: number;
@@ -58,6 +73,7 @@ export interface ParsedPage {
   text: string;
   textItems: TextItem[];
   images: ImageItem[];
+  charts: ChartItem[];
 }
 
 export interface ParseResult {
@@ -95,6 +111,8 @@ export class LiteParse {
       quiet: userConfig.quiet,
       numWorkers: userConfig.numWorkers,
       inlineImages: userConfig.inlineImages,
+      detectCharts: userConfig.detectCharts,
+      chartDetectionDpi: userConfig.chartDetectionDpi,
     };
 
     this._native = new native.LiteParse(nativeConfig);
@@ -115,6 +133,8 @@ export class LiteParse {
       quiet: resolved.quiet ?? false,
       numWorkers: resolved.numWorkers ?? 1,
       inlineImages: resolved.inlineImages ?? false,
+      detectCharts: resolved.detectCharts ?? false,
+      chartDetectionDpi: resolved.chartDetectionDpi ?? 100,
     };
   }
 
@@ -160,6 +180,21 @@ function toPage(p: NativeParsedPage): ParsedPage {
     text: p.text,
     textItems: p.textItems.map(toTextItem),
     images: (p.images ?? []).map(toImageItem),
+    charts: (p.charts ?? []).map(toChartItem),
+  };
+}
+
+function toChartItem(item: NativeChartItem): ChartItem {
+  return {
+    chartType: item.chartType,
+    x: item.x,
+    y: item.y,
+    width: item.width,
+    height: item.height,
+    ascii: item.ascii,
+    series: item.series,
+    groups: item.groups,
+    values: item.values,
   };
 }
 

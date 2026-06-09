@@ -30,6 +30,11 @@ pub struct LiteParseConfig {
     /// Inline embedded PDF images into page text as markdown data URI images.
     /// Disabled by default because it can make text/JSON output very large.
     pub inline_images: bool,
+    /// Detect supported vector charts and replace their text-only outlines with ASCII charts.
+    /// Disabled by default because it requires page rendering and is heuristic.
+    pub detect_charts: bool,
+    /// DPI used for chart detection rendering. Lower than OCR DPI by default for speed.
+    pub chart_detection_dpi: f32,
 }
 
 /// Supported output formats.
@@ -56,6 +61,8 @@ impl Default for LiteParseConfig {
             quiet: false,
             num_workers: default_num_workers(),
             inline_images: false,
+            detect_charts: false,
+            chart_detection_dpi: 100.0,
         }
     }
 }
@@ -137,6 +144,8 @@ mod tests {
         assert!(!c.preserve_very_small_text);
         assert!(!c.quiet);
         assert!(!c.inline_images);
+        assert!(!c.detect_charts);
+        assert_eq!(c.chart_detection_dpi, 100.0);
         assert!(c.password.is_none());
     }
 

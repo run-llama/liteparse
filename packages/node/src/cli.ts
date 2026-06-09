@@ -31,6 +31,8 @@ program
   .option("-q, --quiet", "Suppress progress output")
   .option("--num-workers <n>", "Number of concurrent OCR workers", parseInt)
   .option("--inline-images", "Inline embedded PDF images into text as base64 markdown images")
+  .option("--detect-charts", "Detect supported vector charts and render them as ASCII charts")
+  .option("--chart-detection-dpi <dpi>", "DPI for chart detection rendering", parseFloat)
   .action(async (file: string, opts: Record<string, unknown>) => {
     try {
       const config: Partial<LiteParseConfig> = {};
@@ -57,6 +59,8 @@ program
       if (opts.quiet) config.quiet = true;
       if (opts.numWorkers) config.numWorkers = opts.numWorkers as number;
       if (opts.inlineImages) config.inlineImages = true;
+      if (opts.detectCharts) config.detectCharts = true;
+      if (opts.chartDetectionDpi) config.chartDetectionDpi = opts.chartDetectionDpi as number;
 
       // Default CLI output to text (library defaults to json)
       if (!config.outputFormat) config.outputFormat = "text";
@@ -75,6 +79,7 @@ program
                   text: p.text,
                   textItems: p.textItems,
                   images: p.images,
+                  charts: p.charts,
                 })),
               },
               null,
@@ -175,6 +180,8 @@ program
   .option("-q, --quiet", "Suppress progress output")
   .option("--num-workers <n>", "Number of concurrent OCR workers", parseInt)
   .option("--inline-images", "Inline embedded PDF images into text as base64 markdown images")
+  .option("--detect-charts", "Detect supported vector charts and render them as ASCII charts")
+  .option("--chart-detection-dpi <dpi>", "DPI for chart detection rendering", parseFloat)
   .action(
     async (
       inputDir: string,
@@ -195,6 +202,8 @@ program
         if (opts.quiet) config.quiet = true;
         if (opts.numWorkers) config.numWorkers = opts.numWorkers as number;
         if (opts.inlineImages) config.inlineImages = true;
+        if (opts.detectCharts) config.detectCharts = true;
+        if (opts.chartDetectionDpi) config.chartDetectionDpi = opts.chartDetectionDpi as number;
 
         const parser = new LiteParse(config);
         const outExt = format === "json" ? ".json" : ".txt";

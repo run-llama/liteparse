@@ -216,6 +216,10 @@ struct PyLiteParseConfig {
     num_workers: usize,
     #[pyo3(get)]
     inline_images: bool,
+    #[pyo3(get)]
+    detect_charts: bool,
+    #[pyo3(get)]
+    chart_detection_dpi: f32,
 }
 
 #[pymethods]
@@ -247,6 +251,8 @@ impl PyLiteParseConfig {
             quiet: cfg.quiet,
             num_workers: cfg.num_workers,
             inline_images: cfg.inline_images,
+            detect_charts: cfg.detect_charts,
+            chart_detection_dpi: cfg.chart_detection_dpi,
         }
     }
 }
@@ -280,6 +286,8 @@ impl LiteParse {
         quiet = None,
         num_workers = None,
         inline_images = None,
+        detect_charts = None,
+        chart_detection_dpi = None,
     ))]
     fn new(
         ocr_language: Option<String>,
@@ -295,6 +303,8 @@ impl LiteParse {
         quiet: Option<bool>,
         num_workers: Option<usize>,
         inline_images: Option<bool>,
+        detect_charts: Option<bool>,
+        chart_detection_dpi: Option<f32>,
     ) -> PyResult<Self> {
         let mut cfg = LiteParseConfig::default();
         if let Some(v) = ocr_language {
@@ -338,6 +348,12 @@ impl LiteParse {
         }
         if let Some(v) = inline_images {
             cfg.inline_images = v;
+        }
+        if let Some(v) = detect_charts {
+            cfg.detect_charts = v;
+        }
+        if let Some(v) = chart_detection_dpi {
+            cfg.chart_detection_dpi = v;
         }
 
         let inner = liteparse::parser::LiteParse::new(cfg.clone());

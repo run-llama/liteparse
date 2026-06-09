@@ -72,6 +72,8 @@ class LiteParseConfig:
     quiet: bool
     num_workers: int
     inline_images: bool
+    detect_charts: bool
+    chart_detection_dpi: float
 
 
 class ParseError(Exception):

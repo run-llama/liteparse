@@ -30,6 +30,10 @@ export interface JsLiteParseConfig {
   numWorkers?: number
   /** Inline embedded PDF images into text as base64 markdown data URI images. */
   inlineImages?: boolean
+  /** Detect supported vector charts and render them as ASCII charts. */
+  detectCharts?: boolean
+  /** DPI for chart detection rendering. */
+  chartDetectionDpi?: number
 }
 export interface JsTextItem {
   text: string
@@ -49,6 +53,17 @@ export interface JsImageItem {
   mimeType: string
   base64: string
 }
+export interface JsChartItem {
+  chartType: string
+  x: number
+  y: number
+  width: number
+  height: number
+  ascii: string
+  series: Array<string>
+  groups: Array<string>
+  values: Array<Array<number>>
+}
 export interface JsParsedPage {
   pageNum: number
   width: number
@@ -56,6 +71,7 @@ export interface JsParsedPage {
   text: string
   textItems: Array<JsTextItem>
   images: Array<JsImageItem>
+  charts: Array<JsChartItem>
 }
 export interface JsParseResult {
   pages: Array<JsParsedPage>

@@ -9,7 +9,7 @@ pub use config::{LiteParseConfig, OutputFormat};
 pub use error::LiteParseError;
 pub use parser::{LiteParse, ParseResult, ScreenshotResult};
 pub use search::{SearchOptions, search_items};
-pub use types::{ImageItem, ParsedPage, TextItem};
+pub use types::{ChartItem, ChartType, ImageItem, ParsedPage, TextItem};
 
 // ── Modules with user-facing types (visible in docs) ───────────────────
 pub mod config;
@@ -19,6 +19,8 @@ pub mod search;
 pub mod types;
 
 // ── Internal modules (available for binding crates, hidden from docs) ──
+#[doc(hidden)]
+pub mod chart;
 #[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub mod conversion;

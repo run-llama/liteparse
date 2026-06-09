@@ -1,3 +1,4 @@
+use crate::chart;
 use crate::config::{LiteParseConfig, parse_target_pages};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::conversion;
@@ -101,61 +102,83 @@ impl LiteParse {
         // Extract text. Keep the PDF document open when OCR or inline image
         // extraction needs rendering from the same loaded document.
         let password = self.config.password.as_deref();
-        let (mut pages, ocr_rendered) = if self.config.ocr_enabled || self.config.inline_images {
-            let document = extract::load_document_from_input(&validated_input, password)?;
-            let mut pages = extract::extract_pages_from_document(
-                &document,
-                target_pages.as_deref(),
-                self.config.max_pages,
-            )?;
-            let t_extract = web_time::Instant::now();
-            log(&format!(
-                "[liteparse] extract: {:.1}ms ({} pages)",
-                t_extract.duration_since(t0).as_secs_f64() * 1000.0,
-                pages.len()
-            ));
-
-            if self.config.inline_images {
-                let t_images = web_time::Instant::now();
-                image_merge::extract_images_into_pages(&document, &mut pages)?;
+        let (mut pages, ocr_rendered, detected_charts) =
+            if self.config.ocr_enabled || self.config.inline_images || self.config.detect_charts {
+                let document = extract::load_document_from_input(&validated_input, password)?;
+                let mut pages = extract::extract_pages_from_document(
+                    &document,
+                    target_pages.as_deref(),
+                    self.config.max_pages,
+                )?;
+                let t_extract = web_time::Instant::now();
                 log(&format!(
-                    "[liteparse] images: {:.1}ms",
-                    web_time::Instant::now()
-                        .duration_since(t_images)
-                        .as_secs_f64()
-                        * 1000.0
+                    "[liteparse] extract: {:.1}ms ({} pages)",
+                    t_extract.duration_since(t0).as_secs_f64() * 1000.0,
+                    pages.len()
                 ));
-            }
 
-            let rendered = if self.config.ocr_enabled {
-                let rendered = ocr_merge::render_pages_for_ocr(&document, &pages, self.config.dpi)?;
-                log(&format!(
-                    "[liteparse] ocr render: {:.1}ms ({} pages)",
-                    web_time::Instant::now()
-                        .duration_since(t_extract)
-                        .as_secs_f64()
-                        * 1000.0,
-                    rendered.len()
-                ));
-                rendered
+                if self.config.inline_images {
+                    let t_images = web_time::Instant::now();
+                    image_merge::extract_images_into_pages(&document, &mut pages)?;
+                    log(&format!(
+                        "[liteparse] images: {:.1}ms",
+                        web_time::Instant::now()
+                            .duration_since(t_images)
+                            .as_secs_f64()
+                            * 1000.0
+                    ));
+                }
+
+                let detected_charts = if self.config.detect_charts {
+                    let t_charts = web_time::Instant::now();
+                    let charts = chart::detect_charts_for_pages(
+                        &document,
+                        &pages,
+                        self.config.chart_detection_dpi,
+                    )?;
+                    log(&format!(
+                        "[liteparse] charts: {:.1}ms ({} pages)",
+                        web_time::Instant::now()
+                            .duration_since(t_charts)
+                            .as_secs_f64()
+                            * 1000.0,
+                        charts.len()
+                    ));
+                    charts
+                } else {
+                    Vec::new()
+                };
+
+                let rendered = if self.config.ocr_enabled {
+                    let rendered =
+                        ocr_merge::render_pages_for_ocr(&document, &pages, self.config.dpi)?;
+                    log(&format!(
+                        "[liteparse] ocr render: {:.1}ms ({} pages)",
+                        web_time::Instant::now()
+                            .duration_since(t_extract)
+                            .as_secs_f64()
+                            * 1000.0,
+                        rendered.len()
+                    ));
+                    rendered
+                } else {
+                    Vec::new()
+                };
+                (pages, rendered, detected_charts)
             } else {
-                Vec::new()
+                let pages = extract::extract_pages_from_input(
+                    &validated_input,
+                    target_pages.as_deref(),
+                    self.config.max_pages,
+                    password,
+                )?;
+                log(&format!(
+                    "[liteparse] extract: {:.1}ms ({} pages)",
+                    web_time::Instant::now().duration_since(t0).as_secs_f64() * 1000.0,
+                    pages.len()
+                ));
+                (pages, Vec::new(), Vec::new())
             };
-            (pages, rendered)
-        } else {
-            let pages = extract::extract_pages_from_input(
-                &validated_input,
-                target_pages.as_deref(),
-                self.config.max_pages,
-                password,
-            )?;
-            log(&format!(
-                "[liteparse] extract: {:.1}ms ({} pages)",
-                web_time::Instant::now().duration_since(t0).as_secs_f64() * 1000.0,
-                pages.len()
-            ));
-            (pages, Vec::new())
-        };
         let t1 = web_time::Instant::now();
 
         // OCR pass
@@ -210,7 +233,10 @@ impl LiteParse {
         }
 
         // Grid projection
-        let parsed_pages = projection::project_pages_to_grid(pages);
+        let mut parsed_pages = projection::project_pages_to_grid(pages);
+        if self.config.detect_charts {
+            chart::apply_charts_to_parsed_pages(&mut parsed_pages, &detected_charts);
+        }
         let t2 = web_time::Instant::now();
         log(&format!(
             "[liteparse] project: {:.1}ms",

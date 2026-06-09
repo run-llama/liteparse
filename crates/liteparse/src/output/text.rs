@@ -21,6 +21,7 @@ mod tests {
             text: text.into(),
             text_items: vec![],
             images: vec![],
+            charts: vec![],
         }
     }
 
