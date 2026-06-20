@@ -48,6 +48,7 @@ struct JsLiteParseConfig {
     dpi: Option<f32>,
     output_format: Option<String>,
     image_mode: Option<String>,
+    inline_images: Option<bool>,
     extract_links: Option<bool>,
     preserve_very_small_text: Option<bool>,
     password: Option<String>,
@@ -101,6 +102,9 @@ impl JsLiteParseConfig {
                 _ => ImageMode::Placeholder,
             };
         }
+        if let Some(v) = self.inline_images {
+            cfg.inline_images = v;
+        }
         if let Some(v) = self.extract_links {
             cfg.extract_links = v;
         }
@@ -141,6 +145,7 @@ impl JsLiteParseConfig {
                 ImageMode::Placeholder => "placeholder".into(),
                 ImageMode::Embed => "embed".into(),
             }),
+            inline_images: Some(cfg.inline_images),
             extract_links: Some(cfg.extract_links),
             preserve_very_small_text: Some(cfg.preserve_very_small_text),
             password: cfg.password.clone(),

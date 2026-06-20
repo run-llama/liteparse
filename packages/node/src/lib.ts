@@ -30,6 +30,8 @@ export interface LiteParseConfig {
   outputFormat: OutputFormat;
   /** How to surface raster images in markdown output (default: "placeholder"). */
   imageMode: ImageMode;
+  /** Inline embedded PDF images into markdown text as base64 data URI images. */
+  inlineImages: boolean;
   /** Render hyperlink annotations as `[text](url)` in markdown output (default: true). */
   extractLinks: boolean;
   preserveVerySmallText: boolean;
@@ -139,6 +141,7 @@ export class LiteParse {
       dpi: userConfig.dpi,
       outputFormat: userConfig.outputFormat,
       imageMode: userConfig.imageMode,
+      inlineImages: userConfig.inlineImages,
       extractLinks: userConfig.extractLinks,
       preserveVerySmallText: userConfig.preserveVerySmallText,
       password: userConfig.password,
@@ -161,6 +164,7 @@ export class LiteParse {
       dpi: resolved.dpi ?? 150,
       outputFormat: (resolved.outputFormat as OutputFormat) ?? "json",
       imageMode: (resolved.imageMode as ImageMode) ?? "placeholder",
+      inlineImages: resolved.inlineImages ?? false,
       extractLinks: resolved.extractLinks ?? true,
       preserveVerySmallText: resolved.preserveVerySmallText ?? false,
       password: resolved.password ?? undefined,

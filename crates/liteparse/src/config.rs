@@ -34,6 +34,9 @@ pub struct LiteParseConfig {
     /// Controls how raster images are surfaced in markdown output. Has no
     /// effect on JSON / text outputs.
     pub image_mode: ImageMode,
+    /// Inline embedded raster images into markdown text as base64 data URI images.
+    /// Disabled by default because it can make output very large.
+    pub inline_images: bool,
     /// Extract hyperlink annotations and render them as `[text](url)` in
     /// markdown output. Default on. Disable for benchmark parity with
     /// plain-text ground truth (the GT corpora never use link syntax).
@@ -85,6 +88,7 @@ impl Default for LiteParseConfig {
             quiet: false,
             num_workers: default_num_workers(),
             image_mode: ImageMode::Placeholder,
+            inline_images: false,
             extract_links: true,
         }
     }
@@ -166,6 +170,7 @@ mod tests {
         assert_eq!(c.output_format, OutputFormat::Json);
         assert!(!c.preserve_very_small_text);
         assert!(!c.quiet);
+        assert!(!c.inline_images);
         assert!(c.password.is_none());
     }
 

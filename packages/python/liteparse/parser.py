@@ -89,6 +89,7 @@ class LiteParse:
         quiet: Optional[bool] = None,
         num_workers: Optional[int] = None,
         image_mode: Optional[str] = None,
+        inline_images: Optional[bool] = None,
         extract_links: Optional[bool] = None,
     ):
         """
@@ -109,6 +110,7 @@ class LiteParse:
             password: Password for encrypted/protected documents
             quiet: Suppress progress output
             num_workers: Number of concurrent OCR workers (default: CPU cores - 1)
+            inline_images: Inline embedded PDF images into markdown text as base64 data URI images
             extract_links: Render hyperlink annotations as ``[text](url)`` in
                 markdown output (default: True). Set False for plain anchor text.
         """
@@ -141,6 +143,8 @@ class LiteParse:
             kwargs["num_workers"] = num_workers
         if image_mode is not None:
             kwargs["image_mode"] = image_mode
+        if inline_images is not None:
+            kwargs["inline_images"] = inline_images
         if extract_links is not None:
             kwargs["extract_links"] = extract_links
 
@@ -240,6 +244,7 @@ class LiteParse:
             password=cfg.password,
             quiet=cfg.quiet,
             num_workers=cfg.num_workers,
+            inline_images=cfg.inline_images,
         )
 
     def __repr__(self) -> str:

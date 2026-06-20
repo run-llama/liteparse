@@ -68,6 +68,9 @@ struct ParseCommand {
     /// references. Created if missing.
     #[arg(long)]
     image_output_dir: Option<String>,
+    /// Inline embedded PDF images into markdown output as base64 data URI images.
+    #[arg(long)]
+    inline_images: bool,
     /// Disable hyperlink extraction. By default URI link annotations render as
     /// `[text](url)` in markdown output; pass this to emit plain anchor text.
     #[arg(long)]
@@ -121,6 +124,8 @@ struct BatchParseCommand {
     quiet: bool,
     #[arg(long)]
     num_workers: Option<usize>,
+    #[arg(long)]
+    inline_images: bool,
 }
 
 /// Parse a `Name: Value` header string into a `(name, value)` pair.
@@ -182,6 +187,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 ocr_server_url: cmd.ocr_server_url,
                 ocr_server_headers: cmd.ocr_server_headers,
                 image_mode,
+                inline_images: cmd.inline_images,
                 extract_links: !cmd.no_links,
                 ..Default::default()
             };
@@ -192,6 +198,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             let result = rt.block_on(lp.parse(&cmd.file))?;
             let formatted = match lp.config().output_format {
                 OutputFormat::Json => json::format_json(&result.pages)?,
+                OutputFormat::Text if lp.config().inline_images => result.text.clone(),
                 OutputFormat::Text => text::format_text(&result.pages),
                 OutputFormat::Markdown => result.text.clone(),
             };
@@ -278,6 +285,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
                 ocr_server_headers: cmd.ocr_server_headers,
+                inline_images: cmd.inline_images,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {
@@ -322,6 +330,9 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                             match lp.config().output_format {
                                 OutputFormat::Json => {
                                     json::format_json(&result.pages).map_err(|e| e.into())
+                                }
+                                OutputFormat::Text if lp.config().inline_images => {
+                                    Ok(result.text.clone())
                                 }
                                 OutputFormat::Text => Ok(text::format_text(&result.pages)),
                                 OutputFormat::Markdown => Ok(result.text.clone()),

@@ -14,6 +14,7 @@ use crate::projection;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::render;
 use crate::types::{ExtractedImage, OutlineTarget, Page, ParsedPage, PdfInput};
+use base64::Engine;
 use pdfium::Library;
 
 /// Result of parsing a document.
@@ -127,7 +128,8 @@ impl LiteParse {
         // projection (pure Rust) do not touch PDFium, so they can run
         // concurrently with other `LiteParse` calls.
         let password = self.config.password.as_deref();
-        let render_images = matches!(self.config.image_mode, crate::config::ImageMode::Embed);
+        let render_images = matches!(self.config.image_mode, crate::config::ImageMode::Embed)
+            || self.config.inline_images;
         let (pages, ocr_rendered, outline, images) = {
             let lib = Library::init();
             let document = extract::load_document_from_input(&lib, &validated_input, password)?;
@@ -224,8 +226,20 @@ impl LiteParse {
             t2.duration_since(t_ocr).as_secs_f64() * 1000.0
         ));
 
-        let full_text = if self.config.output_format == crate::config::OutputFormat::Markdown {
-            let md = markdown::format_markdown(&parsed_pages, &outline, self.config.image_mode);
+        let full_text = if self.config.output_format == crate::config::OutputFormat::Markdown
+            || self.config.inline_images
+        {
+            let image_mode = if self.config.inline_images {
+                crate::config::ImageMode::Placeholder
+            } else {
+                self.config.image_mode
+            };
+            let md = markdown::format_markdown(&parsed_pages, &outline, image_mode);
+            let md = if self.config.inline_images {
+                inline_markdown_images(md, &images)
+            } else {
+                md
+            };
             let t3 = web_time::Instant::now();
             log(&format!(
                 "[liteparse] markdown: {:.1}ms",
@@ -340,6 +354,23 @@ impl LiteParse {
     }
 }
 
+fn inline_markdown_images(mut markdown: String, images: &[ExtractedImage]) -> String {
+    for image in images {
+        let mime_type = match image.format.as_str() {
+            "jpg" | "jpeg" => "image/jpeg",
+            "webp" => "image/webp",
+            _ => "image/png",
+        };
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&image.bytes);
+        let replacement = format!("![](data:{mime_type};base64,{encoded})");
+        markdown = markdown.replace(
+            &format!("![](image_{}.{})", image.id, image.format),
+            &replacement,
+        );
+    }
+    markdown
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,5 +384,24 @@ mod tests {
         let lp = LiteParse::new(cfg);
         assert!(!lp.config().ocr_enabled);
         assert_eq!(lp.config().max_pages, 7);
+    }
+
+    #[test]
+    fn inline_markdown_images_replaces_image_refs_with_data_uris() {
+        let markdown = "before ![](image_p1_0.png) after".to_string();
+        let images = vec![ExtractedImage {
+            id: "p1_0".into(),
+            page: 1,
+            bbox: crate::types::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            format: "png".into(),
+            bytes: b"hi".to_vec(),
+        }];
+        let out = inline_markdown_images(markdown, &images);
+        assert_eq!(out, "before ![](data:image/png;base64,aGk=) after");
     }
 }

@@ -267,6 +267,8 @@ struct PyLiteParseConfig {
     quiet: bool,
     #[pyo3(get)]
     num_workers: usize,
+    #[pyo3(get)]
+    inline_images: bool,
 }
 
 #[pymethods]
@@ -303,6 +305,7 @@ impl PyLiteParseConfig {
             password: cfg.password.clone(),
             quiet: cfg.quiet,
             num_workers: cfg.num_workers,
+            inline_images: cfg.inline_images,
         }
     }
 }
@@ -337,6 +340,7 @@ impl LiteParse {
         quiet = None,
         num_workers = None,
         image_mode = None,
+        inline_images = None,
         extract_links = None,
     ))]
     fn new(
@@ -354,6 +358,7 @@ impl LiteParse {
         quiet: Option<bool>,
         num_workers: Option<usize>,
         image_mode: Option<String>,
+        inline_images: Option<bool>,
         extract_links: Option<bool>,
     ) -> PyResult<Self> {
         let mut cfg = LiteParseConfig::default();
@@ -406,6 +411,9 @@ impl LiteParse {
                 "embed" => ImageMode::Embed,
                 _ => ImageMode::Placeholder,
             };
+        }
+        if let Some(v) = inline_images {
+            cfg.inline_images = v;
         }
         if let Some(v) = extract_links {
             cfg.extract_links = v;

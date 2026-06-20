@@ -42,6 +42,7 @@ program
     "Directory to write embedded images to when --image-mode embed is set",
   )
   .option("--no-links", "Disable hyperlink extraction (emit plain anchor text)")
+  .option("--inline-images", "Inline embedded PDF images into markdown text as base64 data URI images")
   .option("--ocr-server-url <url>", "HTTP OCR server URL")
   .option(
     "--ocr-server-header <header>",
@@ -77,6 +78,7 @@ program
       if (opts.format) config.outputFormat = opts.format as "json" | "text" | "markdown";
       if (opts.imageMode)
         config.imageMode = opts.imageMode as "off" | "placeholder" | "embed";
+      if (opts.inlineImages) config.inlineImages = true;
       if (opts.links === false) config.extractLinks = false;
       if (opts.ocrServerUrl)
         config.ocrServerUrl = opts.ocrServerUrl as string;
@@ -223,6 +225,7 @@ program
   .option("--recursive", "Recursively search input directory")
   .option("--extension <ext>", "Only process files with this extension")
   .option("--password <password>", "Password for encrypted documents")
+  .option("--inline-images", "Inline embedded PDF images into markdown text as base64 data URI images")
   .option("-q, --quiet", "Suppress progress output")
   .option("--num-workers <n>", "Number of concurrent OCR workers", parseInt)
   .action(
@@ -244,6 +247,7 @@ program
         if (opts.maxPages) config.maxPages = opts.maxPages as number;
         if (opts.dpi) config.dpi = opts.dpi as number;
         if (opts.password) config.password = opts.password as string;
+        if (opts.inlineImages) config.inlineImages = true;
         if (opts.quiet) config.quiet = true;
         if (opts.numWorkers) config.numWorkers = opts.numWorkers as number;
 

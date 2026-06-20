@@ -110,6 +110,10 @@ struct ParseCommand {
     #[arg(long)]
     image_output_dir: Option<String>,
 
+    /// Inline embedded PDF images into markdown output as base64 data URI images
+    #[arg(long)]
+    inline_images: bool,
+
     /// Disable hyperlink extraction. By default, URI link annotations are
     /// rendered as `[text](url)` in markdown output. Pass this to emit the
     /// anchor text as plain text instead (e.g. for plain-text benchmark
@@ -204,6 +208,10 @@ struct BatchParseCommand {
     /// Number of concurrent OCR workers (default: CPU cores - 1)
     #[arg(long)]
     num_workers: Option<usize>,
+
+    /// Inline embedded PDF images into markdown output as base64 data URI images
+    #[arg(long)]
+    inline_images: bool,
 }
 
 #[derive(Args, Debug)]
@@ -277,6 +285,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ocr_server_url: cmd.ocr_server_url,
                 ocr_server_headers: cmd.ocr_server_headers,
                 image_mode,
+                inline_images: cmd.inline_images,
                 extract_links: !cmd.no_links,
                 ..Default::default()
             };
@@ -288,6 +297,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let result = lp.parse(&cmd.file).await?;
             let formatted = match lp.config().output_format {
                 OutputFormat::Json => json::format_json(&result.pages)?,
+                OutputFormat::Text if lp.config().inline_images => result.text.clone(),
                 OutputFormat::Text => text::format_text(&result.pages),
                 OutputFormat::Markdown => result.text.clone(),
             };
@@ -378,6 +388,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
                 ocr_server_headers: cmd.ocr_server_headers,
+                inline_images: cmd.inline_images,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {
@@ -426,6 +437,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             match lp.config().output_format {
                                 OutputFormat::Json => {
                                     json::format_json(&result.pages).map_err(|e| e.into())
+                                }
+                                OutputFormat::Text if lp.config().inline_images => {
+                                    Ok(result.text.clone())
                                 }
                                 OutputFormat::Text => Ok(text::format_text(&result.pages)),
                                 OutputFormat::Markdown => Ok(result.text.clone()),
