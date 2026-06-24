@@ -100,6 +100,75 @@ struct ImageBoundsOutput {
     height: f32,
 }
 
+/// Default minimum side length (in points) for a raster image object to be
+/// counted; smaller objects such as rule lines, bullets, and icons are ignored.
+pub const DEFAULT_MIN_IMAGE_SIZE_PT: f32 = 25.0;
+
+/// Default upper bound on a single image's page coverage; an object at or above
+/// this fraction of the page is treated as a full-page background and ignored.
+pub const DEFAULT_MAX_IMAGE_PAGE_COVERAGE: f32 = 0.9;
+
+/// Raster-image coverage for one page.
+#[derive(Debug, Clone, Serialize)]
+pub struct PageImageCoverage {
+    /// 1-based page number.
+    pub page_num: u32,
+    /// Number of raster image objects counted on the page (after filtering).
+    pub image_block_count: usize,
+    /// Combined area of those images over the page area, clamped to 1.0.
+    pub image_coverage: f32,
+    /// Area of the single largest image over the page area, clamped to 1.0.
+    pub largest_image_coverage: f32,
+}
+
+/// Report how much of each page is covered by raster images.
+///
+/// This walks every page and aggregates the image-object bounds that
+/// `pdfium::Page::image_bounds` already exposes, returning structured data
+/// rather than the stdout JSON that `image_bounds` prints. It is useful for
+/// telling scanned or image-only pages apart from born-digital text pages: a
+/// page dominated by one large image with little extractable text is likely a
+/// scan, whereas a text page with small inline figures is not.
+///
+/// `min_image_size_pt` and `max_image_page_coverage` control which objects are
+/// counted; `DEFAULT_MIN_IMAGE_SIZE_PT` and `DEFAULT_MAX_IMAGE_PAGE_COVERAGE`
+/// are the values the `image_bounds` CLI uses. The call is read-only and
+/// returns one entry per page, in page order.
+pub fn page_image_coverage(
+    input: &PdfInput,
+    min_image_size_pt: f32,
+    max_image_page_coverage: f32,
+    password: Option<&str>,
+) -> Result<Vec<PageImageCoverage>, LiteParseError> {
+    let lib = Library::init();
+    let document = load_document_from_input(&lib, input, password)?;
+    let page_count = document.page_count();
+
+    let mut coverage = Vec::with_capacity(page_count.max(0) as usize);
+    for page_index in 0..page_count {
+        let page = document.page(page_index)?;
+        let page_area = (page.width() * page.height()).max(1.0);
+        let bounds = page.image_bounds(min_image_size_pt, max_image_page_coverage);
+
+        let mut total_area = 0.0_f32;
+        let mut largest_area = 0.0_f32;
+        for b in &bounds {
+            let area = b.width.max(0.0) * b.height.max(0.0);
+            total_area += area;
+            largest_area = largest_area.max(area);
+        }
+
+        coverage.push(PageImageCoverage {
+            page_num: page_index as u32 + 1,
+            image_block_count: bounds.len(),
+            image_coverage: (total_area / page_area).min(1.0),
+            largest_image_coverage: (largest_area / page_area).min(1.0),
+        });
+    }
+
+    Ok(coverage)
+}
+
 /// Extract image bounding boxes and print as JSON to stdout.
 pub fn image_bounds(pdf_path: &str, page_num: Option<u32>) -> Result<(), LiteParseError> {
     let lib = Library::init();
@@ -114,7 +183,7 @@ pub fn image_bounds(pdf_path: &str, page_num: Option<u32>) -> Result<(), LitePar
         }
 
         let page = document.page(page_index)?;
-        let bounds = page.image_bounds(25.0, 0.9);
+        let bounds = page.image_bounds(DEFAULT_MIN_IMAGE_SIZE_PT, DEFAULT_MAX_IMAGE_PAGE_COVERAGE);
 
         let output: Vec<ImageBoundsOutput> = bounds
             .iter()
@@ -168,6 +237,30 @@ mod tests {
     #[test]
     fn test_image_bounds_missing_file_errors() {
         let r = image_bounds("/nonexistent/path/does_not_exist.pdf", None);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_page_image_coverage_serializes() {
+        let c = PageImageCoverage {
+            page_num: 1,
+            image_block_count: 2,
+            image_coverage: 0.5,
+            largest_image_coverage: 0.4,
+        };
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(s.contains("\"page_num\":1"));
+        assert!(s.contains("\"image_block_count\":2"));
+    }
+
+    #[test]
+    fn test_page_image_coverage_missing_file_errors() {
+        let r = page_image_coverage(
+            &PdfInput::Path("/nonexistent/path/does_not_exist.pdf".to_string()),
+            DEFAULT_MIN_IMAGE_SIZE_PT,
+            DEFAULT_MAX_IMAGE_PAGE_COVERAGE,
+            None,
+        );
         assert!(r.is_err());
     }
 }
