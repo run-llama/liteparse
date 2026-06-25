@@ -2803,7 +2803,38 @@ fn clean_rendered_text(text: &str) -> String {
         .join("\n")
 }
 
-pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
+pub fn project_pages_to_grid(pages: Vec<Page>, word_granularity: bool) -> Vec<ParsedPage> {
+    if word_granularity {
+        // Short-circuit: Map directly to ParsedPage without running XY-cut layout logic
+        return pages
+            .into_iter()
+            .map(|page| {
+                // Build a raw sequence string from your single word tokens
+                let combined_text = page
+                    .text_items
+                    .iter()
+                    .map(|it| it.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                ParsedPage {
+                    page_number: page.page_number,
+                    page_width: page.page_width,
+                    page_height: page.page_height,
+                    text: combined_text,
+                    text_items: page.text_items, // Perfect standalone word tokens preserved!
+                    projected_lines: Vec::new(), // Not needed for word tracking
+                    regions: Default::default(), // Not needed for word tracking
+                    graphics: page.graphics,
+                    figures: Vec::new(), // Bypassed detection to maximize speed
+                    struct_nodes: page.struct_nodes,
+                    image_refs: page.image_refs,
+                }
+            })
+            .collect();
+    }
+
+    // --- Standard Grid/Row Projection Logic Runs Here ---
     pages
         .into_iter()
         .map(|page| {
@@ -2830,33 +2861,31 @@ pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
                 .collect();
 
             let (projected_items, text) = project_to_grid(&page, projection_boxes);
-            // Detect figure regions from the page's vector graphics before
-            // XY-cut runs so the layout recursion can treat them as obstacles
-            // (partition the page around figures rather than slicing through).
+
             let figures = crate::figure_cluster::detect_figure_rects(
                 &page.graphics,
                 &page.text_items,
                 page.page_width,
                 page.page_height,
             );
-            // Pre-projection ruled-table detection. Feeds XY-cut as obstacles
-            // so a table's inter-column gaps don't get picked as page-level
-            // V-cuts (column-major reading order is the dominant TEDS=0
-            // failure mode on the bench: docs 083/120/130/etc.).
+
             let table_rects = crate::markdown_layout::detect_table_rects(
                 &page.graphics,
                 page.page_width,
                 page.page_height,
             );
+
             let mut obstacles: Vec<Rect> = Vec::with_capacity(figures.len() + table_rects.len());
             obstacles.extend(figures.iter().cloned());
             obstacles.extend(table_rects.iter().cloned());
+
             let (projected_lines, regions) = build_projected_lines(
                 &projected_items,
                 page.page_width,
                 page.page_height,
                 &obstacles,
             );
+
             ParsedPage {
                 page_number: page.page_number,
                 page_width: page.page_width,
@@ -2883,7 +2912,6 @@ pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
         })
         .collect()
 }
-
 // ── ProjectedLine derivation ────────────────────────────────────────────────
 //
 // `build_projected_lines` groups already-projected items (in reading order)
@@ -5272,7 +5300,7 @@ mod tests {
             image_refs: Vec::new(),
         }];
 
-        let parsed = project_pages_to_grid(pages);
+        let parsed = project_pages_to_grid(pages, false);
 
         assert_eq!(parsed.len(), 1);
         assert!(parsed[0].text.is_empty());
@@ -5309,7 +5337,7 @@ mod tests {
             image_refs: Vec::new(),
         }];
 
-        let parsed = project_pages_to_grid(pages);
+        let parsed = project_pages_to_grid(pages, false);
         let item = parsed[0]
             .text_items
             .iter()
@@ -5351,7 +5379,7 @@ mod tests {
             image_refs: Vec::new(),
         }];
 
-        let parsed = project_pages_to_grid(pages);
+        let parsed = project_pages_to_grid(pages, false);
         let item = parsed[0]
             .text_items
             .iter()

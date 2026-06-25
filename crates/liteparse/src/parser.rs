@@ -139,6 +139,7 @@ impl LiteParse {
                 render_images,
                 self.config.extract_links
                     && self.config.output_format == crate::config::OutputFormat::Markdown,
+                self.config.word_granularity,
             )?;
             let t_extract = web_time::Instant::now();
             log(&format!(
@@ -217,7 +218,7 @@ impl LiteParse {
         ));
 
         // Grid projection
-        let parsed_pages = projection::project_pages_to_grid(pages);
+        let parsed_pages = projection::project_pages_to_grid(pages, self.config.word_granularity);
         let t2 = web_time::Instant::now();
         log(&format!(
             "[liteparse] project: {:.1}ms",
@@ -260,7 +261,7 @@ impl LiteParse {
     /// is fully synchronous. Used when an external extractor (e.g. with its
     /// own font-recovery pipeline) owns text extraction.
     pub fn parse_from_pages(&self, pages: Vec<Page>, outline: Vec<OutlineTarget>) -> ParseResult {
-        let parsed_pages = projection::project_pages_to_grid(pages);
+        let parsed_pages = projection::project_pages_to_grid(pages, self.config.word_granularity);
 
         let full_text = if self.config.output_format == crate::config::OutputFormat::Markdown {
             markdown::format_markdown(&parsed_pages, &outline, self.config.image_mode)

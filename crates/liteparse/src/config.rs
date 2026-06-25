@@ -38,6 +38,8 @@ pub struct LiteParseConfig {
     /// markdown output. Default on. Disable for benchmark parity with
     /// plain-text ground truth (the GT corpora never use link syntax).
     pub extract_links: bool,
+    //extract the words one by one
+    pub word_granularity: bool,
 }
 
 /// Image handling for the markdown emitter.
@@ -86,6 +88,7 @@ impl Default for LiteParseConfig {
             num_workers: default_num_workers(),
             image_mode: ImageMode::Placeholder,
             extract_links: true,
+            word_granularity: false,
         }
     }
 }

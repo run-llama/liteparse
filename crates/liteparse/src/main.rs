@@ -465,7 +465,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::Extract(cmd) => {
-            extract::extract(&cmd.pdf_path, cmd.page_num)?;
+            extract::extract(&cmd.pdf_path, cmd.page_num, false)?;
         }
 
         Commands::ImageBounds(cmd) => {

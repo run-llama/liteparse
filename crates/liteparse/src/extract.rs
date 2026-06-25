@@ -37,10 +37,11 @@ pub fn extract_pages_from_input(
     target_pages: Option<&[u32]>,
     max_pages: usize,
     password: Option<&str>,
+    word_granularity: bool,
 ) -> Result<Vec<LitePage>, LiteParseError> {
     let lib = Library::init();
     let document = load_document_from_input(&lib, input, password)?;
-    extract_pages_from_document(&document, target_pages, max_pages)
+    extract_pages_from_document(&document, target_pages, max_pages, word_granularity)
 }
 
 /// Extract pages from an already-open PDFium document.
@@ -48,8 +49,17 @@ pub(crate) fn extract_pages_from_document(
     document: &Document,
     target_pages: Option<&[u32]>,
     max_pages: usize,
+    word_granularity: bool,
 ) -> Result<Vec<LitePage>, LiteParseError> {
-    Ok(extract_pages_and_images(document, target_pages, max_pages, false, false)?.0)
+    Ok(extract_pages_and_images(
+        document,
+        target_pages,
+        max_pages,
+        false,
+        false,
+        word_granularity,
+    )?
+    .0)
 }
 
 /// Same as `extract_pages_from_document` but optionally also renders every
@@ -63,6 +73,7 @@ pub(crate) fn extract_pages_and_images(
     max_pages: usize,
     render_images: bool,
     extract_links: bool,
+    word_granularity: bool,
 ) -> Result<(Vec<LitePage>, Vec<ExtractedImage>), LiteParseError> {
     let page_count = document.page_count();
     let mut pages = Vec::new();
@@ -89,7 +100,8 @@ pub(crate) fn extract_pages_and_images(
             right: page.width(),
             bottom: 0.0,
         });
-        let mut text_items = extract_page_text_items(&page, &text_page, &view_box)?;
+        let mut text_items =
+            extract_page_text_items(&page, &text_page, &view_box, word_granularity)?;
         if extract_links {
             assign_links(&mut text_items, &page.links(&view_box));
         }
@@ -261,13 +273,18 @@ fn extract_page_struct_nodes(page: &Page, view_box: &RectF) -> Vec<StructNode> {
 }
 
 /// Extract raw text items and print each page as a JSON-line object to stdout.
-pub fn extract(pdf_path: &str, page_num: Option<u32>) -> Result<(), LiteParseError> {
+pub fn extract(
+    pdf_path: &str,
+    page_num: Option<u32>,
+    word_granularity: bool,
+) -> Result<(), LiteParseError> {
     let target_pages: Option<Vec<u32>> = page_num.map(|p| vec![p]);
     let pages = extract_pages_from_input(
         &PdfInput::Path(pdf_path.to_string()),
         target_pages.as_deref(),
         usize::MAX,
         None,
+        word_granularity,
     )?;
     for page in &pages {
         println!("{}", serde_json::to_string(page)?);
@@ -522,6 +539,7 @@ fn extract_page_text_items(
     page: &Page,
     text_page: &TextPage,
     view_box: &RectF,
+    word_granularity: bool,
 ) -> Result<Vec<TextItem>, LiteParseError> {
     let char_count = text_page.char_count();
     if char_count <= 0 {
@@ -628,7 +646,13 @@ fn extract_page_text_items(
 
         // Spaces: mark that we're in a pending-space state.
         if c == ' ' {
-            seg.mark_pending_space();
+            if word_granularity {
+                if seg.has_content {
+                    seg.flush(&mut items);
+                }
+            } else {
+                seg.mark_pending_space();
+            }
             continue;
         }
 
@@ -1819,6 +1843,7 @@ mod tests {
             None,
             usize::MAX,
             None,
+            false,
         );
         assert!(res.is_err());
     }
