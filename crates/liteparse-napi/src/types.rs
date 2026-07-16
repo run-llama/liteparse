@@ -440,7 +440,16 @@ impl JsParsedPage {
 pub struct JsParseResult {
     pub pages: Vec<JsParsedPage>,
     pub text: String,
+    pub failed_ocr_pages: Vec<u32>,
+    pub ocr_failures: Vec<JsOcrFailure>,
     pub images: Vec<JsExtractedImage>,
+}
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsOcrFailure {
+    pub page_number: u32,
+    pub error: String,
 }
 
 #[napi(object)]
@@ -512,6 +521,19 @@ impl JsParseResult {
         Self {
             pages: result.pages.iter().map(JsParsedPage::from_rust).collect(),
             text: result.text.clone(),
+            failed_ocr_pages: result
+                .failed_ocr_pages
+                .iter()
+                .map(|&page| page as u32)
+                .collect(),
+            ocr_failures: result
+                .ocr_failures
+                .iter()
+                .map(|failure| JsOcrFailure {
+                    page_number: failure.page_number as u32,
+                    error: failure.error.clone(),
+                })
+                .collect(),
             images: result
                 .images
                 .iter()

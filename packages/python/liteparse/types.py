@@ -69,6 +69,10 @@ class ParseResult:
     pages: List[ParsedPage]
     text: str
     images: List[ExtractedImage] = field(default_factory=list)
+    #: 1-based page numbers whose OCR task failed while parsing continued.
+    failed_ocr_pages: List[int] = field(default_factory=list)
+    #: OCR failures with page numbers and engine error messages.
+    ocr_failures: List[OcrFailure] = field(default_factory=list)
 
     @property
     def num_pages(self) -> int:
@@ -107,6 +111,13 @@ class PageComplexityStats:
     page_area: float
     needs_ocr: bool
     reasons: list[str]
+
+
+@dataclass
+class OcrFailure:
+    """A failed OCR page and the error reported by the OCR engine."""
+    page_number: int
+    error: str
 
 
 @dataclass

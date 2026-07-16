@@ -163,7 +163,13 @@ export interface JsParsedPage {
 export interface JsParseResult {
   pages: Array<JsParsedPage>
   text: string
+  failedOcrPages: Array<number>
+  ocrFailures: Array<JsOcrFailure>
   images: Array<JsExtractedImage>
+}
+export interface JsOcrFailure {
+  pageNumber: number
+  error: string
 }
 export interface JsExtractedImage {
   id: string

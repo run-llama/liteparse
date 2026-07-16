@@ -4,6 +4,7 @@ from .parser import LiteParse, search_items
 from .types import (
     ExtractedImage,
     LiteParseConfig,
+    OcrFailure,
     PageComplexityStats,
     ParseResult,
     ParsedPage,
@@ -26,6 +27,7 @@ __all__ = [
     "WordBox",
     "ScreenshotResult",
     "PageComplexityStats",
+    "OcrFailure",
     "ExtractedImage",
     "ParseError",
     "search_items",

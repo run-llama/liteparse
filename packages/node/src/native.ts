@@ -116,7 +116,14 @@ export interface NativeExtractedImage {
 export interface NativeParseResult {
   pages: NativeParsedPage[];
   text: string;
+  failedOcrPages: number[];
+  ocrFailures: NativeOcrFailure[];
   images: NativeExtractedImage[];
+}
+
+export interface NativeOcrFailure {
+  pageNumber: number;
+  error: string;
 }
 
 export interface NativeScreenshotResult {

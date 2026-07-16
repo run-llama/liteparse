@@ -62,6 +62,10 @@ program
   .option("-q, --quiet", "Suppress progress output")
   .option("--num-workers <n>", "Number of concurrent OCR workers", parseInt)
   .option(
+    "--ocr-failure-non-fatal",
+    "Continue parsing when OCR fails and report failed pages in JSON output",
+  )
+  .option(
     "--complexity",
     "Include per-page complexity signals in JSON output",
   )
@@ -95,6 +99,7 @@ program
       if (opts.password) config.password = opts.password as string;
       if (opts.quiet) config.quiet = true;
       if (opts.numWorkers) config.numWorkers = opts.numWorkers as number;
+      if (opts.ocrFailureNonFatal) config.ocrFailureFatal = false;
       if (opts.complexity) config.includeComplexity = true;
 
       // Default CLI output to text (library defaults to json)
@@ -107,6 +112,8 @@ program
         config.outputFormat === "json"
           ? JSON.stringify(
               {
+                failedOcrPages: result.failedOcrPages,
+                ocrFailures: result.ocrFailures,
                 pages: result.pages.map((p) => ({
                   page: p.pageNum,
                   width: p.width,
@@ -287,6 +294,10 @@ program
   .option("--password <password>", "Password for encrypted documents")
   .option("-q, --quiet", "Suppress progress output")
   .option("--num-workers <n>", "Number of concurrent OCR workers", parseInt)
+  .option(
+    "--ocr-failure-non-fatal",
+    "Continue parsing when OCR fails and report failed pages in JSON output",
+  )
   .action(
     async (
       inputDir: string,
@@ -308,6 +319,7 @@ program
         if (opts.password) config.password = opts.password as string;
         if (opts.quiet) config.quiet = true;
         if (opts.numWorkers) config.numWorkers = opts.numWorkers as number;
+        if (opts.ocrFailureNonFatal) config.ocrFailureFatal = false;
 
         const parser = new LiteParse(config);
         const outExt = format === "json" ? ".json" : format === "markdown" ? ".md" : ".txt";
@@ -358,6 +370,8 @@ program
               format === "json"
                 ? JSON.stringify(
                     {
+                      failedOcrPages: result.failedOcrPages,
+                      ocrFailures: result.ocrFailures,
                       pages: result.pages.map((p) => ({
                         page: p.pageNum,
                         width: p.width,

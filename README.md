@@ -159,6 +159,9 @@ lit parse document.pdf --target-pages "1-5,10,15-20"
 # Parse without OCR
 lit parse document.pdf --no-ocr
 
+# Continue if OCR fails and report failed pages in JSON
+lit parse document.pdf --format json --ocr-failure-non-fatal
+
 # Parse a remote PDF
 curl -sL https://example.com/report.pdf | lit parse -
 ```
@@ -265,6 +268,7 @@ Options:
       --preserve-small-text    Keep very small text
       --password <password>    Password for encrypted documents
       --num-workers <n>        Concurrent OCR workers [default: CPU cores - 1]
+      --ocr-failure-non-fatal  Continue if OCR fails; JSON includes failed OCR pages
   -q, --quiet                  Suppress progress output
   -h, --help                   Print help
 ```
@@ -286,6 +290,7 @@ Options:
       --extension <ext>        Only process files with this extension (e.g., ".pdf")
       --password <password>    Password for encrypted documents
       --num-workers <n>        Concurrent OCR workers
+      --ocr-failure-non-fatal  Continue if OCR fails; JSON includes failed OCR pages
   -q, --quiet                  Suppress progress output
   -h, --help                   Print help
 ```
@@ -345,6 +350,12 @@ Or pass the path directly:
 ```bash
 lit parse document.pdf --tessdata-path /path/to/tessdata
 ```
+
+By default, a systemic OCR failure on text-sparse pages aborts parsing so OCR setup
+problems are visible. If you prefer partial output, pass
+`--ocr-failure-non-fatal`; JSON output includes `failed_ocr_pages`, a list of
+1-based page numbers whose OCR pass failed, and `ocr_failures`, objects with the
+page number and OCR engine error string.
 
 ### Optional: HTTP OCR Servers
 

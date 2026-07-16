@@ -180,7 +180,30 @@ struct PyParseResult {
     #[pyo3(get)]
     text: String,
     #[pyo3(get)]
+    failed_ocr_pages: Vec<usize>,
+    #[pyo3(get)]
+    ocr_failures: Vec<PyOcrFailure>,
+    #[pyo3(get)]
     images: Vec<PyExtractedImage>,
+}
+
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+struct PyOcrFailure {
+    #[pyo3(get)]
+    page_number: usize,
+    #[pyo3(get)]
+    error: String,
+}
+
+#[pymethods]
+impl PyOcrFailure {
+    fn __repr__(&self) -> String {
+        format!(
+            "OcrFailure(page_number={}, error={:?})",
+            self.page_number, self.error
+        )
+    }
 }
 
 #[pymethods]
@@ -196,9 +219,10 @@ impl PyParseResult {
 
     fn __repr__(&self) -> String {
         format!(
-            "ParseResult(pages={}, text_len={}, images={})",
+            "ParseResult(pages={}, text_len={}, failed_ocr_pages={}, images={})",
             self.pages.len(),
             self.text.len(),
+            self.failed_ocr_pages.len(),
             self.images.len()
         )
     }
@@ -213,6 +237,15 @@ impl PyParseResult {
                 .map(PyParsedPage::from_rust)
                 .collect(),
             text: result.text,
+            failed_ocr_pages: result.failed_ocr_pages,
+            ocr_failures: result
+                .ocr_failures
+                .into_iter()
+                .map(|failure| PyOcrFailure {
+                    page_number: failure.page_number,
+                    error: failure.error,
+                })
+                .collect(),
             images: result
                 .images
                 .into_iter()
@@ -693,6 +726,7 @@ fn _liteparse(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LiteParse>()?;
     m.add_class::<PyLiteParseConfig>()?;
     m.add_class::<PyParseResult>()?;
+    m.add_class::<PyOcrFailure>()?;
     m.add_class::<PyExtractedImage>()?;
     m.add_class::<PyParsedPage>()?;
     m.add_class::<PyTextItem>()?;

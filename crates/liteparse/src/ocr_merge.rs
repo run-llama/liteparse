@@ -113,6 +113,12 @@ pub struct PageComplexityStats {
     pub reasons: Vec<ComplexityReason>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct OcrFailure {
+    pub page_number: usize,
+    pub error: String,
+}
+
 pub(crate) fn calculate_page_complexity(
     page: &Page,
     page_obj: &pdfium::Page,
@@ -283,7 +289,7 @@ pub(crate) async fn ocr_and_merge_rendered(
     ocr_language: &str,
     num_workers: usize,
     ocr_failure_fatal: bool,
-) -> Result<(), LiteParseError> {
+) -> Result<Vec<OcrFailure>, LiteParseError> {
     // Phase 1: spawn one async task per page. A semaphore limits how many run
     // `recognize` concurrently to `num_workers`.
     //
@@ -353,6 +359,7 @@ pub(crate) async fn ocr_and_merge_rendered(
     // a broken OCR setup would abort perfectly good native-text documents.
     let total_tasks = handles.len();
     let mut failed_tasks = 0usize;
+    let mut ocr_failures = Vec::new();
     let mut failed_sparse_text_page = false;
     let mut first_error: Option<String> = None;
 
@@ -361,11 +368,15 @@ pub(crate) async fn ocr_and_merge_rendered(
             Ok(Ok(results)) => results,
             Ok(Err(e)) => {
                 failed_tasks += 1;
+                let msg = e.to_string();
+                ocr_failures.push(OcrFailure {
+                    page_number,
+                    error: msg.clone(),
+                });
                 failed_sparse_text_page |= page_has_sparse_native_text(&pages[idx]);
                 // Only log the first failure to avoid flooding stderr with an
                 // identical message for every page.
                 if first_error.is_none() {
-                    let msg = e.to_string();
                     eprintln!("[ocr] failed for page {}: {}", page_number, msg);
                     first_error = Some(msg);
                 }
@@ -373,9 +384,13 @@ pub(crate) async fn ocr_and_merge_rendered(
             }
             Err(e) => {
                 failed_tasks += 1;
+                let msg = e.to_string();
+                ocr_failures.push(OcrFailure {
+                    page_number,
+                    error: msg.clone(),
+                });
                 failed_sparse_text_page |= page_has_sparse_native_text(&pages[idx]);
                 if first_error.is_none() {
-                    let msg = e.to_string();
                     eprintln!("[ocr] task panicked for page {}: {}", page_number, msg);
                     first_error = Some(msg);
                 }
@@ -496,8 +511,13 @@ pub(crate) async fn ocr_and_merge_rendered(
         let detail = first_error.unwrap_or_else(|| "unknown error".to_string());
         if ocr_failure_fatal {
             return Err(LiteParseError::Ocr(format!(
-                "OCR failed for all {} page(s): {}",
-                total_tasks, detail
+                "OCR failed for all {} page(s) {:?}: {}",
+                total_tasks,
+                ocr_failures
+                    .iter()
+                    .map(|f| f.page_number)
+                    .collect::<Vec<_>>(),
+                detail
             )));
         }
         // Non-fatal mode: the caller prefers partial results over a hard abort,
@@ -512,12 +532,17 @@ pub(crate) async fn ocr_and_merge_rendered(
     // Surface a concise summary for partial failures without flooding stderr.
     if failed_tasks > 0 {
         eprintln!(
-            "[ocr] {}/{} page(s) failed OCR; continuing with partial results",
-            failed_tasks, total_tasks
+            "[ocr] {}/{} page(s) failed OCR {:?}; continuing with partial results",
+            failed_tasks,
+            total_tasks,
+            ocr_failures
+                .iter()
+                .map(|f| f.page_number)
+                .collect::<Vec<_>>()
         );
     }
 
-    Ok(())
+    Ok(ocr_failures)
 }
 
 /// True when the page's native (already-extracted) text is sparse enough that
@@ -978,6 +1003,10 @@ mod tests {
         }
     }
 
+    fn failure_pages(failures: &[OcrFailure]) -> Vec<usize> {
+        failures.iter().map(|f| f.page_number).collect()
+    }
+
     // When every OCR task fails (e.g. missing language data), the function must
     // return an error instead of silently reporting success with no OCR text.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -996,6 +1025,10 @@ mod tests {
             "unexpected error message: {msg}"
         );
         assert!(
+            msg.contains("[1, 2]"),
+            "error should include failed page numbers: {msg}"
+        );
+        assert!(
             msg.contains("traineddata"),
             "error should carry the underlying cause: {msg}"
         );
@@ -1012,6 +1045,7 @@ mod tests {
             ocr_and_merge_rendered(&mut pages, Vec::new(), 72.0, engine, "eng", 2, true).await;
 
         assert!(result.is_ok(), "empty OCR set should succeed: {result:?}");
+        assert!(result.unwrap().is_empty());
     }
 
     // Regression guard: when OCR fails but every failing page already had native
@@ -1030,6 +1064,9 @@ mod tests {
             result.is_ok(),
             "OCR failure on already-native-text pages must not abort the parse: {result:?}"
         );
+        let failures = result.unwrap();
+        assert_eq!(failure_pages(&failures), vec![1, 2]);
+        assert!(failures[0].error.contains("traineddata"));
         // Native text is preserved untouched.
         assert_eq!(pages[0].text_items.len(), 1);
         assert_eq!(pages[1].text_items.len(), 1);
@@ -1052,6 +1089,10 @@ mod tests {
             err.to_string().contains("OCR failed for all 2 page(s)"),
             "unexpected error message: {err}"
         );
+        assert!(
+            err.to_string().contains("[1, 2]"),
+            "error should include failed page numbers: {err}"
+        );
     }
 
     // Regression guard for the review finding: low-coverage pages are rendered
@@ -1070,6 +1111,10 @@ mod tests {
         assert!(
             err.to_string().contains("OCR failed for all 1 page(s)"),
             "unexpected error message: {err}"
+        );
+        assert!(
+            err.to_string().contains("[1]"),
+            "error should include failed page numbers: {err}"
         );
     }
 
@@ -1090,6 +1135,9 @@ mod tests {
             result.is_ok(),
             "non-fatal mode must not abort on systemic OCR failure: {result:?}"
         );
+        let failures = result.unwrap();
+        assert_eq!(failure_pages(&failures), vec![1, 2]);
+        assert!(failures[1].error.contains("traineddata"));
         // The native-text page keeps its text; the blank page simply has no OCR.
         assert_eq!(pages[0].text_items.len(), 1);
     }

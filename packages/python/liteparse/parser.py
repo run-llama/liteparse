@@ -9,6 +9,7 @@ from liteparse._liteparse import search_items as _native_search_items
 from .types import (
     ExtractedImage,
     LiteParseConfig,
+    OcrFailure,
     PageComplexityStats,
     ParsedPage,
     ParseError,
@@ -94,6 +95,11 @@ def _convert_native_result(native_result: Any) -> ParseResult:
     return ParseResult(
         pages=pages,
         text=native_result.text,
+        failed_ocr_pages=list(getattr(native_result, "failed_ocr_pages", [])),
+        ocr_failures=[
+            OcrFailure(page_number=f.page_number, error=f.error)
+            for f in getattr(native_result, "ocr_failures", [])
+        ],
         images=images,
     )
 

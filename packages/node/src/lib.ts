@@ -187,8 +187,17 @@ export interface ExtractedImage {
 export interface ParseResult {
   pages: ParsedPage[];
   text: string;
+  /** 1-based page numbers whose OCR task failed while parsing continued. */
+  failedOcrPages: number[];
+  /** OCR failures with page numbers and engine error messages. */
+  ocrFailures: OcrFailure[];
   /** Populated only when configured with `imageMode: "embed"`. */
   images: ExtractedImage[];
+}
+
+export interface OcrFailure {
+  pageNumber: number;
+  error: string;
 }
 
 export interface ScreenshotResult {
@@ -306,6 +315,8 @@ export class LiteParse {
     return {
       pages: result.pages.map(toPage),
       text: result.text,
+      failedOcrPages: result.failedOcrPages ?? [],
+      ocrFailures: result.ocrFailures ?? [],
       images: (result.images ?? []).map(toImage),
     };
   }
@@ -328,6 +339,8 @@ export class LiteParse {
     return {
       pages: result.pages.map(toPage),
       text: result.text,
+      failedOcrPages: result.failedOcrPages ?? [],
+      ocrFailures: result.ocrFailures ?? [],
       images: (result.images ?? []).map(toImage),
     };
   }

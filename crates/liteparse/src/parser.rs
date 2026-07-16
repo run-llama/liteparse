@@ -9,6 +9,7 @@ use crate::ocr::http_simple::HttpOcrEngine;
 #[cfg(feature = "tesseract")]
 use crate::ocr::tesseract::TesseractOcrEngine;
 use crate::ocr_merge;
+use crate::ocr_merge::OcrFailure;
 use crate::output::markdown;
 use crate::projection;
 #[cfg(not(target_arch = "wasm32"))]
@@ -22,6 +23,10 @@ pub struct ParseResult {
     pub pages: Vec<ParsedPage>,
     /// Full document text, concatenated from all pages.
     pub text: String,
+    /// 1-based page numbers whose OCR task failed while parsing continued.
+    pub failed_ocr_pages: Vec<usize>,
+    /// OCR failures with page numbers and engine error messages.
+    pub ocr_failures: Vec<OcrFailure>,
     /// Document outline (bookmarks) when present. Used by the markdown
     /// emitter as a high-priority heading source on untagged PDFs.
     pub outline: Vec<OutlineTarget>,
@@ -343,8 +348,9 @@ impl LiteParse {
         let t1 = web_time::Instant::now();
 
         // OCR pass (engine resolved before the render block above).
+        let mut ocr_failures = Vec::new();
         if let Some(engine) = ocr_engine {
-            ocr_merge::ocr_and_merge_rendered(
+            ocr_failures = ocr_merge::ocr_and_merge_rendered(
                 &mut pages,
                 ocr_rendered,
                 self.config.dpi,
@@ -355,6 +361,7 @@ impl LiteParse {
             )
             .await?;
         }
+        let failed_ocr_pages = ocr_failures.iter().map(|f| f.page_number).collect();
         let t_ocr = web_time::Instant::now();
         log(&format!(
             "[liteparse] ocr: {:.1}ms",
@@ -410,6 +417,8 @@ impl LiteParse {
         Ok(ParseResult {
             pages: parsed_pages,
             text: full_text,
+            failed_ocr_pages,
+            ocr_failures,
             outline,
             images,
         })
@@ -445,6 +454,8 @@ impl LiteParse {
         ParseResult {
             pages: parsed_pages,
             text: full_text,
+            failed_ocr_pages: Vec::new(),
+            ocr_failures: Vec::new(),
             outline,
             images: Vec::new(),
         }

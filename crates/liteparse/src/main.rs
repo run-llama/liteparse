@@ -98,6 +98,10 @@ struct ParseCommand {
     #[arg(long)]
     num_workers: Option<usize>,
 
+    /// Continue parsing when OCR fails and report failed pages in JSON output
+    #[arg(long)]
+    ocr_failure_non_fatal: bool,
+
     /// How to surface raster images in markdown output:
     /// `off` strips them, `placeholder` (default) emits `![](image_pN_K.png)`
     /// references in reading order, `embed` extracts each image's PNG bytes
@@ -214,6 +218,10 @@ struct BatchParseCommand {
     #[arg(long)]
     num_workers: Option<usize>,
 
+    /// Continue parsing when OCR fails and report failed pages in JSON output
+    #[arg(long)]
+    ocr_failure_non_fatal: bool,
+
     /// Include per-page complexity signals as a `complexity` object on each
     /// page of JSON output. Off by default.
     #[arg(long)]
@@ -317,6 +325,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
                 ocr_server_headers: cmd.ocr_server_headers,
+                ocr_failure_fatal: !cmd.ocr_failure_non_fatal,
                 image_mode,
                 extract_links: !cmd.no_links,
                 include_complexity: cmd.complexity,
@@ -329,7 +338,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let lp = LiteParse::new(config);
             let result = lp.parse(&cmd.file).await?;
             let formatted = match lp.config().output_format {
-                OutputFormat::Json => json::format_json(&result.pages)?,
+                OutputFormat::Json => json::format_json(
+                    &result.pages,
+                    &result.failed_ocr_pages,
+                    &result.ocr_failures,
+                )?,
                 OutputFormat::Text => text::format_text(&result.pages),
                 OutputFormat::Markdown => result.text.clone(),
             };
@@ -420,6 +433,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
                 ocr_server_headers: cmd.ocr_server_headers,
+                ocr_failure_fatal: !cmd.ocr_failure_non_fatal,
                 include_complexity: cmd.complexity,
                 ..Default::default()
             };
@@ -464,9 +478,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(result) => {
                         let fmt_result: Result<String, Box<dyn std::error::Error>> =
                             match lp.config().output_format {
-                                OutputFormat::Json => {
-                                    json::format_json(&result.pages).map_err(|e| e.into())
-                                }
+                                OutputFormat::Json => json::format_json(
+                                    &result.pages,
+                                    &result.failed_ocr_pages,
+                                    &result.ocr_failures,
+                                )
+                                .map_err(|e| e.into()),
                                 OutputFormat::Text => Ok(text::format_text(&result.pages)),
                                 OutputFormat::Markdown => Ok(result.text.clone()),
                             };

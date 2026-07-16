@@ -1,4 +1,4 @@
-use crate::ocr_merge::PageComplexityStats;
+use crate::ocr_merge::{OcrFailure, PageComplexityStats};
 use crate::types::ParsedPage;
 use serde::Serialize;
 
@@ -30,12 +30,20 @@ pub(crate) struct JsonPage {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ParseResultJson {
+    pub failed_ocr_pages: Vec<usize>,
+    pub ocr_failures: Vec<OcrFailure>,
     pub pages: Vec<JsonPage>,
 }
 
 /// Build structured JSON output from parsed pages.
-pub(crate) fn build_json(pages: &[ParsedPage]) -> ParseResultJson {
+pub(crate) fn build_json(
+    pages: &[ParsedPage],
+    failed_ocr_pages: &[usize],
+    ocr_failures: &[OcrFailure],
+) -> ParseResultJson {
     ParseResultJson {
+        failed_ocr_pages: failed_ocr_pages.to_vec(),
+        ocr_failures: ocr_failures.to_vec(),
         pages: pages
             .iter()
             .map(|page| JsonPage {
@@ -64,8 +72,12 @@ pub(crate) fn build_json(pages: &[ParsedPage]) -> ParseResultJson {
 }
 
 /// Format parsed pages as pretty-printed JSON string.
-pub fn format_json(pages: &[ParsedPage]) -> Result<String, serde_json::Error> {
-    let result = build_json(pages);
+pub fn format_json(
+    pages: &[ParsedPage],
+    failed_ocr_pages: &[usize],
+    ocr_failures: &[OcrFailure],
+) -> Result<String, serde_json::Error> {
+    let result = build_json(pages, failed_ocr_pages, ocr_failures);
     serde_json::to_string_pretty(&result)
 }
 
@@ -108,7 +120,9 @@ mod tests {
 
     #[test]
     fn test_build_json_native_text_defaults_confidence_to_one() {
-        let j = build_json(&[page(vec![item("hi", None)])]);
+        let j = build_json(&[page(vec![item("hi", None)])], &[], &[]);
+        assert!(j.failed_ocr_pages.is_empty());
+        assert!(j.ocr_failures.is_empty());
         assert_eq!(j.pages.len(), 1);
         assert_eq!(j.pages[0].page, 1);
         assert_eq!(j.pages[0].text_items[0].confidence, Some(1.0));
@@ -117,21 +131,37 @@ mod tests {
 
     #[test]
     fn test_build_json_preserves_ocr_confidence() {
-        let j = build_json(&[page(vec![item("hi", Some(0.42))])]);
+        let failures = vec![OcrFailure {
+            page_number: 2,
+            error: "missing traineddata".into(),
+        }];
+        let j = build_json(&[page(vec![item("hi", Some(0.42))])], &[2], &failures);
+        assert_eq!(j.failed_ocr_pages, vec![2]);
+        assert_eq!(j.ocr_failures[0].error, "missing traineddata");
         assert_eq!(j.pages[0].text_items[0].confidence, Some(0.42));
     }
 
     #[test]
     fn test_format_json_pretty() {
-        let s = format_json(&[page(vec![item("hi", None)])]).unwrap();
+        let failures = vec![OcrFailure {
+            page_number: 3,
+            error: "OCR timeout".into(),
+        }];
+        let s = format_json(&[page(vec![item("hi", None)])], &[3], &failures).unwrap();
         assert!(s.contains("\n"));
+        assert!(s.contains("\"failed_ocr_pages\""));
+        assert!(s.contains("\"ocr_failures\""));
+        assert!(s.contains("OCR timeout"));
+        assert!(s.contains("3"));
         assert!(s.contains("\"text\": \"hi\""));
         assert!(s.contains("\"page\": 1"));
     }
 
     #[test]
     fn test_build_json_empty() {
-        let j = build_json(&[]);
+        let j = build_json(&[], &[], &[]);
+        assert!(j.failed_ocr_pages.is_empty());
+        assert!(j.ocr_failures.is_empty());
         assert!(j.pages.is_empty());
     }
 }

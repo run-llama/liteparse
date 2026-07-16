@@ -273,7 +273,17 @@ pub struct ParsedPage {
 pub struct ParseResult {
     pub pages: Vec<ParsedPage>,
     pub text: String,
+    pub failed_ocr_pages: Vec<usize>,
+    pub ocr_failures: Vec<OcrFailure>,
     pub images: Vec<ExtractedImage>,
+}
+
+#[derive(Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrFailure {
+    pub page_number: usize,
+    pub error: String,
 }
 
 #[derive(Serialize, Tsify)]
@@ -520,6 +530,15 @@ impl LiteParse {
         Ok(ParseResult {
             pages,
             text: result.text.clone(),
+            failed_ocr_pages: result.failed_ocr_pages.clone(),
+            ocr_failures: result
+                .ocr_failures
+                .iter()
+                .map(|failure| OcrFailure {
+                    page_number: failure.page_number,
+                    error: failure.error.clone(),
+                })
+                .collect(),
             images,
         })
     }
