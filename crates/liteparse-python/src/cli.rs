@@ -75,6 +75,9 @@ struct ParseCommand {
     /// `[text](url)` in markdown output; pass this to emit plain anchor text.
     #[arg(long)]
     no_links: bool,
+    /// Include all PDF annotations as page-scoped structured data.
+    #[arg(long)]
+    extract_annotations: bool,
     /// Include per-page complexity signals as a `complexity` object on each
     /// page of JSON output. Off by default.
     #[arg(long)]
@@ -227,6 +230,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 ocr_server_headers: cmd.ocr_server_headers,
                 image_mode,
                 extract_links: !cmd.no_links,
+                extract_annotations: cmd.extract_annotations,
                 include_complexity: cmd.complexity,
                 ..Default::default()
             };

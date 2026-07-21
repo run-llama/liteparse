@@ -58,12 +58,19 @@ parser = LiteParse(
     output_format="json",          # "json" | "text" | "markdown"
     image_mode="placeholder",      # Markdown image handling: "placeholder" | "off" | "embed"
     extract_links=True,            # Render [text](url) links in markdown output
+    extract_annotations=False,     # Include page annotations in structured output
     preserve_very_small_text=False, # Keep tiny text
     password=None,                 # Password for protected documents
     quiet=False,                   # Suppress progress output
     num_workers=4,                 # Concurrent OCR workers
 )
 ```
+
+When `extract_annotations` is enabled, each parsed page has an `annotations`
+list containing the subtype, contents, author/title, PDF date strings,
+viewport-space rectangle and quadpoint rectangles, and URI for external link
+annotations. It is independent of `extract_links`, which controls Markdown
+link rendering. The field is `None` when extraction is disabled.
 
 ## Parsing from Bytes
 
@@ -129,6 +136,7 @@ The Python package includes the `lit` CLI:
 ```bash
 lit parse document.pdf
 lit parse document.pdf --format json -o output.json
+lit parse document.pdf --format json --extract-annotations
 lit screenshot document.pdf -o ./screenshots
 lit batch-parse ./input ./output
 lit is-complex document.pdf

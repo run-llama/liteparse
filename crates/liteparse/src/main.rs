@@ -121,6 +121,10 @@ struct ParseCommand {
     #[arg(long)]
     no_links: bool,
 
+    /// Include all PDF annotations as page-scoped structured JSON/API data.
+    #[arg(long)]
+    extract_annotations: bool,
+
     /// Include per-page complexity signals (the same `is-complex` reports) as a
     /// `complexity` object on each page of JSON output. Off by default; enabling
     /// it runs the extra vector-text detection pass.
@@ -219,6 +223,10 @@ struct BatchParseCommand {
     /// page of JSON output. Off by default.
     #[arg(long)]
     complexity: bool,
+
+    /// Include all PDF annotations as page-scoped structured JSON/API data.
+    #[arg(long)]
+    extract_annotations: bool,
 }
 
 #[derive(Args, Debug)]
@@ -336,6 +344,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ocr_server_headers: cmd.ocr_server_headers,
                 image_mode,
                 extract_links: !cmd.no_links,
+                extract_annotations: cmd.extract_annotations,
                 include_complexity: cmd.complexity,
                 ..Default::default()
             };
@@ -442,6 +451,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ocr_server_url: cmd.ocr_server_url,
                 ocr_server_headers: cmd.ocr_server_headers,
                 include_complexity: cmd.complexity,
+                extract_annotations: cmd.extract_annotations,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {

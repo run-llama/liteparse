@@ -159,6 +159,9 @@ lit parse document.pdf --target-pages "1-5,10,15-20"
 # Parse without OCR
 lit parse document.pdf --no-ocr
 
+# Include page annotations in structured JSON
+lit parse document.pdf --format json --extract-annotations
+
 # Parse a remote PDF
 curl -sL https://example.com/report.pdf | lit parse -
 ```
@@ -262,6 +265,7 @@ Options:
       --image-mode <mode>      Markdown image handling: off|placeholder|embed [default: placeholder]
       --image-output-dir <dir> Where to write images when --image-mode embed
       --no-links               Emit link anchor text as plain text (no [text](url)) in markdown
+      --extract-annotations    Include PDF annotations in page output
       --preserve-small-text    Keep very small text
       --password <password>    Password for encrypted documents
       --num-workers <n>        Concurrent OCR workers [default: CPU cores - 1]

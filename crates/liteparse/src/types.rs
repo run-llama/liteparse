@@ -110,6 +110,31 @@ pub struct Page {
     /// images. Threaded through to `ParsedPage.image_refs`.
     #[serde(skip)]
     pub image_refs: Vec<ImageRef>,
+    /// Public annotation data when explicitly requested. `None` distinguishes
+    /// disabled extraction from an enabled page with no annotations.
+    #[serde(skip)]
+    pub annotations: Option<Vec<DocumentAnnotation>>,
+}
+
+/// One PDF page annotation. Coordinates use the same top-left, 72-DPI
+/// viewport space as [`TextItem`].
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentAnnotation {
+    pub subtype: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contents: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rect: Option<Rect>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub quadpoint_rects: Vec<Rect>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
 }
 
 /// One entry in the document outline (bookmarks). Coordinates are in PDF
@@ -185,6 +210,11 @@ pub struct ParsedPage {
     /// `None` otherwise. Surfaced as a per-page `complexity` object in JSON.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub complexity: Option<crate::ocr_merge::PageComplexityStats>,
+    /// Page annotations when `LiteParseConfig::extract_annotations` is true.
+    /// `None` means extraction was disabled; `Some([])` means enabled with no
+    /// annotations on this page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Vec<DocumentAnnotation>>,
 }
 
 /// One embedded raster image on a page. `id` is a stable, page-scoped slug
@@ -435,6 +465,7 @@ mod tests {
             graphics: vec![],
             struct_nodes: vec![],
             image_refs: vec![],
+            annotations: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"page_number\":1"));

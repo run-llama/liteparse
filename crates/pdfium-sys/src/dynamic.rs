@@ -281,6 +281,23 @@ pub struct PdfiumBindings {
     pub FPDFLink_CountQuadPoints: unsafe extern "C" fn(FPDF_LINK) -> std::os::raw::c_int,
     pub FPDFLink_GetQuadPoints:
         unsafe extern "C" fn(FPDF_LINK, std::os::raw::c_int, *mut FS_QUADPOINTSF) -> FPDF_BOOL,
+    // -- Annotations --
+    pub FPDFPage_GetAnnotCount: unsafe extern "C" fn(FPDF_PAGE) -> std::os::raw::c_int,
+    pub FPDFPage_GetAnnot: unsafe extern "C" fn(FPDF_PAGE, std::os::raw::c_int) -> FPDF_ANNOTATION,
+    pub FPDFPage_CloseAnnot: unsafe extern "C" fn(FPDF_ANNOTATION),
+    pub FPDFAnnot_GetSubtype: unsafe extern "C" fn(FPDF_ANNOTATION) -> FPDF_ANNOTATION_SUBTYPE,
+    pub FPDFAnnot_GetStringValue: unsafe extern "C" fn(
+        FPDF_ANNOTATION,
+        FPDF_BYTESTRING,
+        *mut FPDF_WCHAR,
+        std::os::raw::c_ulong,
+    ) -> std::os::raw::c_ulong,
+    pub FPDFAnnot_GetRect: unsafe extern "C" fn(FPDF_ANNOTATION, *mut FS_RECTF) -> FPDF_BOOL,
+    pub FPDFAnnot_HasAttachmentPoints: unsafe extern "C" fn(FPDF_ANNOTATION) -> FPDF_BOOL,
+    pub FPDFAnnot_CountAttachmentPoints: unsafe extern "C" fn(FPDF_ANNOTATION) -> usize,
+    pub FPDFAnnot_GetAttachmentPoints:
+        unsafe extern "C" fn(FPDF_ANNOTATION, usize, *mut FS_QUADPOINTSF) -> FPDF_BOOL,
+    pub FPDFAnnot_GetLink: unsafe extern "C" fn(FPDF_ANNOTATION) -> FPDF_LINK,
     pub FPDFDest_GetDestPageIndex:
         unsafe extern "C" fn(FPDF_DOCUMENT, FPDF_DEST) -> std::os::raw::c_int,
     pub FPDFDest_GetLocationInPage: unsafe extern "C" fn(
@@ -427,6 +444,16 @@ impl PdfiumBindings {
             FPDFLink_GetAnnotRect: load_fn!(lib, "FPDFLink_GetAnnotRect"),
             FPDFLink_CountQuadPoints: load_fn!(lib, "FPDFLink_CountQuadPoints"),
             FPDFLink_GetQuadPoints: load_fn!(lib, "FPDFLink_GetQuadPoints"),
+            FPDFPage_GetAnnotCount: load_fn!(lib, "FPDFPage_GetAnnotCount"),
+            FPDFPage_GetAnnot: load_fn!(lib, "FPDFPage_GetAnnot"),
+            FPDFPage_CloseAnnot: load_fn!(lib, "FPDFPage_CloseAnnot"),
+            FPDFAnnot_GetSubtype: load_fn!(lib, "FPDFAnnot_GetSubtype"),
+            FPDFAnnot_GetStringValue: load_fn!(lib, "FPDFAnnot_GetStringValue"),
+            FPDFAnnot_GetRect: load_fn!(lib, "FPDFAnnot_GetRect"),
+            FPDFAnnot_HasAttachmentPoints: load_fn!(lib, "FPDFAnnot_HasAttachmentPoints"),
+            FPDFAnnot_CountAttachmentPoints: load_fn!(lib, "FPDFAnnot_CountAttachmentPoints"),
+            FPDFAnnot_GetAttachmentPoints: load_fn!(lib, "FPDFAnnot_GetAttachmentPoints"),
+            FPDFAnnot_GetLink: load_fn!(lib, "FPDFAnnot_GetLink"),
             FPDFDest_GetDestPageIndex: load_fn!(lib, "FPDFDest_GetDestPageIndex"),
             FPDFDest_GetLocationInPage: load_fn!(lib, "FPDFDest_GetLocationInPage"),
 

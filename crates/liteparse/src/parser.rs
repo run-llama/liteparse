@@ -176,6 +176,7 @@ impl LiteParse {
                 self.config.max_pages,
                 false, // render_images: image rasters not needed for complexity
                 false, // extract_links: irrelevant for complexity stats
+                false, // extract_annotations: irrelevant for complexity stats
                 self.glyph_resolver.as_deref(),
                 false, // emit_word_boxes: word boxes not needed for complexity stats
             )?;
@@ -323,6 +324,7 @@ impl LiteParse {
                 render_images,
                 self.config.extract_links
                     && self.config.output_format == crate::config::OutputFormat::Markdown,
+                self.config.extract_annotations,
                 self.glyph_resolver.as_deref(),
                 self.config.emit_word_boxes,
             )?;

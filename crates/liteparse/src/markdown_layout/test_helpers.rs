@@ -43,6 +43,7 @@ pub(crate) fn page(lines: Vec<ProjectedLine>) -> ParsedPage {
         struct_nodes: vec![],
         image_refs: vec![],
         complexity: None,
+        annotations: None,
     }
 }
 
@@ -194,6 +195,7 @@ pub(crate) fn header_footer_page(n: usize, header: &str, footer: &str, body: &st
         struct_nodes: vec![],
         image_refs: vec![],
         complexity: None,
+        annotations: None,
     }
 }
 

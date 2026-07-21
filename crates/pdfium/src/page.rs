@@ -61,6 +61,20 @@ pub struct PdfLink {
     pub uri: String,
 }
 
+/// One PDF annotation with geometry normalized to viewport space (top-left
+/// origin, 72 DPI). String fields mirror the standard annotation dictionary.
+#[derive(Debug, Clone)]
+pub struct PdfAnnotation {
+    pub subtype: String,
+    pub contents: Option<String>,
+    pub created: Option<String>,
+    pub modified: Option<String>,
+    pub title: Option<String>,
+    pub rect: Option<RectF>,
+    pub quadpoint_rects: Vec<RectF>,
+    pub uri: Option<String>,
+}
+
 /// A loaded page within a [`Document`].
 ///
 /// The `'doc` lifetime ties the page to its owning document; `'lib` carries
@@ -439,6 +453,162 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
         }
         out
     }
+
+    /// Enumerate all page annotations. Unlike [`Page::links`], this preserves
+    /// non-link subtypes and annotation dictionary metadata for public output.
+    pub fn annotations(&self, view_box: &RectF) -> Vec<PdfAnnotation> {
+        let count = unsafe { ffi!(FPDFPage_GetAnnotCount(self.handle)) };
+        let mut out = Vec::with_capacity(count.max(0) as usize);
+        for index in 0..count {
+            let annot = unsafe { ffi!(FPDFPage_GetAnnot(self.handle, index)) };
+            if annot.is_null() {
+                continue;
+            }
+
+            let subtype = unsafe { ffi!(FPDFAnnot_GetSubtype(annot)) };
+            let mut rect = pdfium_sys::FS_RECTF::default();
+            let rect = if unsafe { ffi!(FPDFAnnot_GetRect(annot, &mut rect)) } != 0 {
+                Some(self.bounds_to_viewport(
+                    view_box,
+                    &RectF {
+                        left: rect.left,
+                        top: rect.top,
+                        right: rect.right,
+                        bottom: rect.bottom,
+                    },
+                ))
+            } else {
+                None
+            };
+
+            let mut quadpoint_rects = Vec::new();
+            if unsafe { ffi!(FPDFAnnot_HasAttachmentPoints(annot)) } != 0 {
+                let quad_count = unsafe { ffi!(FPDFAnnot_CountAttachmentPoints(annot)) };
+                quadpoint_rects.reserve(quad_count);
+                for quad_index in 0..quad_count {
+                    let mut quad = pdfium_sys::FS_QUADPOINTSF::default();
+                    if unsafe { ffi!(FPDFAnnot_GetAttachmentPoints(annot, quad_index, &mut quad)) }
+                        == 0
+                    {
+                        continue;
+                    }
+                    let bounds = RectF {
+                        left: quad.x1.min(quad.x2).min(quad.x3).min(quad.x4),
+                        bottom: quad.y1.min(quad.y2).min(quad.y3).min(quad.y4),
+                        right: quad.x1.max(quad.x2).max(quad.x3).max(quad.x4),
+                        top: quad.y1.max(quad.y2).max(quad.y3).max(quad.y4),
+                    };
+                    quadpoint_rects.push(self.bounds_to_viewport(view_box, &bounds));
+                }
+            }
+
+            let uri = if subtype == pdfium_sys::FPDF_ANNOT_LINK as i32 {
+                let link = unsafe { ffi!(FPDFAnnot_GetLink(annot)) };
+                if link.is_null() {
+                    None
+                } else {
+                    let action = unsafe { ffi!(FPDFLink_GetAction(link)) };
+                    if action.is_null() {
+                        None
+                    } else {
+                        read_uri_path(self.doc_handle, action)
+                    }
+                }
+            } else {
+                None
+            };
+
+            out.push(PdfAnnotation {
+                subtype: annotation_subtype_name(subtype).to_string(),
+                contents: read_annotation_string(annot, b"Contents\0"),
+                created: read_annotation_string(annot, b"CreationDate\0"),
+                modified: read_annotation_string(annot, b"M\0"),
+                title: read_annotation_string(annot, b"T\0"),
+                rect,
+                quadpoint_rects,
+                uri,
+            });
+            unsafe { ffi!(FPDFPage_CloseAnnot(annot)) };
+        }
+        out
+    }
+}
+
+fn annotation_subtype_name(subtype: pdfium_sys::FPDF_ANNOTATION_SUBTYPE) -> &'static str {
+    const NAMES: [&str; 29] = [
+        "unknown",
+        "text",
+        "link",
+        "freetext",
+        "line",
+        "square",
+        "circle",
+        "polygon",
+        "polyline",
+        "highlight",
+        "underline",
+        "squiggly",
+        "strikeout",
+        "stamp",
+        "caret",
+        "ink",
+        "popup",
+        "fileattachment",
+        "sound",
+        "movie",
+        "widget",
+        "screen",
+        "printermark",
+        "trapnet",
+        "watermark",
+        "threed",
+        "richmedia",
+        "xfawidget",
+        "redact",
+    ];
+    usize::try_from(subtype)
+        .ok()
+        .and_then(|index| NAMES.get(index))
+        .copied()
+        .unwrap_or("unknown")
+}
+
+fn read_annotation_string(
+    annot: pdfium_sys::FPDF_ANNOTATION,
+    key: &'static [u8],
+) -> Option<String> {
+    let key = key.as_ptr().cast();
+    let needed = unsafe {
+        ffi!(FPDFAnnot_GetStringValue(
+            annot,
+            key,
+            std::ptr::null_mut(),
+            0
+        ))
+    } as usize;
+    if needed < 2 {
+        return None;
+    }
+    let mut buf = vec![0u16; needed.div_ceil(2)];
+    let written = unsafe {
+        ffi!(FPDFAnnot_GetStringValue(
+            annot,
+            key,
+            buf.as_mut_ptr(),
+            needed as std::os::raw::c_ulong
+        ))
+    } as usize;
+    if written < 2 {
+        return None;
+    }
+    let units = (written / 2).min(buf.len());
+    let end = if buf.get(units.saturating_sub(1)) == Some(&0) {
+        units.saturating_sub(1)
+    } else {
+        units
+    };
+    let value = String::from_utf16_lossy(&buf[..end]);
+    if value.is_empty() { None } else { Some(value) }
 }
 
 /// Read a link action's URI path. PDFium returns the URI as a NUL-terminated
@@ -890,5 +1060,69 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
 impl Drop for Page<'_, '_> {
     fn drop(&mut self) {
         unsafe { ffi!(FPDF_ClosePage(self.handle)) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Library;
+
+    fn annotation_pdf() -> Vec<u8> {
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [4 0 R 5 0 R] >>",
+            "<< /Type /Annot /Subtype /Highlight /Rect [10 20 100 40] /QuadPoints [10 40 100 40 10 20 100 20] /Contents (review this) /T (Reviewer) /CreationDate (D:20260102030405Z) /M (D:20260103040506Z) >>",
+            "<< /Type /Annot /Subtype /Link /Rect [10 50 100 70] /Border [0 0 0] /A << /S /URI /URI (https://example.com) >> >>",
+        ];
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::with_capacity(objects.len());
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", index + 1, object).as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    #[test]
+    fn extracts_annotation_metadata_geometry_and_link_uri() {
+        let bytes = annotation_pdf();
+        let library = Library::init();
+        let document = library.load_document_from_bytes(&bytes, None).unwrap();
+        let page = document.page(0).unwrap();
+        let view_box = page.view_box().unwrap();
+        let annotations = page.annotations(&view_box);
+
+        assert_eq!(annotations.len(), 2);
+        let highlight = &annotations[0];
+        assert_eq!(highlight.subtype, "highlight");
+        assert_eq!(highlight.contents.as_deref(), Some("review this"));
+        assert_eq!(highlight.title.as_deref(), Some("Reviewer"));
+        assert_eq!(highlight.created.as_deref(), Some("D:20260102030405Z"));
+        assert_eq!(highlight.modified.as_deref(), Some("D:20260103040506Z"));
+        let rect = highlight.rect.as_ref().unwrap();
+        assert_eq!(
+            (rect.left, rect.top, rect.right, rect.bottom),
+            (10.0, 160.0, 100.0, 180.0)
+        );
+        assert_eq!(highlight.quadpoint_rects.len(), 1);
+
+        let link = &annotations[1];
+        assert_eq!(link.subtype, "link");
+        assert_eq!(link.uri.as_deref(), Some("https://example.com"));
+        assert_eq!(link.rect.as_ref().unwrap().top, 130.0);
     }
 }

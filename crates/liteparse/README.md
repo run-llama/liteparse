@@ -56,6 +56,7 @@ let config = LiteParseConfig {
     target_pages: Some("1-5,10".into()),  // Specific pages (optional)
     dpi: 150.0,                           // Rendering DPI
     output_format: OutputFormat::Json,    // Json | Text | Markdown
+    extract_annotations: false,           // Include page annotations in output
     preserve_very_small_text: false,      // Keep tiny text
     password: None,                       // Password for protected documents
     quiet: false,                         // Suppress progress output
@@ -64,6 +65,12 @@ let config = LiteParseConfig {
 
 let parser = LiteParse::new(config);
 ```
+
+Set `extract_annotations: true` to populate `ParsedPage::annotations` with
+annotation subtype, contents, author/title, PDF date strings, viewport-space
+rectangle and quadpoint rectangles, and external link URI. It is independent
+of `extract_links`, which controls Markdown link rendering. The field is
+`None` when extraction is disabled.
 
 ## Markdown Output
 

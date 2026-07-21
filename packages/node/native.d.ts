@@ -44,6 +44,8 @@ export interface JsLiteParseConfig {
    * (default true). Set false for plain anchor text.
    */
   extractLinks?: boolean
+  /** Extract all PDF annotations as page-scoped structured data. */
+  extractAnnotations?: boolean
   /**
    * Whether a systemic OCR failure aborts the whole parse (default true).
    * Set false to keep already-recovered native text and return partial
@@ -166,6 +168,23 @@ export interface JsParsedPage {
   markdown: string
   textItems: Array<JsTextItem>
   complexity?: JsPageComplexityStats
+  annotations?: Array<JsDocumentAnnotation>
+}
+export interface JsAnnotationRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+export interface JsDocumentAnnotation {
+  subtype: string
+  contents?: string
+  created?: string
+  modified?: string
+  title?: string
+  rect?: JsAnnotationRect
+  quadpointRects: Array<JsAnnotationRect>
+  uri?: string
 }
 export interface JsParseResult {
   pages: Array<JsParsedPage>
@@ -184,6 +203,16 @@ export interface JsScreenshotResult {
   height: number
   imageBuffer: Buffer
 }
+export interface JsLayoutComplexityStats {
+  columnCount: number
+  ruledTableCount: number
+  ruledTableCoverage: number
+  textTableRunCount: number
+  figureCount: number
+  figureCoverage: number
+  isComplex: boolean
+  reasons: Array<string>
+}
 export interface JsPageComplexityStats {
   pageNumber: number
   textLength: number
@@ -198,6 +227,7 @@ export interface JsPageComplexityStats {
   pageArea: number
   needsOcr: boolean
   reasons: Array<string>
+  layout?: JsLayoutComplexityStats
 }
 /** Search text items for phrase matches, returning merged items with combined bounding boxes. */
 export declare function searchItems(items: Array<JsTextItem>, phrase: string, caseSensitive?: boolean | undefined | null): Array<JsTextItem>

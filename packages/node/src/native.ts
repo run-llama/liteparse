@@ -31,6 +31,7 @@ export interface LiteParseNativeConfig {
   outputFormat?: string;
   imageMode?: string;
   extractLinks?: boolean;
+  extractAnnotations?: boolean;
   preserveVerySmallText?: boolean;
   password?: string;
   quiet?: boolean;
@@ -104,6 +105,25 @@ export interface NativeParsedPage {
   markdown: string;
   textItems: NativeTextItem[];
   complexity?: NativePageComplexityStats;
+  annotations?: NativeDocumentAnnotation[];
+}
+
+export interface NativeAnnotationRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface NativeDocumentAnnotation {
+  subtype: string;
+  contents?: string;
+  created?: string;
+  modified?: string;
+  title?: string;
+  rect?: NativeAnnotationRect;
+  quadpointRects: NativeAnnotationRect[];
+  uri?: string;
 }
 
 export interface NativeExtractedImage {

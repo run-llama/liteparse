@@ -1,8 +1,8 @@
 use crate::error::LiteParseError;
 use crate::glyph_names::resolve_glyph_name;
 use crate::types::{
-    ExtractedImage, GraphicPrimitive, ImageRef, OutlineTarget, Page as LitePage, PdfInput, Rect,
-    StructNode, TextItem, WordBox,
+    DocumentAnnotation, ExtractedImage, GraphicPrimitive, ImageRef, OutlineTarget,
+    Page as LitePage, PdfInput, Rect, StructNode, TextItem, WordBox,
 };
 use image::ImageEncoder;
 use pdfium::{
@@ -49,7 +49,17 @@ pub(crate) fn extract_pages_from_document(
     target_pages: Option<&[u32]>,
     max_pages: usize,
 ) -> Result<Vec<LitePage>, LiteParseError> {
-    Ok(extract_pages_and_images(document, target_pages, max_pages, false, false, None, false)?.0)
+    Ok(extract_pages_and_images(
+        document,
+        target_pages,
+        max_pages,
+        false,
+        false,
+        false,
+        None,
+        false,
+    )?
+    .0)
 }
 
 /// Same as `extract_pages_from_document` but optionally also renders every
@@ -63,6 +73,7 @@ pub(crate) fn extract_pages_and_images(
     max_pages: usize,
     render_images: bool,
     extract_links: bool,
+    extract_annotations: bool,
     glyph_resolver: Option<&dyn crate::GlyphResolver>,
     emit_word_boxes: bool,
 ) -> Result<(Vec<LitePage>, Vec<ExtractedImage>), LiteParseError> {
@@ -105,6 +116,25 @@ pub(crate) fn extract_pages_and_images(
         assign_strikethrough(&mut text_items, &graphics);
         let struct_nodes = extract_page_struct_nodes(&page, &view_box);
         let image_refs = extract_page_image_refs(&page, page_number);
+        let annotations = extract_annotations.then(|| {
+            page.annotations(&view_box)
+                .into_iter()
+                .map(|annotation| DocumentAnnotation {
+                    subtype: annotation.subtype,
+                    contents: annotation.contents,
+                    created: annotation.created,
+                    modified: annotation.modified,
+                    title: annotation.title,
+                    rect: annotation.rect.map(rect_from_pdfium),
+                    quadpoint_rects: annotation
+                        .quadpoint_rects
+                        .into_iter()
+                        .map(rect_from_pdfium)
+                        .collect(),
+                    uri: annotation.uri,
+                })
+                .collect()
+        });
 
         if render_images && !image_refs.is_empty() {
             images.extend(render_page_images(&page, page_number, &image_refs));
@@ -118,10 +148,20 @@ pub(crate) fn extract_pages_and_images(
             graphics,
             struct_nodes,
             image_refs,
+            annotations,
         });
     }
 
     Ok((pages, images))
+}
+
+fn rect_from_pdfium(rect: RectF) -> Rect {
+    Rect {
+        x: rect.left,
+        y: rect.top,
+        width: rect.right - rect.left,
+        height: rect.bottom - rect.top,
+    }
 }
 
 /// Assign hyperlink URIs to text items whose bbox center falls inside a link
@@ -2014,6 +2054,7 @@ mod tests {
             graphics: Vec::new(),
             struct_nodes: Vec::new(),
             image_refs: Vec::new(),
+            annotations: None,
         }
     }
 

@@ -38,6 +38,10 @@ pub struct LiteParseConfig {
     /// markdown output. Default on. Disable for benchmark parity with
     /// plain-text ground truth (the GT corpora never use link syntax).
     pub extract_links: bool,
+    /// Extract all PDF annotations into each parsed page. Default `false`.
+    /// This is independent of `extract_links`, which only controls Markdown
+    /// link reconstruction.
+    pub extract_annotations: bool,
     /// Whether a systemic OCR failure (every OCR task failed *and* at least one
     /// was a text-sparse page whose primary text source was OCR) aborts the
     /// whole parse. Default `true`: surface the root cause instead of silently
@@ -145,6 +149,7 @@ impl Default for LiteParseConfig {
             num_workers: default_num_workers(),
             image_mode: ImageMode::Placeholder,
             extract_links: true,
+            extract_annotations: false,
             ocr_failure_fatal: true,
             ocr_hedge_delays_ms: Vec::new(),
             emit_word_boxes: false,

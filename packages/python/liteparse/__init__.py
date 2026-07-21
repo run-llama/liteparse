@@ -2,6 +2,8 @@ from importlib.metadata import PackageNotFoundError, version
 
 from .parser import LiteParse, search_items
 from .types import (
+    AnnotationRect,
+    DocumentAnnotation,
     ExtractedImage,
     LayoutComplexityStats,
     LiteParseConfig,
@@ -20,6 +22,8 @@ except PackageNotFoundError:  # source tree without installed dist metadata
     __version__ = "0.0.0+unknown"
 __all__ = [
     "LiteParse",
+    "AnnotationRect",
+    "DocumentAnnotation",
     "LiteParseConfig",
     "ParseResult",
     "ParsedPage",

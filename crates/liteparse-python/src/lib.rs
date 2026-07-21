@@ -87,6 +87,70 @@ impl PyTextItem {
     }
 }
 
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+struct PyAnnotationRect {
+    #[pyo3(get)]
+    x: f64,
+    #[pyo3(get)]
+    y: f64,
+    #[pyo3(get)]
+    width: f64,
+    #[pyo3(get)]
+    height: f64,
+}
+
+impl PyAnnotationRect {
+    fn from_rust(rect: liteparse::types::Rect) -> Self {
+        Self {
+            x: rect.x as f64,
+            y: rect.y as f64,
+            width: rect.width as f64,
+            height: rect.height as f64,
+        }
+    }
+}
+
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+struct PyDocumentAnnotation {
+    #[pyo3(get)]
+    subtype: String,
+    #[pyo3(get)]
+    contents: Option<String>,
+    #[pyo3(get)]
+    created: Option<String>,
+    #[pyo3(get)]
+    modified: Option<String>,
+    #[pyo3(get)]
+    title: Option<String>,
+    #[pyo3(get)]
+    rect: Option<PyAnnotationRect>,
+    #[pyo3(get)]
+    quadpoint_rects: Vec<PyAnnotationRect>,
+    #[pyo3(get)]
+    uri: Option<String>,
+}
+
+impl PyDocumentAnnotation {
+    fn from_rust(annotation: liteparse::types::DocumentAnnotation) -> Self {
+        Self {
+            subtype: annotation.subtype,
+            contents: annotation.contents,
+            created: annotation.created,
+            modified: annotation.modified,
+            title: annotation.title,
+            rect: annotation.rect.map(PyAnnotationRect::from_rust),
+            quadpoint_rects: annotation
+                .quadpoint_rects
+                .into_iter()
+                .map(PyAnnotationRect::from_rust)
+                .collect(),
+            uri: annotation.uri,
+        }
+    }
+}
+
 impl PyTextItem {
     fn from_rust(item: liteparse::types::TextItem) -> Self {
         Self {
@@ -121,6 +185,8 @@ struct PyParsedPage {
     text_items: Vec<PyTextItem>,
     #[pyo3(get)]
     complexity: Option<PyPageComplexityStats>,
+    #[pyo3(get)]
+    annotations: Option<Vec<PyDocumentAnnotation>>,
 }
 
 #[pymethods]
@@ -153,6 +219,12 @@ impl PyParsedPage {
                 .complexity
                 .as_ref()
                 .map(PyPageComplexityStats::from_rust),
+            annotations: page.annotations.map(|annotations| {
+                annotations
+                    .into_iter()
+                    .map(PyDocumentAnnotation::from_rust)
+                    .collect()
+            }),
         }
     }
 }
@@ -434,6 +506,8 @@ struct PyLiteParseConfig {
     #[pyo3(get)]
     extract_links: bool,
     #[pyo3(get)]
+    extract_annotations: bool,
+    #[pyo3(get)]
     ocr_failure_fatal: bool,
     #[pyo3(get)]
     ocr_hedge_delays_ms: Vec<u64>,
@@ -487,6 +561,7 @@ impl PyLiteParseConfig {
                 ImageMode::Embed => "embed".to_string(),
             },
             extract_links: cfg.extract_links,
+            extract_annotations: cfg.extract_annotations,
             ocr_failure_fatal: cfg.ocr_failure_fatal,
             ocr_hedge_delays_ms: cfg.ocr_hedge_delays_ms.clone(),
             emit_word_boxes: cfg.emit_word_boxes,
@@ -531,6 +606,7 @@ impl LiteParse {
         num_workers = None,
         image_mode = None,
         extract_links = None,
+        extract_annotations = None,
         ocr_failure_fatal = None,
         ocr_hedge_delays_ms = None,
         emit_word_boxes = None,
@@ -554,6 +630,7 @@ impl LiteParse {
         num_workers: Option<usize>,
         image_mode: Option<String>,
         extract_links: Option<bool>,
+        extract_annotations: Option<bool>,
         ocr_failure_fatal: Option<bool>,
         ocr_hedge_delays_ms: Option<Vec<u64>>,
         emit_word_boxes: Option<bool>,
@@ -614,6 +691,9 @@ impl LiteParse {
         }
         if let Some(v) = extract_links {
             cfg.extract_links = v;
+        }
+        if let Some(v) = extract_annotations {
+            cfg.extract_annotations = v;
         }
         if let Some(v) = ocr_failure_fatal {
             cfg.ocr_failure_fatal = v;
@@ -811,6 +891,8 @@ fn _liteparse(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyParsedPage>()?;
     m.add_class::<PyTextItem>()?;
     m.add_class::<PyWordBox>()?;
+    m.add_class::<PyAnnotationRect>()?;
+    m.add_class::<PyDocumentAnnotation>()?;
     m.add_class::<PyScreenshotResult>()?;
     m.add_class::<PyPageComplexityStats>()?;
     m.add_class::<PyLayoutComplexityStats>()?;

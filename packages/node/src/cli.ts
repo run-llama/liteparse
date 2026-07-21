@@ -63,6 +63,7 @@ program
     "Directory to write embedded images to when --image-mode embed is set",
   )
   .option("--no-links", "Disable hyperlink extraction (emit plain anchor text)")
+  .option("--extract-annotations", "Include all PDF annotations in page output")
   .option("--ocr-server-url <url>", "HTTP OCR server URL")
   .option(
     "--ocr-server-header <header>",
@@ -103,6 +104,7 @@ program
       if (opts.imageMode)
         config.imageMode = opts.imageMode as "off" | "placeholder" | "embed";
       if (opts.links === false) config.extractLinks = false;
+      if (opts.extractAnnotations) config.extractAnnotations = true;
       if (opts.ocrServerUrl)
         config.ocrServerUrl = opts.ocrServerUrl as string;
       if (opts.ocrServerHeader)
@@ -134,6 +136,7 @@ program
                   height: p.height,
                   text: p.text,
                   textItems: p.textItems,
+                  annotations: p.annotations,
                 })),
               },
               null,

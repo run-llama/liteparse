@@ -28,6 +28,7 @@ mod tests {
             struct_nodes: vec![],
             image_refs: vec![],
             complexity: None,
+            annotations: None,
         }
     }
 

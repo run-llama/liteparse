@@ -59,12 +59,19 @@ const parser = new LiteParse({
   outputFormat: 'json',          // "json" | "text" | "markdown"
   imageMode: 'placeholder',      // Markdown image handling: "placeholder" | "off" | "embed"
   extractLinks: true,            // Render [text](url) links in markdown output
+  extractAnnotations: false,     // Include page annotations in structured output
   preserveVerySmallText: false,  // Keep tiny text
   password: undefined,           // Password for protected documents
   quiet: false,                  // Suppress progress output
   numWorkers: 4,                 // Concurrent OCR workers
 });
 ```
+
+When `extractAnnotations` is enabled, each parsed page has an `annotations`
+array containing the subtype, contents, author/title, PDF date strings,
+viewport-space rectangle and quadpoint rectangles, and URI for external link
+annotations. It is independent of `extractLinks`, which controls Markdown link
+rendering. The field is omitted when extraction is disabled.
 
 ## Parsing from Bytes
 
@@ -133,6 +140,7 @@ The npm package includes the `lit` CLI:
 ```bash
 lit parse document.pdf
 lit parse document.pdf --format json -o output.json
+lit parse document.pdf --format json --extract-annotations
 lit screenshot document.pdf -o ./screenshots
 lit batch-parse ./input ./output
 lit is-complex document.pdf
