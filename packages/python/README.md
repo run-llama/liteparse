@@ -59,6 +59,7 @@ parser = LiteParse(
     image_mode="placeholder",      # Markdown image handling: "placeholder" | "off" | "embed"
     extract_links=True,            # Render [text](url) links in markdown output
     preserve_very_small_text=False, # Keep tiny text
+    include_text_metadata=False,    # Opt in to MCID, font metrics, colors, char codes, and tsg
     password=None,                 # Password for protected documents
     quiet=False,                   # Suppress progress output
     num_workers=4,                 # Concurrent OCR workers

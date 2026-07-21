@@ -60,6 +60,13 @@ pub struct LiteParseConfig {
     /// `false`, `TextItem.words` is always empty and the per-word tracking is
     /// skipped entirely (zero allocation).
     pub emit_word_boxes: bool,
+    /// Include rich PDF text metadata on public text items: MCID, glyph width,
+    /// font metrics/weight/buggy state, fill/stroke colors, raw character
+    /// codes, and generated-trailing-space state. Default `false` to preserve
+    /// LiteParse's lightweight response shape. Extraction still computes the
+    /// metadata for internal layout; it is stripped only before returning.
+    #[serde(default)]
+    pub include_text_metadata: bool,
     /// Restrict output to a sub-region of every page. Each field is the
     /// fraction of the page to crop away from that side (e.g. `left = 0.5`
     /// discards the left half). A text item is kept only when it lies
@@ -143,6 +150,7 @@ impl Default for LiteParseConfig {
             ocr_failure_fatal: true,
             ocr_hedge_delays_ms: Vec::new(),
             emit_word_boxes: false,
+            include_text_metadata: false,
             crop_box: None,
             skip_diagonal_text: false,
         }
@@ -262,6 +270,7 @@ mod tests {
         assert_eq!(c.output_format, OutputFormat::Json);
         assert!(!c.preserve_very_small_text);
         assert!(!c.quiet);
+        assert!(!c.include_text_metadata);
         assert!(c.password.is_none());
     }
 

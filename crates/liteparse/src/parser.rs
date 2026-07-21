@@ -387,6 +387,10 @@ impl LiteParse {
                 .join("\n\n")
         };
 
+        if !self.config.include_text_metadata {
+            strip_text_metadata(&mut parsed_pages);
+        }
+
         let total = web_time::Instant::now().duration_since(t0).as_secs_f64() * 1000.0;
         log(&format!("[liteparse] total: {:.1}ms", total));
 
@@ -424,6 +428,10 @@ impl LiteParse {
                 .collect::<Vec<_>>()
                 .join("\n\n")
         };
+
+        if !self.config.include_text_metadata {
+            strip_text_metadata(&mut parsed_pages);
+        }
 
         ParseResult {
             pages: parsed_pages,
@@ -493,9 +501,60 @@ impl LiteParse {
     }
 }
 
+/// Remove opt-in extraction metadata only after projection/Markdown have had
+/// access to it. Longstanding lightweight fields (text, bbox, rotation,
+/// font name/size, confidence, links, strike state, and optional word boxes)
+/// remain unchanged.
+fn strip_text_metadata(pages: &mut [crate::types::ParsedPage]) {
+    for item in pages.iter_mut().flat_map(|page| &mut page.text_items) {
+        item.font_height = None;
+        item.font_ascent = None;
+        item.font_descent = None;
+        item.font_weight = None;
+        item.text_width = None;
+        item.font_is_buggy = false;
+        item.mcid = None;
+        item.fill_color = None;
+        item.stroke_color = None;
+        item.char_codes.clear();
+        item.tsg = false;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{Page, TextItem};
+
+    fn page_with_text_metadata() -> Page {
+        Page {
+            page_number: 1,
+            page_width: 100.0,
+            page_height: 100.0,
+            text_items: vec![TextItem {
+                text: "hello".into(),
+                width: 20.0,
+                height: 10.0,
+                font_name: Some("Helvetica".into()),
+                font_size: Some(10.0),
+                font_height: Some(10.0),
+                font_ascent: Some(8.0),
+                font_descent: Some(-2.0),
+                font_weight: Some(700),
+                text_width: Some(19.0),
+                font_is_buggy: true,
+                mcid: Some(3),
+                fill_color: Some("ff112233".into()),
+                stroke_color: Some("ff445566".into()),
+                char_codes: vec![104, 101, 108, 108, 111],
+                tsg: true,
+                ..Default::default()
+            }],
+            graphics: vec![],
+            struct_nodes: vec![],
+            image_refs: vec![],
+        }
+    }
 
     #[test]
     #[allow(clippy::field_reassign_with_default)]
@@ -506,5 +565,42 @@ mod tests {
         let lp = LiteParse::new(cfg);
         assert!(!lp.config().ocr_enabled);
         assert_eq!(lp.config().max_pages, 7);
+    }
+
+    #[test]
+    fn parse_result_strips_text_metadata_by_default() {
+        let result = LiteParse::new(LiteParseConfig::default())
+            .parse_from_pages(vec![page_with_text_metadata()], vec![]);
+        let item = &result.pages[0].text_items[0];
+        assert_eq!(item.font_name.as_deref(), Some("Helvetica"));
+        assert_eq!(item.font_size, Some(10.0));
+        assert_eq!(item.font_height, None);
+        assert_eq!(item.font_weight, None);
+        assert_eq!(item.mcid, None);
+        assert!(item.char_codes.is_empty());
+        assert!(!item.font_is_buggy);
+        assert!(!item.tsg);
+    }
+
+    #[test]
+    fn parse_result_preserves_text_metadata_when_enabled() {
+        let config = LiteParseConfig {
+            include_text_metadata: true,
+            ..Default::default()
+        };
+        let result =
+            LiteParse::new(config).parse_from_pages(vec![page_with_text_metadata()], vec![]);
+        let item = &result.pages[0].text_items[0];
+        assert_eq!(item.font_height, Some(10.0));
+        assert_eq!(item.font_ascent, Some(8.0));
+        assert_eq!(item.font_descent, Some(-2.0));
+        assert_eq!(item.font_weight, Some(700));
+        assert_eq!(item.text_width, Some(19.0));
+        assert!(item.font_is_buggy);
+        assert_eq!(item.mcid, Some(3));
+        assert_eq!(item.fill_color.as_deref(), Some("ff112233"));
+        assert_eq!(item.stroke_color.as_deref(), Some("ff445566"));
+        assert_eq!(item.char_codes, vec![104, 101, 108, 108, 111]);
+        assert!(item.tsg);
     }
 }

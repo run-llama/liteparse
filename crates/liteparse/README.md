@@ -57,6 +57,7 @@ let config = LiteParseConfig {
     dpi: 150.0,                           // Rendering DPI
     output_format: OutputFormat::Json,    // Json | Text | Markdown
     preserve_very_small_text: false,      // Keep tiny text
+    include_text_metadata: false,         // Opt in to rich PDF text metadata
     password: None,                       // Password for protected documents
     quiet: false,                         // Suppress progress output
     ..Default::default()

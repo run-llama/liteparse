@@ -72,6 +72,10 @@ struct ParseCommand {
     /// `[text](url)` in markdown output; pass this to emit plain anchor text.
     #[arg(long)]
     no_links: bool,
+
+    /// Include rich PDF text metadata in text items and JSON output.
+    #[arg(long)]
+    include_text_metadata: bool,
 }
 
 #[derive(Args, Debug)]
@@ -121,6 +125,10 @@ struct BatchParseCommand {
     quiet: bool,
     #[arg(long)]
     num_workers: Option<usize>,
+
+    /// Include rich PDF text metadata in text items and JSON output.
+    #[arg(long)]
+    include_text_metadata: bool,
 }
 
 /// Parse a `Name: Value` header string into a `(name, value)` pair.
@@ -183,6 +191,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 ocr_server_headers: cmd.ocr_server_headers,
                 image_mode,
                 extract_links: !cmd.no_links,
+                include_text_metadata: cmd.include_text_metadata,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {
@@ -191,7 +200,10 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             let lp = LiteParse::new(config);
             let result = rt.block_on(lp.parse(&cmd.file))?;
             let formatted = match lp.config().output_format {
-                OutputFormat::Json => json::format_json(&result.pages)?,
+                OutputFormat::Json => json::format_json_with_text_metadata(
+                    &result.pages,
+                    lp.config().include_text_metadata,
+                )?,
                 OutputFormat::Text => text::format_text(&result.pages),
                 OutputFormat::Markdown => result.text.clone(),
             };
@@ -278,6 +290,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
                 ocr_server_headers: cmd.ocr_server_headers,
+                include_text_metadata: cmd.include_text_metadata,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {
@@ -318,9 +331,11 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                     Ok(result) => {
                         let fmt_result: Result<String, Box<dyn std::error::Error>> =
                             match lp.config().output_format {
-                                OutputFormat::Json => {
-                                    json::format_json(&result.pages).map_err(|e| e.into())
-                                }
+                                OutputFormat::Json => json::format_json_with_text_metadata(
+                                    &result.pages,
+                                    lp.config().include_text_metadata,
+                                )
+                                .map_err(|e| e.into()),
                                 OutputFormat::Text => Ok(text::format_text(&result.pages)),
                                 OutputFormat::Markdown => Ok(result.text.clone()),
                             };
@@ -393,7 +408,7 @@ fn batch_output_path(
 
 #[cfg(test)]
 mod tests {
-    use super::batch_output_path;
+    use super::*;
     use std::path::Path;
 
     #[test]
@@ -408,6 +423,35 @@ mod tests {
         let out_path = batch_output_path("docs/nested/report.pdf", "docs", "out", "md");
 
         assert_eq!(out_path, Path::new("out/nested/report.md"));
+    }
+
+    #[test]
+    fn include_text_metadata_flag_is_available_for_parse_and_batch() {
+        let cli = Cli::try_parse_from(["lit", "parse", "document.pdf", "--include-text-metadata"])
+            .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Parse(ParseCommand {
+                include_text_metadata: true,
+                ..
+            })
+        ));
+
+        let cli = Cli::try_parse_from([
+            "lit",
+            "batch-parse",
+            "input",
+            "output",
+            "--include-text-metadata",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::BatchParse(BatchParseCommand {
+                include_text_metadata: true,
+                ..
+            })
+        ));
     }
 }
 

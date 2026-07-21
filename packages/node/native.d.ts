@@ -62,6 +62,8 @@ export interface JsLiteParseConfig {
    * for word-level bbox attribution.
    */
   emitWordBoxes?: boolean
+  /** Include rich PDF text metadata on returned text items. Default false. */
+  includeTextMetadata?: boolean
   /**
    * Restrict output to a page sub-region. Each field is the fraction of the
    * page cropped from that side; a text item survives only if it lies

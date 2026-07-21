@@ -430,6 +430,8 @@ struct PyLiteParseConfig {
     quiet: bool,
     #[pyo3(get)]
     num_workers: usize,
+    #[pyo3(get)]
+    include_text_metadata: bool,
 }
 
 #[pymethods]
@@ -466,6 +468,7 @@ impl PyLiteParseConfig {
             password: cfg.password.clone(),
             quiet: cfg.quiet,
             num_workers: cfg.num_workers,
+            include_text_metadata: cfg.include_text_metadata,
         }
     }
 }
@@ -504,6 +507,7 @@ impl LiteParse {
         ocr_failure_fatal = None,
         ocr_hedge_delays_ms = None,
         emit_word_boxes = None,
+        include_text_metadata = None,
         crop_box = None,
         skip_diagonal_text = None,
     ))]
@@ -526,6 +530,7 @@ impl LiteParse {
         ocr_failure_fatal: Option<bool>,
         ocr_hedge_delays_ms: Option<Vec<u64>>,
         emit_word_boxes: Option<bool>,
+        include_text_metadata: Option<bool>,
         crop_box: Option<(f32, f32, f32, f32)>,
         skip_diagonal_text: Option<bool>,
     ) -> PyResult<Self> {
@@ -591,6 +596,9 @@ impl LiteParse {
         }
         if let Some(v) = emit_word_boxes {
             cfg.emit_word_boxes = v;
+        }
+        if let Some(v) = include_text_metadata {
+            cfg.include_text_metadata = v;
         }
         if let Some((top, right, bottom, left)) = crop_box {
             cfg.crop_box = Some(CropBox {
@@ -779,5 +787,18 @@ mod tests {
         assert_eq!(round_trip.stroke_color.as_deref(), Some("ff445566"));
         assert_eq!(round_trip.char_codes, vec![65, 32]);
         assert!(round_trip.tsg);
+    }
+
+    #[test]
+    fn text_metadata_config_defaults_off_and_can_be_enabled() {
+        let py = PyLiteParseConfig::from_rust(&LiteParseConfig::default());
+        assert!(!py.include_text_metadata);
+
+        let config = LiteParseConfig {
+            include_text_metadata: true,
+            ..Default::default()
+        };
+        let py = PyLiteParseConfig::from_rust(&config);
+        assert!(py.include_text_metadata);
     }
 }

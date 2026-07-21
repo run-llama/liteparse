@@ -8,7 +8,8 @@ pub(crate) struct JsonTextItem {
     pub y: f32,
     pub width: f32,
     pub height: f32,
-    pub rotation: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -23,7 +24,8 @@ pub(crate) struct JsonTextItem {
     pub font_weight: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_width: Option<f32>,
-    pub font_is_buggy: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_is_buggy: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcid: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,7 +55,7 @@ pub(crate) struct ParseResultJson {
 }
 
 /// Build structured JSON output from parsed pages.
-pub(crate) fn build_json(pages: &[ParsedPage]) -> ParseResultJson {
+pub(crate) fn build_json(pages: &[ParsedPage], include_text_metadata: bool) -> ParseResultJson {
     ParseResultJson {
         pages: pages
             .iter()
@@ -71,20 +73,28 @@ pub(crate) fn build_json(pages: &[ParsedPage]) -> ParseResultJson {
                         y: item.y,
                         width: item.width,
                         height: item.height,
-                        rotation: item.rotation,
+                        rotation: include_text_metadata.then_some(item.rotation),
                         font_name: item.font_name.clone(),
                         font_size: item.font_size,
-                        font_height: item.font_height,
-                        font_ascent: item.font_ascent,
-                        font_descent: item.font_descent,
-                        font_weight: item.font_weight,
-                        text_width: item.text_width,
-                        font_is_buggy: item.font_is_buggy,
-                        mcid: item.mcid,
-                        fill_color: item.fill_color.clone(),
-                        stroke_color: item.stroke_color.clone(),
-                        char_codes: item.char_codes.clone(),
-                        tsg: item.tsg,
+                        font_height: include_text_metadata.then_some(item.font_height).flatten(),
+                        font_ascent: include_text_metadata.then_some(item.font_ascent).flatten(),
+                        font_descent: include_text_metadata.then_some(item.font_descent).flatten(),
+                        font_weight: include_text_metadata.then_some(item.font_weight).flatten(),
+                        text_width: include_text_metadata.then_some(item.text_width).flatten(),
+                        font_is_buggy: include_text_metadata.then_some(item.font_is_buggy),
+                        mcid: include_text_metadata.then_some(item.mcid).flatten(),
+                        fill_color: include_text_metadata
+                            .then(|| item.fill_color.clone())
+                            .flatten(),
+                        stroke_color: include_text_metadata
+                            .then(|| item.stroke_color.clone())
+                            .flatten(),
+                        char_codes: if include_text_metadata {
+                            item.char_codes.clone()
+                        } else {
+                            Vec::new()
+                        },
+                        tsg: include_text_metadata && item.tsg,
                         confidence: item.confidence.or(Some(1.0)),
                     })
                     .collect(),
@@ -95,7 +105,15 @@ pub(crate) fn build_json(pages: &[ParsedPage]) -> ParseResultJson {
 
 /// Format parsed pages as pretty-printed JSON string.
 pub fn format_json(pages: &[ParsedPage]) -> Result<String, serde_json::Error> {
-    let result = build_json(pages);
+    format_json_with_text_metadata(pages, false)
+}
+
+/// Format parsed pages as JSON, optionally including rich PDF text metadata.
+pub fn format_json_with_text_metadata(
+    pages: &[ParsedPage],
+    include_text_metadata: bool,
+) -> Result<String, serde_json::Error> {
+    let result = build_json(pages, include_text_metadata);
     serde_json::to_string_pretty(&result)
 }
 
@@ -137,7 +155,7 @@ mod tests {
 
     #[test]
     fn test_build_json_native_text_defaults_confidence_to_one() {
-        let j = build_json(&[page(vec![item("hi", None)])]);
+        let j = build_json(&[page(vec![item("hi", None)])], false);
         assert_eq!(j.pages.len(), 1);
         assert_eq!(j.pages[0].page, 1);
         assert_eq!(j.pages[0].text_items[0].confidence, Some(1.0));
@@ -146,7 +164,7 @@ mod tests {
 
     #[test]
     fn test_build_json_preserves_ocr_confidence() {
-        let j = build_json(&[page(vec![item("hi", Some(0.42))])]);
+        let j = build_json(&[page(vec![item("hi", Some(0.42))])], false);
         assert_eq!(j.pages[0].text_items[0].confidence, Some(0.42));
     }
 
@@ -173,8 +191,10 @@ mod tests {
         text_item.char_codes = vec![104, 105, 32];
         text_item.tsg = true;
 
-        let value: serde_json::Value =
-            serde_json::from_str(&format_json(&[page(vec![text_item])]).unwrap()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(
+            &format_json_with_text_metadata(&[page(vec![text_item])], true).unwrap(),
+        )
+        .unwrap();
         let item = &value["pages"][0]["text_items"][0];
         assert_eq!(item["font_height"], 11.0);
         assert_eq!(item["font_ascent"], 8.0);
@@ -192,7 +212,27 @@ mod tests {
 
     #[test]
     fn test_build_json_empty() {
-        let j = build_json(&[]);
+        let j = build_json(&[], false);
         assert!(j.pages.is_empty());
+    }
+
+    #[test]
+    fn test_text_metadata_is_omitted_by_default() {
+        let mut text_item = item("hi", None);
+        text_item.font_height = Some(11.0);
+        text_item.font_is_buggy = true;
+        text_item.mcid = Some(4);
+        text_item.char_codes = vec![104, 105];
+        text_item.tsg = true;
+
+        let value: serde_json::Value =
+            serde_json::from_str(&format_json(&[page(vec![text_item])]).unwrap()).unwrap();
+        let item = &value["pages"][0]["text_items"][0];
+        assert!(item.get("rotation").is_none());
+        assert!(item.get("font_height").is_none());
+        assert!(item.get("font_is_buggy").is_none());
+        assert!(item.get("mcid").is_none());
+        assert!(item.get("char_codes").is_none());
+        assert!(item.get("tsg").is_none());
     }
 }

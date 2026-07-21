@@ -60,6 +60,7 @@ const parser = new LiteParse({
   imageMode: 'placeholder',      // Markdown image handling: "placeholder" | "off" | "embed"
   extractLinks: true,            // Render [text](url) links in markdown output
   preserveVerySmallText: false,  // Keep tiny text
+  includeTextMetadata: false,    // Opt in to MCID, font metrics, colors, char codes, and tsg
   password: undefined,           // Password for protected documents
   quiet: false,                  // Suppress progress output
   numWorkers: 4,                 // Concurrent OCR workers

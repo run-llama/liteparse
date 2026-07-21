@@ -136,6 +136,7 @@ class LiteParseConfig:
     password: Optional[str]
     quiet: bool
     num_workers: int
+    include_text_metadata: bool = False
 
 
 class ParseError(Exception):

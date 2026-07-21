@@ -57,6 +57,10 @@ program
   )
   .option("--dpi <dpi>", "Rendering DPI", parseFloat)
   .option("--preserve-small-text", "Keep very small text")
+  .option(
+    "--include-text-metadata",
+    "Include rich PDF text metadata in text items and JSON output",
+  )
   .option("--password <password>", "Password for encrypted documents")
   .option("--config <file>", "JSON config file path")
   .option("-q, --quiet", "Suppress progress output")
@@ -88,6 +92,7 @@ program
       if (opts.targetPages) config.targetPages = opts.targetPages as string;
       if (opts.dpi) config.dpi = opts.dpi as number;
       if (opts.preserveSmallText) config.preserveVerySmallText = true;
+      if (opts.includeTextMetadata) config.includeTextMetadata = true;
       if (opts.password) config.password = opts.password as string;
       if (opts.quiet) config.quiet = true;
       if (opts.numWorkers) config.numWorkers = opts.numWorkers as number;
@@ -282,6 +287,10 @@ program
   .option("--password <password>", "Password for encrypted documents")
   .option("-q, --quiet", "Suppress progress output")
   .option("--num-workers <n>", "Number of concurrent OCR workers", parseInt)
+  .option(
+    "--include-text-metadata",
+    "Include rich PDF text metadata in text items and JSON output",
+  )
   .action(
     async (
       inputDir: string,
@@ -303,6 +312,7 @@ program
         if (opts.password) config.password = opts.password as string;
         if (opts.quiet) config.quiet = true;
         if (opts.numWorkers) config.numWorkers = opts.numWorkers as number;
+        if (opts.includeTextMetadata) config.includeTextMetadata = true;
 
         const parser = new LiteParse(config);
         const outExt = format === "json" ? ".json" : format === "markdown" ? ".md" : ".txt";
