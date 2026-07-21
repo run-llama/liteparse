@@ -190,7 +190,12 @@ Image handling is controlled by `--image-mode`:
 |------|----------|
 | `placeholder` (default) | Emits `![](image_pN_K.png)` references in reading order |
 | `off` | Strips images entirely |
-| `embed` | Writes each image's PNG bytes to `--image-output-dir` and references them |
+| `embed` | Returns image bytes and metadata; valid embedded JPEG streams remain JPEG |
+
+`--image-output-dir` enables extraction independently of the Markdown mode. JSON output
+contains each image's `name`, `path`, page bbox, intrinsic pixel dimensions, rotation,
+format, and duplicate relationship; pixel bytes are never embedded in JSON. Identical
+image resources reuse the same output file.
 
 > Markdown reconstruction quality varies with document complexity. For the
 > hardest documents (dense tables, multi-column layouts, scans),

@@ -77,6 +77,8 @@ program
       if (opts.format) config.outputFormat = opts.format as "json" | "text" | "markdown";
       if (opts.imageMode)
         config.imageMode = opts.imageMode as "off" | "placeholder" | "embed";
+      if (opts.imageOutputDir)
+        config.imageOutputDir = opts.imageOutputDir as string;
       if (opts.links === false) config.extractLinks = false;
       if (opts.ocrServerUrl)
         config.ocrServerUrl = opts.ocrServerUrl as string;
@@ -109,24 +111,14 @@ program
                   text: p.text,
                   textItems: p.textItems,
                 })),
+                images: result.images.map(({ bytes: _bytes, ...image }) => image),
+                imageErrorCount: result.imageErrorCount,
               },
               null,
               2,
             )
           : result.text;
 
-      if (opts.imageOutputDir && result.images.length > 0) {
-        const dir = opts.imageOutputDir as string;
-        mkdirSync(dir, { recursive: true });
-        for (const img of result.images) {
-          writeFileSync(join(dir, `image_${img.id}.${img.format}`), img.bytes);
-        }
-        if (!opts.quiet) {
-          console.error(
-            `[liteparse] wrote ${result.images.length} image(s) to ${dir}`,
-          );
-        }
-      }
 
       if (opts.output) {
         writeFileSync(opts.output as string, output, "utf-8");
@@ -360,6 +352,8 @@ program
                         text: p.text,
                         textItems: p.textItems,
                       })),
+                      images: result.images.map(({ bytes: _bytes, ...image }) => image),
+                      imageErrorCount: result.imageErrorCount,
                     },
                     null,
                     2,

@@ -57,6 +57,7 @@ parser = LiteParse(
     dpi=150,                       # Rendering DPI
     output_format="json",          # "json" | "text" | "markdown"
     image_mode="placeholder",      # Markdown image handling: "placeholder" | "off" | "embed"
+    image_output_dir="./images",   # Write images and return name/path metadata (optional)
     extract_links=True,            # Render [text](url) links in markdown output
     preserve_very_small_text=False, # Keep tiny text
     password=None,                 # Password for protected documents
@@ -64,6 +65,11 @@ parser = LiteParse(
     num_workers=4,                 # Concurrent OCR workers
 )
 ```
+
+When ``image_output_dir`` is set, image extraction is enabled automatically. Each
+``result.images`` entry includes its page bbox, intrinsic pixel dimensions, rotation,
+format, ``name``, and ``path``. Valid source JPEGs are preserved, exact duplicates
+reuse one file, and JSON CLI output contains metadata only—never base64 image data.
 
 ## Parsing from Bytes
 

@@ -36,9 +36,10 @@ export interface JsLiteParseConfig {
   /**
    * How to surface raster images in markdown output: "off", "placeholder"
    * (default — emits `![](image_pN_K.png)` references with no bytes), or
-   * "embed" (also returns each image's PNG bytes on `images`).
+   * "embed" (also returns each image's bytes and metadata on `images`).
    */
   imageMode?: string
+  imageOutputDir?: string
   /**
    * Render hyperlink annotations as `[text](url)` in markdown output
    * (default true). Set false for plain anchor text.
@@ -164,11 +165,25 @@ export interface JsParseResult {
   pages: Array<JsParsedPage>
   text: string
   images: Array<JsExtractedImage>
+  imageErrorCount: number
+}
+export interface JsImageRect {
+  x: number
+  y: number
+  width: number
+  height: number
 }
 export interface JsExtractedImage {
   id: string
+  name: string
+  path?: string
   page: number
+  bbox: JsImageRect
+  width: number
+  height: number
+  rotation: number
   format: string
+  duplicateOf?: string
   bytes: Buffer
 }
 export interface JsScreenshotResult {

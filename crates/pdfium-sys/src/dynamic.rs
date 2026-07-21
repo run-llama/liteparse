@@ -72,6 +72,31 @@ pub struct PdfiumBindings {
         unsafe extern "C" fn(FPDF_PAGEOBJECT) -> std::os::raw::c_int,
     pub FPDFImageObj_GetRenderedBitmap:
         unsafe extern "C" fn(FPDF_DOCUMENT, FPDF_PAGE, FPDF_PAGEOBJECT) -> FPDF_BITMAP,
+    pub FPDFImageObj_GetImageDataDecoded: unsafe extern "C" fn(
+        FPDF_PAGEOBJECT,
+        *mut std::os::raw::c_void,
+        std::os::raw::c_ulong,
+    ) -> std::os::raw::c_ulong,
+    pub FPDFImageObj_GetImageDataRaw: unsafe extern "C" fn(
+        FPDF_PAGEOBJECT,
+        *mut std::os::raw::c_void,
+        std::os::raw::c_ulong,
+    ) -> std::os::raw::c_ulong,
+    pub FPDFImageObj_GetImageFilterCount:
+        unsafe extern "C" fn(FPDF_PAGEOBJECT) -> std::os::raw::c_int,
+    pub FPDFImageObj_GetImageFilter: unsafe extern "C" fn(
+        FPDF_PAGEOBJECT,
+        std::os::raw::c_int,
+        *mut std::os::raw::c_void,
+        std::os::raw::c_ulong,
+    ) -> std::os::raw::c_ulong,
+    pub FPDFImageObj_GetImageMetadata:
+        unsafe extern "C" fn(FPDF_PAGEOBJECT, FPDF_PAGE, *mut FPDF_IMAGEOBJ_METADATA) -> FPDF_BOOL,
+    pub FPDFImageObj_GetImagePixelSize: unsafe extern "C" fn(
+        FPDF_PAGEOBJECT,
+        *mut std::os::raw::c_uint,
+        *mut std::os::raw::c_uint,
+    ) -> FPDF_BOOL,
     pub FPDFPageObj_GetMatrix: unsafe extern "C" fn(FPDF_PAGEOBJECT, *mut FS_MATRIX) -> FPDF_BOOL,
     pub FPDFPageObj_GetStrokeColor: unsafe extern "C" fn(
         FPDF_PAGEOBJECT,
@@ -356,6 +381,12 @@ impl PdfiumBindings {
             FPDFPageObj_GetBounds: load_fn!(lib, "FPDFPageObj_GetBounds"),
             FPDFPageObj_GetMarkedContentID: load_fn!(lib, "FPDFPageObj_GetMarkedContentID"),
             FPDFImageObj_GetRenderedBitmap: load_fn!(lib, "FPDFImageObj_GetRenderedBitmap"),
+            FPDFImageObj_GetImageDataDecoded: load_fn!(lib, "FPDFImageObj_GetImageDataDecoded"),
+            FPDFImageObj_GetImageDataRaw: load_fn!(lib, "FPDFImageObj_GetImageDataRaw"),
+            FPDFImageObj_GetImageFilterCount: load_fn!(lib, "FPDFImageObj_GetImageFilterCount"),
+            FPDFImageObj_GetImageFilter: load_fn!(lib, "FPDFImageObj_GetImageFilter"),
+            FPDFImageObj_GetImageMetadata: load_fn!(lib, "FPDFImageObj_GetImageMetadata"),
+            FPDFImageObj_GetImagePixelSize: load_fn!(lib, "FPDFImageObj_GetImagePixelSize"),
             FPDFPageObj_GetMatrix: load_fn!(lib, "FPDFPageObj_GetMatrix"),
             FPDFPageObj_GetStrokeColor: load_fn!(lib, "FPDFPageObj_GetStrokeColor"),
             FPDFPageObj_GetFillColor: load_fn!(lib, "FPDFPageObj_GetFillColor"),

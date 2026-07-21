@@ -264,6 +264,7 @@ pub struct ParseResult {
     pub pages: Vec<ParsedPage>,
     pub text: String,
     pub images: Vec<ExtractedImage>,
+    pub image_error_count: u32,
 }
 
 #[derive(Serialize, Tsify)]
@@ -271,11 +272,28 @@ pub struct ParseResult {
 #[serde(rename_all = "camelCase")]
 pub struct ExtractedImage {
     pub id: String,
+    pub name: String,
+    pub path: Option<String>,
     pub page: u32,
+    pub bbox: ImageRect,
+    pub width: u32,
+    pub height: u32,
+    pub rotation: f32,
     pub format: String,
+    pub duplicate_of: Option<String>,
     /// Raw image bytes, serialized as a JS `number[]`. Callers that want a
     /// Uint8Array can wrap with `new Uint8Array(image.bytes)`.
     pub bytes: Vec<u8>,
+}
+
+#[derive(Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -500,8 +518,20 @@ impl LiteParse {
             .iter()
             .map(|img| ExtractedImage {
                 id: img.id.clone(),
+                name: img.name.clone(),
+                path: img.path.clone(),
                 page: img.page,
+                bbox: ImageRect {
+                    x: img.bbox.x,
+                    y: img.bbox.y,
+                    width: img.bbox.width,
+                    height: img.bbox.height,
+                },
+                width: img.width,
+                height: img.height,
+                rotation: img.rotation,
                 format: img.format.clone(),
+                duplicate_of: img.duplicate_of.clone(),
                 bytes: img.bytes.clone(),
             })
             .collect();
@@ -510,6 +540,7 @@ impl LiteParse {
             pages,
             text: result.text.clone(),
             images,
+            image_error_count: result.image_error_count,
         })
     }
 

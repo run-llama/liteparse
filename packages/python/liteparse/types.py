@@ -46,6 +46,15 @@ class ParsedPage:
 
 
 @dataclass
+class ImageRect:
+    """Image placement in viewport coordinates (top-left origin, 72 DPI)."""
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+@dataclass
 class ExtractedImage:
     """An embedded raster image extracted from a page.
 
@@ -54,9 +63,16 @@ class ExtractedImage:
     (e.g. ``![](image_p1_0.png)`` → ``id="p1_0"``).
     """
     id: str
+    name: str
+    path: Optional[str]
     page: int
+    bbox: ImageRect
+    width: int
+    height: int
+    rotation: float
     format: str
     bytes: bytes
+    duplicate_of: Optional[str] = None
 
 
 @dataclass
@@ -65,6 +81,7 @@ class ParseResult:
     pages: List[ParsedPage]
     text: str
     images: List[ExtractedImage] = field(default_factory=list)
+    image_error_count: int = 0
 
     @property
     def num_pages(self) -> int:
@@ -121,6 +138,7 @@ class LiteParseConfig:
     password: Optional[str]
     quiet: bool
     num_workers: int
+    image_output_dir: Optional[str]
 
 
 class ParseError(Exception):

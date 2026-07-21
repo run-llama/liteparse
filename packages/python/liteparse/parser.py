@@ -8,6 +8,7 @@ from liteparse._liteparse import search_items as _native_search_items
 
 from .types import (
     ExtractedImage,
+    ImageRect,
     LiteParseConfig,
     PageComplexityStats,
     ParsedPage,
@@ -60,9 +61,21 @@ def _convert_native_result(native_result: Any) -> ParseResult:
     images = [
         ExtractedImage(
             id=img.id,
+            name=img.name,
+            path=img.path,
             page=img.page,
+            bbox=ImageRect(
+                x=img.bbox.x,
+                y=img.bbox.y,
+                width=img.bbox.width,
+                height=img.bbox.height,
+            ),
+            width=img.width,
+            height=img.height,
+            rotation=img.rotation,
             format=img.format,
             bytes=img.bytes,
+            duplicate_of=img.duplicate_of,
         )
         for img in getattr(native_result, "images", [])
     ]
@@ -70,6 +83,7 @@ def _convert_native_result(native_result: Any) -> ParseResult:
         pages=pages,
         text=native_result.text,
         images=images,
+        image_error_count=getattr(native_result, "image_error_count", 0),
     )
 
 
@@ -103,6 +117,7 @@ class LiteParse:
         quiet: Optional[bool] = None,
         num_workers: Optional[int] = None,
         image_mode: Optional[str] = None,
+        image_output_dir: Optional[Union[str, Path]] = None,
         extract_links: Optional[bool] = None,
         ocr_failure_fatal: Optional[bool] = None,
         ocr_hedge_delays_ms: Optional[List[int]] = None,
@@ -130,6 +145,9 @@ class LiteParse:
             num_workers: Number of concurrent OCR workers (default: CPU cores - 1)
             extract_links: Render hyperlink annotations as ``[text](url)`` in
                 markdown output (default: True). Set False for plain anchor text.
+            image_output_dir: Directory where extracted embedded images are
+                written. Setting it enables image extraction and returns file
+                names/paths in each ``ExtractedImage``.
             ocr_failure_fatal: Whether a systemic OCR failure (every OCR task
                 failed and at least one was a text-sparse page) aborts the whole
                 parse (default: True). Set False to keep already-recovered native
@@ -184,6 +202,8 @@ class LiteParse:
             kwargs["num_workers"] = num_workers
         if image_mode is not None:
             kwargs["image_mode"] = image_mode
+        if image_output_dir is not None:
+            kwargs["image_output_dir"] = str(image_output_dir)
         if extract_links is not None:
             kwargs["extract_links"] = extract_links
         if ocr_failure_fatal is not None:

@@ -58,6 +58,7 @@ const parser = new LiteParse({
   dpi: 150,                      // Rendering DPI
   outputFormat: 'json',          // "json" | "text" | "markdown"
   imageMode: 'placeholder',      // Markdown image handling: "placeholder" | "off" | "embed"
+  imageOutputDir: './images',    // Write images and return name/path metadata (optional)
   extractLinks: true,            // Render [text](url) links in markdown output
   preserveVerySmallText: false,  // Keep tiny text
   password: undefined,           // Password for protected documents
@@ -65,6 +66,11 @@ const parser = new LiteParse({
   numWorkers: 4,                 // Concurrent OCR workers
 });
 ```
+
+When `imageOutputDir` is set, image extraction is enabled automatically. Each
+`result.images` entry includes its page bbox, intrinsic pixel dimensions, rotation,
+format, `name`, and `path`. Valid source JPEGs are preserved, exact duplicates reuse
+one file, and JSON CLI output contains metadata only—never base64 image data.
 
 ## Parsing from Bytes
 

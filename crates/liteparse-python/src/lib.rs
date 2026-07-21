@@ -175,6 +175,8 @@ struct PyParseResult {
     text: String,
     #[pyo3(get)]
     images: Vec<PyExtractedImage>,
+    #[pyo3(get)]
+    image_error_count: u32,
 }
 
 #[pymethods]
@@ -212,6 +214,7 @@ impl PyParseResult {
                 .into_iter()
                 .map(PyExtractedImage::from_rust)
                 .collect(),
+            image_error_count: result.image_error_count,
         }
     }
 }
@@ -222,10 +225,37 @@ struct PyExtractedImage {
     #[pyo3(get)]
     id: String,
     #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    path: Option<String>,
+    #[pyo3(get)]
     page: u32,
     #[pyo3(get)]
+    bbox: PyImageRect,
+    #[pyo3(get)]
+    width: u32,
+    #[pyo3(get)]
+    height: u32,
+    #[pyo3(get)]
+    rotation: f32,
+    #[pyo3(get)]
     format: String,
+    #[pyo3(get)]
+    duplicate_of: Option<String>,
     bytes_buffer: Vec<u8>,
+}
+
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+struct PyImageRect {
+    #[pyo3(get)]
+    x: f32,
+    #[pyo3(get)]
+    y: f32,
+    #[pyo3(get)]
+    width: f32,
+    #[pyo3(get)]
+    height: f32,
 }
 
 #[pymethods]
@@ -250,8 +280,20 @@ impl PyExtractedImage {
     fn from_rust(img: liteparse::types::ExtractedImage) -> Self {
         Self {
             id: img.id,
+            name: img.name,
+            path: img.path,
             page: img.page,
+            bbox: PyImageRect {
+                x: img.bbox.x,
+                y: img.bbox.y,
+                width: img.bbox.width,
+                height: img.bbox.height,
+            },
+            width: img.width,
+            height: img.height,
+            rotation: img.rotation,
             format: img.format,
+            duplicate_of: img.duplicate_of,
             bytes_buffer: img.bytes,
         }
     }
@@ -382,6 +424,8 @@ struct PyLiteParseConfig {
     quiet: bool,
     #[pyo3(get)]
     num_workers: usize,
+    #[pyo3(get)]
+    image_output_dir: Option<String>,
 }
 
 #[pymethods]
@@ -418,6 +462,7 @@ impl PyLiteParseConfig {
             password: cfg.password.clone(),
             quiet: cfg.quiet,
             num_workers: cfg.num_workers,
+            image_output_dir: cfg.image_output_dir.clone(),
         }
     }
 }
@@ -452,6 +497,7 @@ impl LiteParse {
         quiet = None,
         num_workers = None,
         image_mode = None,
+        image_output_dir = None,
         extract_links = None,
         ocr_failure_fatal = None,
         ocr_hedge_delays_ms = None,
@@ -474,6 +520,7 @@ impl LiteParse {
         quiet: Option<bool>,
         num_workers: Option<usize>,
         image_mode: Option<String>,
+        image_output_dir: Option<String>,
         extract_links: Option<bool>,
         ocr_failure_fatal: Option<bool>,
         ocr_hedge_delays_ms: Option<Vec<u64>>,
@@ -531,6 +578,9 @@ impl LiteParse {
                 "embed" => ImageMode::Embed,
                 _ => ImageMode::Placeholder,
             };
+        }
+        if let Some(v) = image_output_dir {
+            cfg.image_output_dir = Some(v);
         }
         if let Some(v) = extract_links {
             cfg.extract_links = v;
@@ -683,6 +733,7 @@ fn _liteparse(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLiteParseConfig>()?;
     m.add_class::<PyParseResult>()?;
     m.add_class::<PyExtractedImage>()?;
+    m.add_class::<PyImageRect>()?;
     m.add_class::<PyParsedPage>()?;
     m.add_class::<PyTextItem>()?;
     m.add_class::<PyWordBox>()?;

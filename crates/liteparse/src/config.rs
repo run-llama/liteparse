@@ -31,9 +31,12 @@ pub struct LiteParseConfig {
     pub quiet: bool,
     /// Number of concurrent OCR workers. Defaults to (number of CPU cores - 1), minimum 1.
     pub num_workers: usize,
-    /// Controls how raster images are surfaced in markdown output. Has no
-    /// effect on JSON / text outputs.
+    /// Controls how raster images are surfaced in markdown output. `Embed`
+    /// also exposes image bytes and metadata to callers.
     pub image_mode: ImageMode,
+    /// Directory where extracted embedded images are written. Setting this
+    /// also enables image extraction, independently of `image_mode`.
+    pub image_output_dir: Option<String>,
     /// Extract hyperlink annotations and render them as `[text](url)` in
     /// markdown output. Default on. Disable for benchmark parity with
     /// plain-text ground truth (the GT corpora never use link syntax).
@@ -91,10 +94,9 @@ pub struct CropBox {
 ///   reading order at each image's y position, but do **not** extract or
 ///   return pixel bytes. Keeps response size small while letting the LLM see
 ///   where figures live in the document.
-/// * `Embed` — same references, plus bytes returned via `ParseResult.images`.
-///   Opt-in because pixel bytes can dwarf the text payload on image-heavy
-///   PDFs. (Bytes plumbing lands in stage 11b — current variant is parsed but
-///   behaves like `Placeholder` until then.)
+/// * `Embed` — same references, plus bytes and metadata returned via
+///   `ParseResult.images`. Opt-in because pixel bytes can dwarf the text
+///   payload on image-heavy PDFs.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ImageMode {
@@ -139,6 +141,7 @@ impl Default for LiteParseConfig {
             quiet: false,
             num_workers: default_num_workers(),
             image_mode: ImageMode::Placeholder,
+            image_output_dir: None,
             extract_links: true,
             ocr_failure_fatal: true,
             ocr_hedge_delays_ms: Vec::new(),

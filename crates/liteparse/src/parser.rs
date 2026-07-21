@@ -27,9 +27,12 @@ pub struct ParseResult {
     pub outline: Vec<OutlineTarget>,
     /// Raster images extracted from the document. Empty unless the parser
     /// was configured with `ImageMode::Embed`. Each entry carries the same
-    /// `id` the markdown emitter referenced in `![](image_{id}.png)`, so the
-    /// caller can match them up without parsing markdown.
+    /// `id` and `format` the markdown emitter referenced, so the caller can
+    /// match them up without parsing markdown.
     pub images: Vec<ExtractedImage>,
+    /// Number of embedded image objects that could not be extracted. A bad
+    /// image does not fail the rest of the document parse.
+    pub image_error_count: u32,
 }
 
 /// Result of rendering a single page screenshot.
@@ -47,6 +50,34 @@ pub struct ScreenshotResult {
 /// recovered without any extra wiring. Unset (default) leaves the hook dormant.
 #[cfg(not(target_arch = "wasm32"))]
 const FONT_DB_DIR_ENV: &str = "LITEPARSE_FONT_DB_DIR";
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_extracted_images(
+    output_dir: &str,
+    images: &mut [ExtractedImage],
+) -> Result<(), LiteParseError> {
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    std::fs::create_dir_all(output_dir)?;
+    let mut written: HashMap<String, (String, String)> = HashMap::new();
+    for image in images {
+        if let Some(canonical) = image.duplicate_of.as_ref()
+            && let Some((name, path)) = written.get(canonical)
+        {
+            image.name = name.clone();
+            image.path = Some(path.clone());
+            continue;
+        }
+
+        let path = Path::new(output_dir).join(&image.name);
+        std::fs::write(&path, &image.bytes)?;
+        let path = path.to_string_lossy().into_owned();
+        image.path = Some(path.clone());
+        written.insert(image.id.clone(), (image.name.clone(), path));
+    }
+    Ok(())
+}
 
 /// Build the default glyph resolver from the environment, if configured.
 #[cfg(not(target_arch = "wasm32"))]
@@ -164,7 +195,7 @@ impl LiteParse {
         let lib = Library::init();
         let document = extract::load_document_from_input(&lib, &validated_input, password)?;
 
-        let (pages, _) = extract::extract_pages_and_images(
+        let (pages, _, _) = extract::extract_pages_and_images(
             &document,
             target_pages.as_deref(),
             self.config.max_pages,
@@ -237,7 +268,8 @@ impl LiteParse {
         // projection (pure Rust) do not touch PDFium, so they can run
         // concurrently with other `LiteParse` calls.
         let password = self.config.password.as_deref();
-        let render_images = matches!(self.config.image_mode, crate::config::ImageMode::Embed);
+        let render_images = matches!(self.config.image_mode, crate::config::ImageMode::Embed)
+            || self.config.image_output_dir.is_some();
 
         // Build the OCR engine up front so the renderer knows whether to emit a
         // grayscale buffer (cheaper, for engines that binarize internally) or RGB.
@@ -285,11 +317,11 @@ impl LiteParse {
         };
         let ocr_grayscale = ocr_engine.as_ref().is_some_and(|e| e.prefers_grayscale());
 
-        let (pages, ocr_rendered, outline, images) = {
+        let (pages, ocr_rendered, outline, mut images, image_error_count) = {
             let lib = Library::init();
             let document = extract::load_document_from_input(&lib, &validated_input, password)?;
             let outline = extract::extract_outline(&document);
-            let (pages, images) = extract::extract_pages_and_images(
+            let (pages, images, image_error_count) = extract::extract_pages_and_images(
                 &document,
                 target_pages.as_deref(),
                 self.config.max_pages,
@@ -325,7 +357,7 @@ impl LiteParse {
                 Vec::new()
             };
             // `lib` is dropped here, releasing the PDFium lock.
-            (pages, rendered, outline, images)
+            (pages, rendered, outline, images, image_error_count)
         };
         let mut pages = pages;
         let t1 = web_time::Instant::now();
@@ -390,11 +422,17 @@ impl LiteParse {
         let total = web_time::Instant::now().duration_since(t0).as_secs_f64() * 1000.0;
         log(&format!("[liteparse] total: {:.1}ms", total));
 
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(output_dir) = self.config.image_output_dir.as_deref() {
+            write_extracted_images(output_dir, &mut images)?;
+        }
+
         Ok(ParseResult {
             pages: parsed_pages,
             text: full_text,
             outline,
             images,
+            image_error_count,
         })
     }
 
@@ -430,6 +468,7 @@ impl LiteParse {
             text: full_text,
             outline,
             images: Vec::new(),
+            image_error_count: 0,
         }
     }
 
@@ -506,5 +545,39 @@ mod tests {
         let lp = LiteParse::new(cfg);
         assert!(!lp.config().ocr_enabled);
         assert_eq!(lp.config().max_pages, 7);
+    }
+
+    #[test]
+    fn image_output_reuses_canonical_file_for_duplicates() {
+        fn image(id: &str, duplicate_of: Option<&str>, bytes: &[u8]) -> ExtractedImage {
+            ExtractedImage {
+                id: id.into(),
+                name: format!("image_{id}.png"),
+                path: None,
+                page: 1,
+                bbox: crate::types::Rect::default(),
+                width: 2,
+                height: 2,
+                rotation: 0.0,
+                format: "png".into(),
+                duplicate_of: duplicate_of.map(str::to_owned),
+                bytes: bytes.to_vec(),
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut images = vec![
+            image("p1_0", None, b"canonical"),
+            image("p2_0", Some("p1_0"), b"canonical"),
+        ];
+        write_extracted_images(dir.path().to_str().unwrap(), &mut images).unwrap();
+
+        assert_eq!(images[0].name, images[1].name);
+        assert_eq!(images[0].path, images[1].path);
+        assert_eq!(
+            std::fs::read(images[0].path.as_ref().unwrap()).unwrap(),
+            b"canonical"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }

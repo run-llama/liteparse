@@ -49,9 +49,10 @@ pub enum Block {
     /// page's vector graphics (e.g. divider line between sections).
     HorizontalRule,
     /// Reference to a raster image on the page. Rendered as
-    /// `![](image_{id}.png)`. Suppressed entirely when `ImageMode::Off`.
+    /// `![](image_{id}.{format})`. Suppressed entirely when `ImageMode::Off`.
     Figure {
         id: String,
+        format: String,
     },
 }
 
@@ -238,10 +239,12 @@ pub fn render_blocks(blocks: &[Block]) -> String {
             Block::HorizontalRule => {
                 out.push_str("---");
             }
-            Block::Figure { id, .. } => {
+            Block::Figure { id, format } => {
                 out.push_str("![](image_");
                 out.push_str(id);
-                out.push_str(".png)");
+                out.push('.');
+                out.push_str(format);
+                out.push(')');
             }
         }
     }
@@ -271,6 +274,17 @@ mod tests {
         ];
         let s = render_blocks(&blocks);
         assert_eq!(s, "# Title\n\nA paragraph.\n\n## Sub");
+    }
+
+    #[test]
+    fn render_figure_uses_extracted_format() {
+        assert_eq!(
+            render_blocks(&[Block::Figure {
+                id: "p1_0".into(),
+                format: "jpg".into(),
+            }]),
+            "![](image_p1_0.jpg)"
+        );
     }
 
     #[test]

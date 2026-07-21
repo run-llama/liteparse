@@ -42,8 +42,11 @@ pub struct JsLiteParseConfig {
     pub num_workers: Option<u32>,
     /// How to surface raster images in markdown output: "off", "placeholder"
     /// (default — emits `![](image_pN_K.png)` references with no bytes), or
-    /// "embed" (also returns each image's PNG bytes on `images`).
+    /// "embed" (also returns each image's bytes and metadata on `images`).
     pub image_mode: Option<String>,
+    /// Directory where embedded image files are written. Also enables image
+    /// extraction even when `imageMode` is `placeholder`.
+    pub image_output_dir: Option<String>,
     /// Render hyperlink annotations as `[text](url)` in markdown output
     /// (default true). Set false for plain anchor text.
     pub extract_links: Option<bool>,
@@ -132,6 +135,9 @@ impl JsLiteParseConfig {
                 _ => ImageMode::Placeholder,
             };
         }
+        if let Some(v) = self.image_output_dir {
+            cfg.image_output_dir = Some(v);
+        }
         if let Some(v) = self.extract_links {
             cfg.extract_links = v;
         }
@@ -186,6 +192,7 @@ impl JsLiteParseConfig {
                 ImageMode::Placeholder => "placeholder".to_string(),
                 ImageMode::Embed => "embed".to_string(),
             }),
+            image_output_dir: cfg.image_output_dir.clone(),
             extract_links: Some(cfg.extract_links),
             ocr_failure_fatal: Some(cfg.ocr_failure_fatal),
             ocr_hedge_delays_ms: Some(
@@ -428,14 +435,31 @@ pub struct JsParseResult {
     pub pages: Vec<JsParsedPage>,
     pub text: String,
     pub images: Vec<JsExtractedImage>,
+    pub image_error_count: u32,
+}
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsImageRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 #[napi(object)]
 #[derive(Clone)]
 pub struct JsExtractedImage {
     pub id: String,
+    pub name: String,
+    pub path: Option<String>,
     pub page: u32,
+    pub bbox: JsImageRect,
+    pub width: u32,
+    pub height: u32,
+    pub rotation: f64,
     pub format: String,
+    pub duplicate_of: Option<String>,
     pub bytes: napi::bindgen_prelude::Buffer,
 }
 
@@ -499,13 +523,26 @@ impl JsParseResult {
         Self {
             pages: result.pages.iter().map(JsParsedPage::from_rust).collect(),
             text: result.text.clone(),
+            image_error_count: result.image_error_count,
             images: result
                 .images
                 .iter()
                 .map(|img| JsExtractedImage {
                     id: img.id.clone(),
+                    name: img.name.clone(),
+                    path: img.path.clone(),
                     page: img.page,
+                    bbox: JsImageRect {
+                        x: img.bbox.x as f64,
+                        y: img.bbox.y as f64,
+                        width: img.bbox.width as f64,
+                        height: img.bbox.height as f64,
+                    },
+                    width: img.width,
+                    height: img.height,
+                    rotation: img.rotation as f64,
                     format: img.format.clone(),
+                    duplicate_of: img.duplicate_of.clone(),
                     bytes: img.bytes.clone().into(),
                 })
                 .collect(),

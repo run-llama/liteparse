@@ -17,6 +17,126 @@ pub struct ImageBounds {
     pub height: f32,
 }
 
+fn image_object_data(obj: pdfium_sys::FPDF_PAGEOBJECT, decoded: bool) -> Option<Vec<u8>> {
+    let size = unsafe {
+        if decoded {
+            ffi!(FPDFImageObj_GetImageDataDecoded(
+                obj,
+                std::ptr::null_mut(),
+                0
+            ))
+        } else {
+            ffi!(FPDFImageObj_GetImageDataRaw(obj, std::ptr::null_mut(), 0))
+        }
+    };
+    if size == 0 || size > usize::MAX as std::os::raw::c_ulong {
+        return None;
+    }
+    let mut bytes = vec![0u8; size as usize];
+    let written = unsafe {
+        if decoded {
+            ffi!(FPDFImageObj_GetImageDataDecoded(
+                obj,
+                bytes.as_mut_ptr().cast(),
+                size
+            ))
+        } else {
+            ffi!(FPDFImageObj_GetImageDataRaw(
+                obj,
+                bytes.as_mut_ptr().cast(),
+                size
+            ))
+        }
+    };
+    if written == 0 || written > size {
+        return None;
+    }
+    bytes.truncate(written as usize);
+    Some(bytes)
+}
+
+fn image_filters(obj: pdfium_sys::FPDF_PAGEOBJECT) -> Vec<String> {
+    let count = unsafe { ffi!(FPDFImageObj_GetImageFilterCount(obj)) };
+    if count <= 0 {
+        return Vec::new();
+    }
+    (0..count)
+        .filter_map(|index| {
+            let size = unsafe {
+                ffi!(FPDFImageObj_GetImageFilter(
+                    obj,
+                    index,
+                    std::ptr::null_mut(),
+                    0
+                ))
+            };
+            if size == 0 || size > 256 {
+                return None;
+            }
+            let mut bytes = vec![0u8; size as usize];
+            let written = unsafe {
+                ffi!(FPDFImageObj_GetImageFilter(
+                    obj,
+                    index,
+                    bytes.as_mut_ptr().cast(),
+                    size
+                ))
+            };
+            if written == 0 {
+                return None;
+            }
+            let end = bytes
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(bytes.len());
+            std::str::from_utf8(&bytes[..end]).ok().map(str::to_owned)
+        })
+        .collect()
+}
+
+fn is_jpeg(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xff, 0xd8, 0xff]) && bytes.ends_with(&[0xff, 0xd9])
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::is_jpeg;
+
+    #[test]
+    fn validates_complete_jpeg_streams() {
+        assert!(is_jpeg(&[0xff, 0xd8, 0xff, 0xe0, 1, 2, 0xff, 0xd9]));
+        assert!(!is_jpeg(&[0xff, 0xd8, 0xff, 0xe0]));
+        assert!(!is_jpeg(&[0x89, b'P', b'N', b'G', 0xff, 0xd9]));
+    }
+}
+
+/// Metadata for an embedded image page object retained by the extraction
+/// filters. `object_index` is its index among all image objects on the page.
+#[derive(Debug, Clone)]
+pub struct ImageObjectInfo {
+    pub object_index: usize,
+    pub bounds: ImageBounds,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    /// Clockwise page-object rotation in degrees, normalized to `[0, 360)`.
+    pub rotation: f32,
+    /// Original JPEG stream bytes when PDFium reports a directly decodable
+    /// DCT stream and the decoded data has a valid JPEG signature.
+    pub jpeg_bytes: Option<Vec<u8>>,
+    /// Raw encoded stream bytes, used to identify repeated image resources.
+    pub raw_bytes: Option<Vec<u8>>,
+    #[doc(hidden)]
+    pub bits_per_pixel: u32,
+    #[doc(hidden)]
+    pub colorspace: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImageObjects {
+    pub images: Vec<ImageObjectInfo>,
+    pub error_count: u32,
+}
+
 /// One segment of a vector path. Coordinates are in viewport space
 /// (top-left origin, 72 DPI) after the object's matrix has been applied.
 #[derive(Debug, Clone, Copy)]
@@ -204,10 +324,32 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
     /// Filters out images smaller than `min_size_pt` and images covering more than
     /// `max_page_coverage` fraction of the page.
     pub fn image_bounds(&self, min_size_pt: f32, max_page_coverage: f32) -> Vec<ImageBounds> {
+        self.image_objects(min_size_pt, max_page_coverage, false)
+            .images
+            .into_iter()
+            .map(|image| image.bounds)
+            .collect()
+    }
+
+    /// Extract metadata for embedded image objects on this page.
+    pub fn image_objects(
+        &self,
+        min_size_pt: f32,
+        max_page_coverage: f32,
+        include_data: bool,
+    ) -> ImageObjects {
         let page_width = self.width();
         let page_height = self.height();
+        let view_box = self.view_box().unwrap_or(RectF {
+            left: 0.0,
+            top: page_height,
+            right: page_width,
+            bottom: 0.0,
+        });
         let obj_count = unsafe { ffi!(FPDFPage_CountObjects(self.handle)) };
         let mut results = Vec::new();
+        let mut error_count = 0;
+        let mut image_index = 0usize;
 
         for i in 0..obj_count {
             let obj = unsafe { ffi!(FPDFPage_GetObject(self.handle, i)) };
@@ -219,6 +361,8 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
             if obj_type != pdfium_sys::FPDF_PAGEOBJ_IMAGE as i32 {
                 continue;
             }
+            let object_index = image_index;
+            image_index += 1;
 
             let mut left: f32 = 0.0;
             let mut bottom: f32 = 0.0;
@@ -234,6 +378,7 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
                 ))
             };
             if ok == 0 {
+                error_count += 1;
                 continue;
             }
 
@@ -247,16 +392,89 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
                 continue;
             }
 
-            // Convert from PDF coords (bottom-left origin) to viewport (top-left origin)
-            results.push(ImageBounds {
-                x: left,
-                y: page_height - top,
-                width: w,
-                height: h,
+            let viewport = self.bounds_to_viewport(
+                &view_box,
+                &RectF {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                },
+            );
+
+            let mut metadata = pdfium_sys::FPDF_IMAGEOBJ_METADATA::default();
+            let metadata_ok = unsafe {
+                ffi!(FPDFImageObj_GetImageMetadata(
+                    obj,
+                    self.handle,
+                    &mut metadata
+                ))
+            };
+            let mut pixel_width = metadata.width;
+            let mut pixel_height = metadata.height;
+            let ok = unsafe {
+                ffi!(FPDFImageObj_GetImagePixelSize(
+                    obj,
+                    &mut pixel_width,
+                    &mut pixel_height
+                ))
+            };
+            if ok == 0 && metadata_ok == 0 {
+                pixel_width = 0;
+                pixel_height = 0;
+                error_count += 1;
+            }
+
+            let mut matrix = pdfium_sys::FS_MATRIX {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e: 0.0,
+                f: 0.0,
+            };
+            let matrix_ok = unsafe { ffi!(FPDFPageObj_GetMatrix(obj, &mut matrix)) };
+            let rotation = if matrix_ok != 0 {
+                matrix.b.atan2(matrix.a).to_degrees().rem_euclid(360.0)
+            } else {
+                0.0
+            };
+
+            let raw_bytes = include_data
+                .then(|| image_object_data(obj, false))
+                .flatten();
+            let jpeg_bytes = if include_data
+                && image_filters(obj)
+                    .iter()
+                    .any(|filter| filter == "DCTDecode")
+            {
+                image_object_data(obj, true).filter(|bytes| is_jpeg(bytes))
+            } else {
+                None
+            };
+
+            results.push(ImageObjectInfo {
+                object_index,
+                bounds: ImageBounds {
+                    x: viewport.left,
+                    y: viewport.top,
+                    width: viewport.right - viewport.left,
+                    height: viewport.bottom - viewport.top,
+                },
+                pixel_width,
+                pixel_height,
+                rotation,
+                jpeg_bytes,
+                raw_bytes,
+                bits_per_pixel: metadata.bits_per_pixel,
+                colorspace: metadata.colorspace,
             });
         }
 
-        results
+        ImageObjects {
+            images: results,
+            error_count,
+        }
     }
 
     /// Extract bounding boxes of filled vector path objects on this page,

@@ -53,7 +53,7 @@ pub(crate) fn extract_pages_from_document(
 }
 
 /// Same as `extract_pages_from_document` but optionally also renders every
-/// raster image object to PNG bytes (when `render_images = true`). Returned
+/// raster image object to bytes (when `render_images = true`). Returned
 /// `ExtractedImage`s carry the same ids the markdown emitter will reference,
 /// so callers can match them up by id. When `render_images = false` the
 /// returned image vec is always empty.
@@ -65,10 +65,12 @@ pub(crate) fn extract_pages_and_images(
     extract_links: bool,
     glyph_resolver: Option<&dyn crate::GlyphResolver>,
     emit_word_boxes: bool,
-) -> Result<(Vec<LitePage>, Vec<ExtractedImage>), LiteParseError> {
+) -> Result<(Vec<LitePage>, Vec<ExtractedImage>, u32), LiteParseError> {
     let page_count = document.page_count();
     let mut pages = Vec::new();
     let mut images: Vec<ExtractedImage> = Vec::new();
+    let mut image_cache: Vec<CachedImage> = Vec::new();
+    let mut image_error_count = 0u32;
 
     for page_index in 0..page_count {
         let page_number = page_index as u32 + 1;
@@ -104,10 +106,18 @@ pub(crate) fn extract_pages_and_images(
         let graphics = extract_page_graphics(&page, &view_box);
         assign_strikethrough(&mut text_items, &graphics);
         let struct_nodes = extract_page_struct_nodes(&page, &view_box);
-        let image_refs = extract_page_image_refs(&page, page_number);
+        let extracted_refs = extract_page_image_refs(&page, page_number, render_images);
+        let mut image_refs = extracted_refs.refs;
+        image_error_count += extracted_refs.error_count;
 
         if render_images && !image_refs.is_empty() {
-            images.extend(render_page_images(&page, page_number, &image_refs));
+            let rendered = render_page_images(&page, page_number, &image_refs, &mut image_cache);
+            image_error_count += rendered.error_count;
+            images.extend(rendered.images);
+            for image_ref in &mut image_refs {
+                image_ref.jpeg_bytes = None;
+                image_ref.raw_bytes = None;
+            }
         }
 
         pages.push(LitePage {
@@ -121,7 +131,7 @@ pub(crate) fn extract_pages_and_images(
         });
     }
 
-    Ok((pages, images))
+    Ok((pages, images, image_error_count))
 }
 
 /// Assign hyperlink URIs to text items whose bbox center falls inside a link
@@ -345,42 +355,116 @@ const IMAGE_MIN_SIZE_PT: f32 = 25.0;
 /// images (scanned pages, watermarks).
 const IMAGE_MAX_COVERAGE: f32 = 0.9;
 
-/// Render every image referenced in `refs` to PNG bytes using
-/// `Page::render_image_object`. Returns one `ExtractedImage` per ref. Used by
-/// the parser only when `ImageMode::Embed` is configured — otherwise the
-/// extraction loop skips this entirely. Failures for individual images are
-/// silently dropped (a malformed embedded image shouldn't fail the whole
-/// parse).
-pub(crate) fn render_page_images(
+/// Extract every image referenced in `refs`, preserving valid JPEG streams and
+/// rendering other images to PNG. Returns one `ExtractedImage` per ref. Used
+/// when `ImageMode::Embed` or an output directory is configured. Failures for
+/// individual images are counted but do not fail the whole parse.
+struct CachedImage {
+    raw_bytes: Vec<u8>,
+    id: String,
+    format: String,
+    bytes: Vec<u8>,
+    width: u32,
+    height: u32,
+    bits_per_pixel: u32,
+    colorspace: i32,
+}
+
+pub(crate) struct RenderedImages {
+    pub images: Vec<ExtractedImage>,
+    pub error_count: u32,
+}
+
+fn render_page_images(
     page: &Page,
     page_number: u32,
     refs: &[ImageRef],
-) -> Vec<ExtractedImage> {
+    cache: &mut Vec<CachedImage>,
+) -> RenderedImages {
     let mut out = Vec::with_capacity(refs.len());
+    let mut error_count = 0;
     for r in refs {
-        let bmp = match page.render_image_object(r.obj_index) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        let w = bmp.width().max(0) as u32;
-        let h = bmp.height().max(0) as u32;
-        if w == 0 || h == 0 {
+        if let Some(raw_bytes) = r.raw_bytes.as_ref()
+            && let Some(cached) = cache.iter().find(|entry| {
+                entry.raw_bytes == *raw_bytes
+                    && entry.width == r.pixel_width
+                    && entry.height == r.pixel_height
+                    && entry.bits_per_pixel == r.bits_per_pixel
+                    && entry.colorspace == r.colorspace
+            })
+        {
+            out.push(ExtractedImage {
+                id: r.id.clone(),
+                name: format!("image_{}.{}", r.id, cached.format),
+                path: None,
+                page: page_number,
+                bbox: r.bbox.clone(),
+                width: r.pixel_width,
+                height: r.pixel_height,
+                rotation: r.rotation,
+                format: cached.format.clone(),
+                duplicate_of: Some(cached.id.clone()),
+                bytes: cached.bytes.clone(),
+            });
             continue;
         }
-        let rgba = bmp.to_rgba();
-        let png = match encode_png(&rgba, w, h) {
-            Ok(p) => p,
-            Err(_) => continue,
+
+        let encoded = if let Some(jpeg) = r.jpeg_bytes.clone() {
+            Ok(("jpg".to_string(), jpeg))
+        } else {
+            let bmp = match page.render_image_object(r.obj_index) {
+                Ok(b) => b,
+                Err(_) => {
+                    error_count += 1;
+                    continue;
+                }
+            };
+            let w = bmp.width().max(0) as u32;
+            let h = bmp.height().max(0) as u32;
+            if w == 0 || h == 0 {
+                error_count += 1;
+                continue;
+            }
+            let rgba = bmp.to_rgba();
+            encode_png(&rgba, w, h).map(|png| ("png".to_string(), png))
+        };
+        let (format, bytes) = match encoded {
+            Ok(value) => value,
+            Err(_) => {
+                error_count += 1;
+                continue;
+            }
         };
         out.push(ExtractedImage {
             id: r.id.clone(),
+            name: format!("image_{}.{}", r.id, format),
+            path: None,
             page: page_number,
             bbox: r.bbox.clone(),
-            format: "png".into(),
-            bytes: png,
+            width: r.pixel_width,
+            height: r.pixel_height,
+            rotation: r.rotation,
+            format: format.clone(),
+            duplicate_of: None,
+            bytes: bytes.clone(),
         });
+        if let Some(raw_bytes) = r.raw_bytes.clone() {
+            cache.push(CachedImage {
+                raw_bytes,
+                id: r.id.clone(),
+                format,
+                bytes,
+                width: r.pixel_width,
+                height: r.pixel_height,
+                bits_per_pixel: r.bits_per_pixel,
+                colorspace: r.colorspace,
+            });
+        }
     }
-    out
+    RenderedImages {
+        images: out,
+        error_count,
+    }
 }
 
 /// Encode RGBA pixel bytes to PNG. Lives here (always-compiled) rather than in
@@ -398,21 +482,48 @@ pub(crate) fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>
 /// page objects), so a later embed pass can pull pixel bytes via
 /// `Page::render_image_object`. IDs are scoped to the page number so they
 /// remain stable across runs.
-fn extract_page_image_refs(page: &Page, page_number: u32) -> Vec<ImageRef> {
-    page.image_bounds(IMAGE_MIN_SIZE_PT, IMAGE_MAX_COVERAGE)
+struct ExtractedImageRefs {
+    refs: Vec<ImageRef>,
+    error_count: u32,
+}
+
+fn extract_page_image_refs(
+    page: &Page,
+    page_number: u32,
+    include_data: bool,
+) -> ExtractedImageRefs {
+    let extracted = page.image_objects(IMAGE_MIN_SIZE_PT, IMAGE_MAX_COVERAGE, include_data);
+    let refs = extracted
+        .images
         .into_iter()
         .enumerate()
-        .map(|(i, b)| ImageRef {
+        .map(|(i, image)| ImageRef {
             id: format!("p{}_{}", page_number, i),
             bbox: Rect {
-                x: b.x,
-                y: b.y,
-                width: b.width,
-                height: b.height,
+                x: image.bounds.x,
+                y: image.bounds.y,
+                width: image.bounds.width,
+                height: image.bounds.height,
             },
-            obj_index: i,
+            obj_index: image.object_index,
+            format: if image.jpeg_bytes.is_some() {
+                "jpg".to_string()
+            } else {
+                "png".to_string()
+            },
+            pixel_width: image.pixel_width,
+            pixel_height: image.pixel_height,
+            rotation: image.rotation,
+            jpeg_bytes: image.jpeg_bytes,
+            raw_bytes: image.raw_bytes,
+            bits_per_pixel: image.bits_per_pixel,
+            colorspace: image.colorspace,
         })
-        .collect()
+        .collect();
+    ExtractedImageRefs {
+        refs,
+        error_count: extracted.error_count,
+    }
 }
 
 /// Extract simplified vector graphics from a page. We keep only what the

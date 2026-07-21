@@ -323,7 +323,10 @@ pub fn classify_page_with_filters(
     let push_interruption = |blocks: &mut Vec<Block>, kind: Interruption| {
         blocks.push(match kind {
             Interruption::Hr => Block::HorizontalRule,
-            Interruption::Figure(r) => Block::Figure { id: r.id },
+            Interruption::Figure(r) => Block::Figure {
+                id: r.id,
+                format: r.format,
+            },
             Interruption::Table(b) => b,
         });
     };
@@ -453,7 +456,10 @@ impl FlowState {
             self.reset_list();
             blocks.push(match kind {
                 Interruption::Hr => Block::HorizontalRule,
-                Interruption::Figure(r) => Block::Figure { id: r.id },
+                Interruption::Figure(r) => Block::Figure {
+                    id: r.id,
+                    format: r.format,
+                },
                 Interruption::Table(b) => b,
             });
         }

@@ -192,20 +192,36 @@ pub struct ImageRef {
     pub id: String,
     pub bbox: Rect,
     pub obj_index: usize,
+    pub format: String,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub rotation: f32,
+    pub jpeg_bytes: Option<Vec<u8>>,
+    pub raw_bytes: Option<Vec<u8>>,
+    pub bits_per_pixel: u32,
+    pub colorspace: i32,
 }
 
 /// A raster image extracted from a page along with its pixel bytes. Surfaced
 /// on `ParseResult.images` only when `ImageMode::Embed` is configured —
 /// otherwise the extraction step skips the render and only `ImageRef`s are
-/// produced. `format` is currently always `"png"` (encoded from the
-/// FPDFImageObj_GetRenderedBitmap output via the same path used for page
-/// screenshots).
+/// produced. Other images are encoded as PNG from PDFium's rendered bitmap.
+/// JPEG streams are preserved without re-encoding when PDFium
+/// exposes a valid directly decoded DCT stream.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExtractedImage {
     pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     pub page: u32,
     pub bbox: Rect,
+    pub width: u32,
+    pub height: u32,
+    pub rotation: f32,
     pub format: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicate_of: Option<String>,
     #[serde(skip)]
     pub bytes: Vec<u8>,
 }
