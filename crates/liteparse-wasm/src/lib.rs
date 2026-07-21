@@ -54,6 +54,7 @@ pub struct LiteParseConfig {
     output_format: Option<String>,
     #[tsify(type = "\"off\" | \"none\" | \"placeholder\" | \"embed\"")]
     image_mode: Option<String>,
+    extract_images: Option<bool>,
     extract_links: Option<bool>,
     ocr_failure_fatal: Option<bool>,
     ocr_hedge_delays_ms: Option<Vec<u64>>,
@@ -129,6 +130,9 @@ impl LiteParseConfig {
                 _ => ImageMode::Placeholder,
             };
         }
+        if let Some(v) = self.extract_images {
+            cfg.extract_images = v;
+        }
         if let Some(v) = self.extract_links {
             cfg.extract_links = v;
         }
@@ -189,6 +193,7 @@ impl LiteParseConfig {
                 ImageMode::Placeholder => "placeholder".into(),
                 ImageMode::Embed => "embed".into(),
             }),
+            extract_images: Some(cfg.extract_images),
             extract_links: Some(cfg.extract_links),
             ocr_failure_fatal: Some(cfg.ocr_failure_fatal),
             ocr_hedge_delays_ms: Some(cfg.ocr_hedge_delays_ms.clone()),

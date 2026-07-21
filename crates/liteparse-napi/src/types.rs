@@ -44,6 +44,8 @@ pub struct JsLiteParseConfig {
     /// (default — emits `![](image_pN_K.png)` references with no bytes), or
     /// "embed" (also returns each image's bytes and metadata on `images`).
     pub image_mode: Option<String>,
+    /// Extract embedded image bytes and metadata (default false).
+    pub extract_images: Option<bool>,
     /// Directory where embedded image files are written. Also enables image
     /// extraction even when `imageMode` is `placeholder`.
     pub image_output_dir: Option<String>,
@@ -135,6 +137,9 @@ impl JsLiteParseConfig {
                 _ => ImageMode::Placeholder,
             };
         }
+        if let Some(v) = self.extract_images {
+            cfg.extract_images = v;
+        }
         if let Some(v) = self.image_output_dir {
             cfg.image_output_dir = Some(v);
         }
@@ -192,6 +197,7 @@ impl JsLiteParseConfig {
                 ImageMode::Placeholder => "placeholder".to_string(),
                 ImageMode::Embed => "embed".to_string(),
             }),
+            extract_images: Some(cfg.extract_images),
             image_output_dir: cfg.image_output_dir.clone(),
             extract_links: Some(cfg.extract_links),
             ocr_failure_fatal: Some(cfg.ocr_failure_fatal),

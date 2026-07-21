@@ -30,6 +30,7 @@ export interface LiteParseNativeConfig {
   dpi?: number;
   outputFormat?: string;
   imageMode?: string;
+  extractImages?: boolean;
   imageOutputDir?: string;
   extractLinks?: boolean;
   preserveVerySmallText?: boolean;

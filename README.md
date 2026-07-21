@@ -180,6 +180,9 @@ lit parse document.pdf --format markdown --image-mode off
 # Extract embedded images to disk and reference them from the markdown
 lit parse document.pdf --format markdown --image-mode embed --image-output-dir ./images
 
+# Extract image bytes and metadata without changing Markdown image handling
+lit parse document.pdf --format json --extract-images
+
 # Emit link text as plain text (no [text](url) syntax)
 lit parse document.pdf --format markdown --no-links
 ```
@@ -196,6 +199,11 @@ Image handling is controlled by `--image-mode`:
 contains each image's `name`, `path`, page bbox, intrinsic pixel dimensions, rotation,
 format, and duplicate relationship; pixel bytes are never embedded in JSON. Identical
 image resources reuse the same output file.
+
+Library callers can opt in with `extract_images: true` (Rust), `extractImages: true`
+(Node/WASM), or `extract_images=True` (Python). It defaults to false. For backward
+compatibility, `image_mode=embed` and a configured image output directory also imply
+extraction; the default placeholder mode alone only discovers lightweight page refs.
 
 > Markdown reconstruction quality varies with document complexity. For the
 > hardest documents (dense tables, multi-column layouts, scans),

@@ -34,6 +34,10 @@ pub struct LiteParseConfig {
     /// Controls how raster images are surfaced in markdown output. `Embed`
     /// also exposes image bytes and metadata to callers.
     pub image_mode: ImageMode,
+    /// Extract embedded image bytes and metadata into `ParseResult.images`.
+    /// Defaults to false. `ImageMode::Embed` and `image_output_dir` also imply
+    /// extraction for backward compatibility.
+    pub extract_images: bool,
     /// Directory where extracted embedded images are written. Setting this
     /// also enables image extraction, independently of `image_mode`.
     pub image_output_dir: Option<String>,
@@ -141,6 +145,7 @@ impl Default for LiteParseConfig {
             quiet: false,
             num_workers: default_num_workers(),
             image_mode: ImageMode::Placeholder,
+            extract_images: false,
             image_output_dir: None,
             extract_links: true,
             ocr_failure_fatal: true,
@@ -266,6 +271,7 @@ mod tests {
         assert!(!c.preserve_very_small_text);
         assert!(!c.quiet);
         assert!(c.password.is_none());
+        assert!(!c.extract_images);
     }
 
     #[test]

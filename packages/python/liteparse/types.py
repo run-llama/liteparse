@@ -58,7 +58,8 @@ class ImageRect:
 class ExtractedImage:
     """An embedded raster image extracted from a page.
 
-    Populated only when the parser was configured with ``image_mode="embed"``.
+    Populated when ``extract_images=True``, ``image_mode="embed"``, or an image
+    output directory is configured.
     The ``id`` matches the reference used in the markdown output
     (e.g. ``![](image_p1_0.png)`` → ``id="p1_0"``).
     """
@@ -138,7 +139,8 @@ class LiteParseConfig:
     password: Optional[str]
     quiet: bool
     num_workers: int
-    image_output_dir: Optional[str]
+    image_output_dir: Optional[str] = None
+    extract_images: bool = False
 
 
 class ParseError(Exception):

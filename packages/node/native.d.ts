@@ -39,6 +39,7 @@ export interface JsLiteParseConfig {
    * "embed" (also returns each image's bytes and metadata on `images`).
    */
   imageMode?: string
+  extractImages?: boolean
   imageOutputDir?: string
   /**
    * Render hyperlink annotations as `[text](url)` in markdown output

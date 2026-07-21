@@ -51,6 +51,12 @@ pub struct ScreenshotResult {
 #[cfg(not(target_arch = "wasm32"))]
 const FONT_DB_DIR_ENV: &str = "LITEPARSE_FONT_DB_DIR";
 
+fn should_extract_images(config: &LiteParseConfig) -> bool {
+    config.extract_images
+        || matches!(config.image_mode, crate::config::ImageMode::Embed)
+        || config.image_output_dir.is_some()
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn write_extracted_images(
     output_dir: &str,
@@ -268,8 +274,7 @@ impl LiteParse {
         // projection (pure Rust) do not touch PDFium, so they can run
         // concurrently with other `LiteParse` calls.
         let password = self.config.password.as_deref();
-        let render_images = matches!(self.config.image_mode, crate::config::ImageMode::Embed)
-            || self.config.image_output_dir.is_some();
+        let render_images = should_extract_images(&self.config);
 
         // Build the OCR engine up front so the renderer knows whether to emit a
         // grayscale buffer (cheaper, for engines that binarize internally) or RGB.
@@ -545,6 +550,30 @@ mod tests {
         let lp = LiteParse::new(cfg);
         assert!(!lp.config().ocr_enabled);
         assert_eq!(lp.config().max_pages, 7);
+    }
+
+    #[test]
+    fn image_extraction_is_opt_in_with_compatibility_implications() {
+        let default = LiteParseConfig::default();
+        assert!(!should_extract_images(&default));
+
+        let explicit = LiteParseConfig {
+            extract_images: true,
+            ..Default::default()
+        };
+        assert!(should_extract_images(&explicit));
+
+        let embed = LiteParseConfig {
+            image_mode: crate::config::ImageMode::Embed,
+            ..Default::default()
+        };
+        assert!(should_extract_images(&embed));
+
+        let output_dir = LiteParseConfig {
+            image_output_dir: Some("images".into()),
+            ..Default::default()
+        };
+        assert!(should_extract_images(&output_dir));
     }
 
     #[test]

@@ -31,6 +31,8 @@ export interface LiteParseConfig {
   outputFormat: OutputFormat;
   /** How to surface raster images in markdown output (default: "placeholder"). */
   imageMode: ImageMode;
+  /** Extract embedded image bytes and metadata (default: false). */
+  extractImages: boolean;
   /** Directory where extracted embedded image files are written. */
   imageOutputDir?: string;
   /** Render hyperlink annotations as `[text](url)` in markdown output (default: true). */
@@ -189,7 +191,7 @@ export interface ExtractedImage {
 export interface ParseResult {
   pages: ParsedPage[];
   text: string;
-  /** Populated only when configured with `imageMode: "embed"`. */
+  /** Populated when image extraction is explicitly or implicitly enabled. */
   images: ExtractedImage[];
   /** Embedded image objects that PDFium could not render or encode. */
   imageErrorCount: number;
@@ -260,6 +262,7 @@ export class LiteParse {
       dpi: userConfig.dpi,
       outputFormat: userConfig.outputFormat,
       imageMode: userConfig.imageMode,
+      extractImages: userConfig.extractImages,
       imageOutputDir: userConfig.imageOutputDir,
       extractLinks: userConfig.extractLinks,
       preserveVerySmallText: userConfig.preserveVerySmallText,
@@ -288,6 +291,7 @@ export class LiteParse {
       dpi: resolved.dpi ?? 150,
       outputFormat: (resolved.outputFormat as OutputFormat) ?? "json",
       imageMode: (resolved.imageMode as ImageMode) ?? "placeholder",
+      extractImages: resolved.extractImages ?? false,
       imageOutputDir: resolved.imageOutputDir ?? undefined,
       extractLinks: resolved.extractLinks ?? true,
       preserveVerySmallText: resolved.preserveVerySmallText ?? false,

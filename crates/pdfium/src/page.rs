@@ -403,41 +403,46 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
             );
 
             let mut metadata = pdfium_sys::FPDF_IMAGEOBJ_METADATA::default();
-            let metadata_ok = unsafe {
-                ffi!(FPDFImageObj_GetImageMetadata(
-                    obj,
-                    self.handle,
-                    &mut metadata
-                ))
-            };
-            let mut pixel_width = metadata.width;
-            let mut pixel_height = metadata.height;
-            let ok = unsafe {
-                ffi!(FPDFImageObj_GetImagePixelSize(
-                    obj,
-                    &mut pixel_width,
-                    &mut pixel_height
-                ))
-            };
-            if ok == 0 && metadata_ok == 0 {
-                pixel_width = 0;
-                pixel_height = 0;
-                error_count += 1;
-            }
+            let (pixel_width, pixel_height, rotation) = if include_data {
+                let metadata_ok = unsafe {
+                    ffi!(FPDFImageObj_GetImageMetadata(
+                        obj,
+                        self.handle,
+                        &mut metadata
+                    ))
+                };
+                let mut pixel_width = metadata.width;
+                let mut pixel_height = metadata.height;
+                let pixel_size_ok = unsafe {
+                    ffi!(FPDFImageObj_GetImagePixelSize(
+                        obj,
+                        &mut pixel_width,
+                        &mut pixel_height
+                    ))
+                };
+                if pixel_size_ok == 0 && metadata_ok == 0 {
+                    pixel_width = 0;
+                    pixel_height = 0;
+                    error_count += 1;
+                }
 
-            let mut matrix = pdfium_sys::FS_MATRIX {
-                a: 1.0,
-                b: 0.0,
-                c: 0.0,
-                d: 1.0,
-                e: 0.0,
-                f: 0.0,
-            };
-            let matrix_ok = unsafe { ffi!(FPDFPageObj_GetMatrix(obj, &mut matrix)) };
-            let rotation = if matrix_ok != 0 {
-                matrix.b.atan2(matrix.a).to_degrees().rem_euclid(360.0)
+                let mut matrix = pdfium_sys::FS_MATRIX {
+                    a: 1.0,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 1.0,
+                    e: 0.0,
+                    f: 0.0,
+                };
+                let matrix_ok = unsafe { ffi!(FPDFPageObj_GetMatrix(obj, &mut matrix)) };
+                let rotation = if matrix_ok != 0 {
+                    matrix.b.atan2(matrix.a).to_degrees().rem_euclid(360.0)
+                } else {
+                    0.0
+                };
+                (pixel_width, pixel_height, rotation)
             } else {
-                0.0
+                (0, 0, 0.0)
             };
 
             let raw_bytes = include_data

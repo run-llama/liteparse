@@ -117,6 +117,7 @@ class LiteParse:
         quiet: Optional[bool] = None,
         num_workers: Optional[int] = None,
         image_mode: Optional[str] = None,
+        extract_images: Optional[bool] = None,
         image_output_dir: Optional[Union[str, Path]] = None,
         extract_links: Optional[bool] = None,
         ocr_failure_fatal: Optional[bool] = None,
@@ -148,6 +149,9 @@ class LiteParse:
             image_output_dir: Directory where extracted embedded images are
                 written. Setting it enables image extraction and returns file
                 names/paths in each ``ExtractedImage``.
+            extract_images: Extract embedded image bytes and metadata. Defaults
+                to False; ``image_mode="embed"`` and ``image_output_dir`` also
+                imply extraction for compatibility.
             ocr_failure_fatal: Whether a systemic OCR failure (every OCR task
                 failed and at least one was a text-sparse page) aborts the whole
                 parse (default: True). Set False to keep already-recovered native
@@ -202,6 +206,8 @@ class LiteParse:
             kwargs["num_workers"] = num_workers
         if image_mode is not None:
             kwargs["image_mode"] = image_mode
+        if extract_images is not None:
+            kwargs["extract_images"] = extract_images
         if image_output_dir is not None:
             kwargs["image_output_dir"] = str(image_output_dir)
         if extract_links is not None:
@@ -365,6 +371,8 @@ class LiteParse:
             password=cfg.password,
             quiet=cfg.quiet,
             num_workers=cfg.num_workers,
+            image_output_dir=cfg.image_output_dir,
+            extract_images=cfg.extract_images,
         )
 
     def __repr__(self) -> str:

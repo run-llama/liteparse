@@ -74,6 +74,9 @@ images, and links reconstructed from the spatial layout. Set
 
 - `image_mode` (`ImageMode::Placeholder` default | `Off` | `Embed`) — how raster
   images are surfaced in the output.
+- `extract_images` (default `false`) — return embedded image bytes and metadata
+  without changing Markdown image handling. `ImageMode::Embed` remains an
+  extraction opt-in for backward compatibility.
 - `image_output_dir` — write extracted image files and return their names/paths;
   setting it enables extraction even without `ImageMode::Embed`. Duplicate image
   resources reuse the same file.
@@ -86,6 +89,7 @@ use liteparse::config::{ImageMode, LiteParseConfig, OutputFormat};
 let config = LiteParseConfig {
     output_format: OutputFormat::Markdown,
     image_mode: ImageMode::Placeholder,
+    extract_images: true,
     image_output_dir: Some("./images".into()),
     extract_links: true,
     ..Default::default()
