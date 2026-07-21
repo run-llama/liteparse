@@ -86,6 +86,10 @@ program
     "--complexity",
     "Include per-page complexity signals in JSON output",
   )
+  .option(
+    "--extract-vector-graphics",
+    "Include page-scoped vector shapes and merged horizontal/vertical lines",
+  )
   .action(async (file: string, opts: Record<string, unknown>) => {
     try {
       const config: Partial<LiteParseConfig> = {};
@@ -117,6 +121,7 @@ program
       if (opts.quiet) config.quiet = true;
       if (opts.numWorkers) config.numWorkers = opts.numWorkers as number;
       if (opts.complexity) config.includeComplexity = true;
+      if (opts.extractVectorGraphics) config.extractVectorGraphics = true;
 
       // Default CLI output to text (library defaults to json)
       if (!config.outputFormat) config.outputFormat = "text";
@@ -134,6 +139,7 @@ program
                   height: p.height,
                   text: p.text,
                   textItems: p.textItems,
+                  ...(p.vectorGraphics ? { vectorGraphics: p.vectorGraphics } : {}),
                 })),
               },
               null,
@@ -313,6 +319,10 @@ program
   .option("--password <password>", "Password for encrypted documents")
   .option("-q, --quiet", "Suppress progress output")
   .option("--num-workers <n>", "Number of concurrent OCR workers", parseInt)
+  .option(
+    "--extract-vector-graphics",
+    "Include page-scoped vector shapes and merged horizontal/vertical lines",
+  )
   .action(
     async (
       inputDir: string,
@@ -334,6 +344,7 @@ program
         if (opts.password) config.password = opts.password as string;
         if (opts.quiet) config.quiet = true;
         if (opts.numWorkers) config.numWorkers = opts.numWorkers as number;
+        if (opts.extractVectorGraphics) config.extractVectorGraphics = true;
 
         const parser = new LiteParse(config);
         const outExt = format === "json" ? ".json" : format === "markdown" ? ".md" : ".txt";
@@ -390,6 +401,7 @@ program
                         height: p.height,
                         text: p.text,
                         textItems: p.textItems,
+                        ...(p.vectorGraphics ? { vectorGraphics: p.vectorGraphics } : {}),
                       })),
                     },
                     null,

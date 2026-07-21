@@ -17,6 +17,9 @@ from .types import (
     ScreenshotResult,
     TextItem,
     WordBox,
+    VectorGraphics,
+    VectorLine,
+    VectorShape,
 )
 
 
@@ -82,6 +85,7 @@ def _convert_native_result(native_result: Any) -> ParseResult:
             for item in native_page.text_items
         ]
         native_complexity = getattr(native_page, "complexity", None)
+        native_vectors = getattr(native_page, "vector_graphics", None)
         pages.append(
             ParsedPage(
                 page_num=native_page.page_num,
@@ -93,6 +97,37 @@ def _convert_native_result(native_result: Any) -> ParseResult:
                 complexity=(
                     _convert_complexity(native_complexity)
                     if native_complexity is not None
+                    else None
+                ),
+                vector_graphics=(
+                    VectorGraphics(
+                        shapes=[
+                            VectorShape(
+                                bbox=(s.bbox.x, s.bbox.y, s.bbox.width, s.bbox.height),
+                                stroke=s.stroke,
+                                stroke_color=s.stroke_color,
+                                fill=s.fill,
+                                fill_color=s.fill_color,
+                                has_curve=s.has_curve,
+                            )
+                            for s in native_vectors.shapes
+                        ],
+                        lines=[
+                            VectorLine(
+                                x1=l.x1,
+                                y1=l.y1,
+                                x2=l.x2,
+                                y2=l.y2,
+                                stroke=l.stroke,
+                                stroke_width=l.stroke_width,
+                                stroke_color=l.stroke_color,
+                                fill=l.fill,
+                                fill_color=l.fill_color,
+                            )
+                            for l in native_vectors.lines
+                        ],
+                    )
+                    if native_vectors is not None
                     else None
                 ),
             )
@@ -150,6 +185,7 @@ class LiteParse:
         crop_box: Optional[Tuple[float, float, float, float]] = None,
         skip_diagonal_text: Optional[bool] = None,
         include_complexity: Optional[bool] = None,
+        extract_vector_graphics: Optional[bool] = None,
     ):
         """
         Initialize LiteParse parser.
@@ -200,6 +236,8 @@ class LiteParse:
                 ``ParsedPage.complexity`` (the same :meth:`is_complex` returns).
                 Default False; enabling it runs an extra vector-text detection
                 pass.
+            extract_vector_graphics: Expose page-scoped vector shapes and
+                merged horizontal/vertical line segments. Default False.
         """
         kwargs = {}
         if ocr_enabled is not None:
@@ -244,6 +282,8 @@ class LiteParse:
             kwargs["skip_diagonal_text"] = skip_diagonal_text
         if include_complexity is not None:
             kwargs["include_complexity"] = include_complexity
+        if extract_vector_graphics is not None:
+            kwargs["extract_vector_graphics"] = extract_vector_graphics
 
         self._native = _NativeLiteParse(**kwargs)
 
@@ -384,6 +424,7 @@ class LiteParse:
             crop_box=cfg.crop_box,
             skip_diagonal_text=cfg.skip_diagonal_text,
             include_complexity=cfg.include_complexity,
+            extract_vector_graphics=cfg.extract_vector_graphics,
         )
 
     def __repr__(self) -> str:

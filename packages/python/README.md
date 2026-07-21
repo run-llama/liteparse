@@ -58,6 +58,7 @@ parser = LiteParse(
     output_format="json",          # "json" | "text" | "markdown"
     image_mode="placeholder",      # Markdown image handling: "placeholder" | "off" | "embed"
     extract_links=True,            # Render [text](url) links in markdown output
+    extract_vector_graphics=False, # Opt-in shapes + merged H/V lines per page
     preserve_very_small_text=False, # Keep tiny text
     password=None,                 # Password for protected documents
     quiet=False,                   # Suppress progress output

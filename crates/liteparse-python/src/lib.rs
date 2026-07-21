@@ -121,6 +121,109 @@ struct PyParsedPage {
     text_items: Vec<PyTextItem>,
     #[pyo3(get)]
     complexity: Option<PyPageComplexityStats>,
+    #[pyo3(get)]
+    vector_graphics: Option<PyVectorGraphics>,
+}
+
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+struct PyRect {
+    #[pyo3(get)]
+    x: f64,
+    #[pyo3(get)]
+    y: f64,
+    #[pyo3(get)]
+    width: f64,
+    #[pyo3(get)]
+    height: f64,
+}
+
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+struct PyVectorShape {
+    #[pyo3(get)]
+    bbox: PyRect,
+    #[pyo3(get)]
+    stroke: bool,
+    #[pyo3(get)]
+    stroke_color: Option<String>,
+    #[pyo3(get)]
+    fill: bool,
+    #[pyo3(get)]
+    fill_color: Option<String>,
+    #[pyo3(get)]
+    has_curve: bool,
+}
+
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+struct PyVectorLine {
+    #[pyo3(get)]
+    x1: f64,
+    #[pyo3(get)]
+    y1: f64,
+    #[pyo3(get)]
+    x2: f64,
+    #[pyo3(get)]
+    y2: f64,
+    #[pyo3(get)]
+    stroke: bool,
+    #[pyo3(get)]
+    stroke_width: Option<f64>,
+    #[pyo3(get)]
+    stroke_color: Option<String>,
+    #[pyo3(get)]
+    fill: bool,
+    #[pyo3(get)]
+    fill_color: Option<String>,
+}
+
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+struct PyVectorGraphics {
+    #[pyo3(get)]
+    shapes: Vec<PyVectorShape>,
+    #[pyo3(get)]
+    lines: Vec<PyVectorLine>,
+}
+
+impl PyVectorGraphics {
+    fn from_rust(v: liteparse::types::VectorGraphics) -> Self {
+        Self {
+            shapes: v
+                .shapes
+                .into_iter()
+                .map(|s| PyVectorShape {
+                    bbox: PyRect {
+                        x: s.bbox.x as f64,
+                        y: s.bbox.y as f64,
+                        width: s.bbox.width as f64,
+                        height: s.bbox.height as f64,
+                    },
+                    stroke: s.stroke,
+                    stroke_color: s.stroke_color,
+                    fill: s.fill,
+                    fill_color: s.fill_color,
+                    has_curve: s.has_curve,
+                })
+                .collect(),
+            lines: v
+                .lines
+                .into_iter()
+                .map(|l| PyVectorLine {
+                    x1: l.x1 as f64,
+                    y1: l.y1 as f64,
+                    x2: l.x2 as f64,
+                    y2: l.y2 as f64,
+                    stroke: l.stroke,
+                    stroke_width: l.stroke_width.map(f64::from),
+                    stroke_color: l.stroke_color,
+                    fill: l.fill,
+                    fill_color: l.fill_color,
+                })
+                .collect(),
+        }
+    }
 }
 
 #[pymethods]
@@ -153,6 +256,7 @@ impl PyParsedPage {
                 .complexity
                 .as_ref()
                 .map(PyPageComplexityStats::from_rust),
+            vector_graphics: page.vector_graphics.map(PyVectorGraphics::from_rust),
         }
     }
 }
@@ -445,6 +549,8 @@ struct PyLiteParseConfig {
     skip_diagonal_text: bool,
     #[pyo3(get)]
     include_complexity: bool,
+    #[pyo3(get)]
+    extract_vector_graphics: bool,
 }
 
 #[pymethods]
@@ -496,6 +602,7 @@ impl PyLiteParseConfig {
                 .map(|c| (c.top, c.right, c.bottom, c.left)),
             skip_diagonal_text: cfg.skip_diagonal_text,
             include_complexity: cfg.include_complexity,
+            extract_vector_graphics: cfg.extract_vector_graphics,
         }
     }
 }
@@ -537,6 +644,7 @@ impl LiteParse {
         crop_box = None,
         skip_diagonal_text = None,
         include_complexity = None,
+        extract_vector_graphics = None,
     ))]
     fn new(
         ocr_language: Option<String>,
@@ -560,6 +668,7 @@ impl LiteParse {
         crop_box: Option<(f32, f32, f32, f32)>,
         skip_diagonal_text: Option<bool>,
         include_complexity: Option<bool>,
+        extract_vector_graphics: Option<bool>,
     ) -> PyResult<Self> {
         let mut cfg = LiteParseConfig::default();
         if let Some(v) = ocr_language {
@@ -637,6 +746,9 @@ impl LiteParse {
         }
         if let Some(v) = include_complexity {
             cfg.include_complexity = v;
+        }
+        if let Some(v) = extract_vector_graphics {
+            cfg.extract_vector_graphics = v;
         }
 
         let inner = liteparse::parser::LiteParse::new(cfg.clone());
@@ -814,7 +926,39 @@ fn _liteparse(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyScreenshotResult>()?;
     m.add_class::<PyPageComplexityStats>()?;
     m.add_class::<PyLayoutComplexityStats>()?;
+    m.add_class::<PyRect>()?;
+    m.add_class::<PyVectorShape>()?;
+    m.add_class::<PyVectorLine>()?;
+    m.add_class::<PyVectorGraphics>()?;
     m.add_function(wrap_pyfunction!(run_cli, m)?)?;
     m.add_function(wrap_pyfunction!(search_items, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod vector_graphics_tests {
+    use super::*;
+
+    #[test]
+    fn converts_vector_graphics_to_python_shape() {
+        let rust = liteparse::types::VectorGraphics {
+            shapes: vec![liteparse::types::VectorShape {
+                bbox: liteparse::types::Rect {
+                    x: 1.0,
+                    y: 2.0,
+                    width: 3.0,
+                    height: 4.0,
+                },
+                stroke: false,
+                stroke_color: None,
+                fill: true,
+                fill_color: Some("ffffffff".into()),
+                has_curve: false,
+            }],
+            lines: vec![],
+        };
+        let py = PyVectorGraphics::from_rust(rust);
+        assert_eq!(py.shapes[0].bbox.height, 4.0);
+        assert_eq!(py.shapes[0].fill_color.as_deref(), Some("ffffffff"));
+    }
 }

@@ -159,6 +159,9 @@ lit parse document.pdf --target-pages "1-5,10,15-20"
 # Parse without OCR
 lit parse document.pdf --no-ocr
 
+# Include page-scoped vector path data in JSON
+lit parse document.pdf --format json --extract-vector-graphics
+
 # Parse a remote PDF
 curl -sL https://example.com/report.pdf | lit parse -
 ```
@@ -196,6 +199,25 @@ Image handling is controlled by `--image-mode`:
 > hardest documents (dense tables, multi-column layouts, scans),
 > [LlamaParse](https://developers.llamaindex.ai/python/cloud/llamaparse/?utm_source=github&utm_medium=liteparse)
 > remains the most accurate option.
+
+### Vector Graphics
+
+Vector path output is opt-in because path-heavy PDFs can produce large payloads.
+Enable it with `--extract-vector-graphics`, Rust/Python
+`extract_vector_graphics = true`, or JavaScript/WASM
+`extractVectorGraphics: true`. Each page then includes `vector_graphics`
+(`vectorGraphics` in JavaScript) with:
+
+- `shapes`: path bounding box, stroke/fill paint state and ARGB colors, and
+  whether the path contains a Bezier curve.
+- `lines`: compatible horizontal/vertical segments merged using stroke width
+  and paint colors, with top-left 72-DPI viewport coordinates.
+
+The representation follows LlamaParse PDFium path extraction; LiteParse calls
+the shape rectangle `bbox` rather than PDFium's `coords`, and uses `width` /
+`height` rather than `w` / `h`. The field is absent (or `None`/`undefined`) by
+default. Diagonal and curved segments are represented by their parent shape but
+are not emitted as lines.
 
 ### Check Complexity
 
@@ -261,6 +283,7 @@ Options:
       --dpi <dpi>              Rendering DPI [default: 150]
       --image-mode <mode>      Markdown image handling: off|placeholder|embed [default: placeholder]
       --image-output-dir <dir> Where to write images when --image-mode embed
+      --extract-vector-graphics Include page vector shapes and merged H/V lines
       --no-links               Emit link anchor text as plain text (no [text](url)) in markdown
       --preserve-small-text    Keep very small text
       --password <password>    Password for encrypted documents

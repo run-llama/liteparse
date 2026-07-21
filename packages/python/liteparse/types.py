@@ -47,6 +47,37 @@ class ParsedPage:
     #: returns). Populated only when parsing with ``include_complexity=True``;
     #: ``None`` otherwise.
     complexity: Optional[PageComplexityStats] = None
+    #: Present only when parsing with ``extract_vector_graphics=True``.
+    vector_graphics: Optional[VectorGraphics] = None
+
+
+@dataclass
+class VectorShape:
+    bbox: Tuple[float, float, float, float]
+    stroke: bool
+    stroke_color: Optional[str]
+    fill: bool
+    fill_color: Optional[str]
+    has_curve: bool
+
+
+@dataclass
+class VectorLine:
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    stroke: bool
+    stroke_width: Optional[float]
+    stroke_color: Optional[str]
+    fill: bool
+    fill_color: Optional[str]
+
+
+@dataclass
+class VectorGraphics:
+    shapes: List[VectorShape]
+    lines: List[VectorLine]
 
 
 @dataclass
@@ -164,6 +195,7 @@ class LiteParseConfig:
     crop_box: Optional[Tuple[float, float, float, float]]
     skip_diagonal_text: bool
     include_complexity: bool
+    extract_vector_graphics: bool
 
 
 class ParseError(Exception):

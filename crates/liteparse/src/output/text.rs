@@ -24,6 +24,7 @@ mod tests {
             projected_lines: vec![],
             regions: crate::types::Region::default(),
             graphics: vec![],
+            vector_graphics: None,
             figures: vec![],
             struct_nodes: vec![],
             image_refs: vec![],

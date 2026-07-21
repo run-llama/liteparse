@@ -1,5 +1,5 @@
 use crate::ocr_merge::PageComplexityStats;
-use crate::types::ParsedPage;
+use crate::types::{ParsedPage, VectorGraphics};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -26,6 +26,8 @@ pub(crate) struct JsonPage {
     pub text_items: Vec<JsonTextItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub complexity: Option<PageComplexityStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_graphics: Option<VectorGraphics>,
 }
 
 #[derive(Debug, Serialize)]
@@ -58,6 +60,7 @@ pub(crate) fn build_json(pages: &[ParsedPage]) -> ParseResultJson {
                     })
                     .collect(),
                 complexity: page.complexity.clone(),
+                vector_graphics: page.vector_graphics.clone(),
             })
             .collect(),
     }
@@ -99,6 +102,7 @@ mod tests {
             projected_lines: vec![],
             regions: crate::types::Region::default(),
             graphics: vec![],
+            vector_graphics: None,
             figures: vec![],
             struct_nodes: vec![],
             image_refs: vec![],
@@ -133,5 +137,33 @@ mod tests {
     fn test_build_json_empty() {
         let j = build_json(&[]);
         assert!(j.pages.is_empty());
+    }
+
+    #[test]
+    fn vector_graphics_is_absent_by_default_and_serialized_when_present() {
+        let default_json = format_json(&[page(vec![])]).unwrap();
+        assert!(!default_json.contains("vector_graphics"));
+
+        let mut with_vectors = page(vec![]);
+        with_vectors.vector_graphics = Some(VectorGraphics {
+            shapes: vec![crate::types::VectorShape {
+                bbox: crate::types::Rect {
+                    x: 1.0,
+                    y: 2.0,
+                    width: 3.0,
+                    height: 4.0,
+                },
+                stroke: true,
+                stroke_color: Some("ff000000".into()),
+                fill: false,
+                fill_color: None,
+                has_curve: true,
+            }],
+            lines: vec![],
+        });
+        let enabled_json = format_json(&[with_vectors]).unwrap();
+        assert!(enabled_json.contains("\"vector_graphics\""));
+        assert!(enabled_json.contains("\"has_curve\": true"));
+        assert!(enabled_json.contains("\"stroke_color\": \"ff000000\""));
     }
 }

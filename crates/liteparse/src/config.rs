@@ -76,6 +76,10 @@ pub struct LiteParseConfig {
     /// These are the same signals the standalone `is_complex` API returns.
     /// Default `false`.
     pub include_complexity: bool,
+    /// Expose page-scoped vector path data (`shapes` and merged horizontal /
+    /// vertical `lines`) in parse results. Default `false`; path objects are
+    /// still inspected internally for layout detection when disabled.
+    pub extract_vector_graphics: bool,
 }
 
 /// A page sub-region expressed as the fraction cropped from each side.
@@ -151,6 +155,7 @@ impl Default for LiteParseConfig {
             crop_box: None,
             skip_diagonal_text: false,
             include_complexity: false,
+            extract_vector_graphics: false,
         }
     }
 }

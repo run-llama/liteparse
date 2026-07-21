@@ -2910,6 +2910,7 @@ pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
                 projected_lines,
                 regions,
                 graphics: page.graphics,
+                vector_graphics: page.vector_graphics,
                 figures,
                 struct_nodes: page.struct_nodes,
                 image_refs: page.image_refs,
@@ -5001,6 +5002,7 @@ mod tests {
             page_width: 612.0,
             page_height: 792.0,
             graphics: Vec::new(),
+            vector_graphics: None,
             text_items: Vec::new(),
             struct_nodes: Vec::new(),
             image_refs: Vec::new(),
@@ -5303,6 +5305,7 @@ mod tests {
             page_height: 792.0,
             text_items: Vec::new(),
             graphics: Vec::new(),
+            vector_graphics: None,
             struct_nodes: Vec::new(),
             image_refs: Vec::new(),
         }];
@@ -5340,6 +5343,7 @@ mod tests {
                 },
             ],
             graphics: Vec::new(),
+            vector_graphics: None,
             struct_nodes: Vec::new(),
             image_refs: Vec::new(),
         }];
@@ -5400,6 +5404,7 @@ mod tests {
                 },
             ],
             graphics: Vec::new(),
+            vector_graphics: None,
             struct_nodes: Vec::new(),
             image_refs: Vec::new(),
         }];
@@ -5440,6 +5445,7 @@ mod tests {
                 },
             ],
             graphics: Vec::new(),
+            vector_graphics: None,
             struct_nodes: Vec::new(),
             image_refs: Vec::new(),
         }];

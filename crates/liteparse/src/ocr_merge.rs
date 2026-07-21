@@ -1162,6 +1162,7 @@ mod tests {
             page_height: 100.0,
             text_items: Vec::new(),
             graphics: Vec::new(),
+            vector_graphics: None,
             struct_nodes: Vec::new(),
             image_refs: Vec::new(),
         }
@@ -1194,6 +1195,7 @@ mod tests {
                 ..Default::default()
             }],
             graphics: Vec::new(),
+            vector_graphics: None,
             struct_nodes: Vec::new(),
             image_refs: Vec::new(),
         }
@@ -1217,6 +1219,7 @@ mod tests {
                 ..Default::default()
             }],
             graphics: Vec::new(),
+            vector_graphics: None,
             struct_nodes: Vec::new(),
             image_refs: Vec::new(),
         }

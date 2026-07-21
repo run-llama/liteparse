@@ -4,7 +4,9 @@ use napi_derive::napi;
 
 use liteparse::config::{CropBox, ImageMode, LiteParseConfig, OutputFormat};
 use liteparse::parser::ParseResult;
-use liteparse::types::{GraphicPrimitive, Page, ParsedPage, Rect, TextItem, WordBox};
+use liteparse::types::{
+    GraphicPrimitive, Page, ParsedPage, Rect, TextItem, VectorGraphics, WordBox,
+};
 
 // ---------------------------------------------------------------------------
 // Config
@@ -70,6 +72,8 @@ pub struct JsLiteParseConfig {
     /// page as `ParsedPage.complexity` (the same signals `isComplex` returns).
     /// Default false; enabling it runs an extra vector-text detection pass.
     pub include_complexity: Option<bool>,
+    /// Expose page-scoped vector path extraction. Default false.
+    pub extract_vector_graphics: Option<bool>,
 }
 
 /// A page sub-region as the fraction cropped from each side (top-left origin,
@@ -162,6 +166,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.include_complexity {
             cfg.include_complexity = v;
         }
+        if let Some(v) = self.extract_vector_graphics {
+            cfg.extract_vector_graphics = v;
+        }
         cfg
     }
 
@@ -210,6 +217,7 @@ impl JsLiteParseConfig {
             }),
             skip_diagonal_text: Some(cfg.skip_diagonal_text),
             include_complexity: Some(cfg.include_complexity),
+            extract_vector_graphics: Some(cfg.extract_vector_graphics),
         }
     }
 }
@@ -392,6 +400,7 @@ impl JsPageInput {
                 .as_ref()
                 .map(|gs| gs.iter().filter_map(JsGraphic::to_rust).collect())
                 .unwrap_or_default(),
+            vector_graphics: None,
             struct_nodes: Vec::new(),
             image_refs: Vec::new(),
         }
@@ -412,6 +421,87 @@ pub struct JsParsedPage {
     pub markdown: String,
     pub text_items: Vec<JsTextItem>,
     pub complexity: Option<JsPageComplexityStats>,
+    pub vector_graphics: Option<JsVectorGraphics>,
+}
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsVectorShape {
+    pub bbox: JsRect,
+    pub stroke: bool,
+    pub stroke_color: Option<String>,
+    pub fill: bool,
+    pub fill_color: Option<String>,
+    pub has_curve: bool,
+}
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsVectorLine {
+    pub x1: f64,
+    pub y1: f64,
+    pub x2: f64,
+    pub y2: f64,
+    pub stroke: bool,
+    pub stroke_width: Option<f64>,
+    pub stroke_color: Option<String>,
+    pub fill: bool,
+    pub fill_color: Option<String>,
+}
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsVectorGraphics {
+    pub shapes: Vec<JsVectorShape>,
+    pub lines: Vec<JsVectorLine>,
+}
+
+impl JsVectorGraphics {
+    fn from_rust(value: &VectorGraphics) -> Self {
+        Self {
+            shapes: value
+                .shapes
+                .iter()
+                .map(|s| JsVectorShape {
+                    bbox: JsRect {
+                        x: s.bbox.x as f64,
+                        y: s.bbox.y as f64,
+                        width: s.bbox.width as f64,
+                        height: s.bbox.height as f64,
+                    },
+                    stroke: s.stroke,
+                    stroke_color: s.stroke_color.clone(),
+                    fill: s.fill,
+                    fill_color: s.fill_color.clone(),
+                    has_curve: s.has_curve,
+                })
+                .collect(),
+            lines: value
+                .lines
+                .iter()
+                .map(|l| JsVectorLine {
+                    x1: l.x1 as f64,
+                    y1: l.y1 as f64,
+                    x2: l.x2 as f64,
+                    y2: l.y2 as f64,
+                    stroke: l.stroke,
+                    stroke_width: l.stroke_width.map(f64::from),
+                    stroke_color: l.stroke_color.clone(),
+                    fill: l.fill,
+                    fill_color: l.fill_color.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 impl JsParsedPage {
@@ -427,6 +517,10 @@ impl JsParsedPage {
                 .complexity
                 .as_ref()
                 .map(JsPageComplexityStats::from_rust),
+            vector_graphics: page
+                .vector_graphics
+                .as_ref()
+                .map(JsVectorGraphics::from_rust),
         }
     }
 }
@@ -560,5 +654,44 @@ impl JsParseResult {
                 })
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod vector_graphics_tests {
+    use super::*;
+
+    #[test]
+    fn converts_vector_graphics_to_js_shape() {
+        let rust = VectorGraphics {
+            shapes: vec![liteparse::types::VectorShape {
+                bbox: Rect {
+                    x: 1.0,
+                    y: 2.0,
+                    width: 3.0,
+                    height: 4.0,
+                },
+                stroke: true,
+                stroke_color: Some("ff112233".into()),
+                fill: false,
+                fill_color: None,
+                has_curve: true,
+            }],
+            lines: vec![liteparse::types::VectorLine {
+                x1: 1.0,
+                y1: 2.0,
+                x2: 3.0,
+                y2: 2.0,
+                stroke: true,
+                stroke_width: Some(0.5),
+                stroke_color: Some("ff112233".into()),
+                fill: false,
+                fill_color: None,
+            }],
+        };
+        let js = JsVectorGraphics::from_rust(&rust);
+        assert_eq!(js.shapes[0].bbox.width, 3.0);
+        assert!(js.shapes[0].has_curve);
+        assert_eq!(js.lines[0].stroke_width, Some(0.5));
     }
 }

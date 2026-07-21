@@ -68,6 +68,7 @@ All optional, camelCase:
 | `outputFormat` | `"json" \| "text" \| "markdown"` | `"json"` | Output format; `"markdown"` returns rendered Markdown on `result.text` |
 | `imageMode` | `"off" \| "placeholder" \| "embed"` | `"placeholder"` | How raster images are surfaced in markdown output |
 | `extractLinks` | `boolean` | `true` | Render hyperlink annotations as `[text](url)` in markdown output |
+| `extractVectorGraphics` | `boolean` | `false` | Include page-scoped shapes and merged horizontal/vertical lines |
 | `preserveVerySmallText` | `boolean` | `false` | Keep tiny text that's normally filtered |
 | `password` | `string` | — | Password for protected PDFs |
 | `quiet` | `boolean` | `false` | Suppress progress logging |

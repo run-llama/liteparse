@@ -126,6 +126,9 @@ struct ParseCommand {
     /// it runs the extra vector-text detection pass.
     #[arg(long)]
     complexity: bool,
+    /// Include page-scoped vector shapes and merged horizontal/vertical lines.
+    #[arg(long)]
+    extract_vector_graphics: bool,
 }
 
 #[derive(Args, Debug)]
@@ -219,6 +222,9 @@ struct BatchParseCommand {
     /// page of JSON output. Off by default.
     #[arg(long)]
     complexity: bool,
+    /// Include page-scoped vector shapes and merged horizontal/vertical lines.
+    #[arg(long)]
+    extract_vector_graphics: bool,
 }
 
 #[derive(Args, Debug)]
@@ -337,6 +343,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 image_mode,
                 extract_links: !cmd.no_links,
                 include_complexity: cmd.complexity,
+                extract_vector_graphics: cmd.extract_vector_graphics,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {
@@ -442,6 +449,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ocr_server_url: cmd.ocr_server_url,
                 ocr_server_headers: cmd.ocr_server_headers,
                 include_complexity: cmd.complexity,
+                extract_vector_graphics: cmd.extract_vector_graphics,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {

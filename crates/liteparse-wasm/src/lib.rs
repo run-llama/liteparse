@@ -72,6 +72,8 @@ pub struct LiteParseConfig {
     /// page as `ParsedPage.complexity` (the same signals `isComplex` returns).
     /// Default false; enabling it runs an extra vector-text detection pass.
     include_complexity: Option<bool>,
+    /// Expose page-scoped vector shapes and merged H/V line segments.
+    extract_vector_graphics: Option<bool>,
 }
 
 /// A page sub-region as the fraction cropped from each side (top-left origin,
@@ -168,6 +170,9 @@ impl LiteParseConfig {
         if let Some(v) = self.include_complexity {
             cfg.include_complexity = v;
         }
+        if let Some(v) = self.extract_vector_graphics {
+            cfg.extract_vector_graphics = v;
+        }
         cfg.num_workers = 1;
         Ok(cfg)
     }
@@ -211,6 +216,7 @@ impl LiteParseConfig {
             }),
             skip_diagonal_text: Some(cfg.skip_diagonal_text),
             include_complexity: Some(cfg.include_complexity),
+            extract_vector_graphics: Some(cfg.extract_vector_graphics),
         }
     }
 }
@@ -265,6 +271,53 @@ pub struct ParsedPage {
     pub text_items: Vec<TextItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub complexity: Option<PageComplexityStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_graphics: Option<VectorGraphics>,
+}
+
+#[derive(Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct VectorGraphics {
+    pub shapes: Vec<VectorShape>,
+    pub lines: Vec<VectorLine>,
+}
+
+#[derive(Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct VectorShape {
+    pub bbox: VectorRect,
+    pub stroke: bool,
+    pub stroke_color: Option<String>,
+    pub fill: bool,
+    pub fill_color: Option<String>,
+    pub has_curve: bool,
+}
+
+#[derive(Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct VectorRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+#[derive(Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct VectorLine {
+    pub x1: f32,
+    pub y1: f32,
+    pub x2: f32,
+    pub y2: f32,
+    pub stroke: bool,
+    pub stroke_width: Option<f32>,
+    pub stroke_color: Option<String>,
+    pub fill: bool,
+    pub fill_color: Option<String>,
 }
 
 #[derive(Serialize, Tsify)]
@@ -503,6 +556,40 @@ impl LiteParse {
                     })
                     .collect(),
                 complexity: p.complexity.as_ref().map(PageComplexityStats::from_rust),
+                vector_graphics: p.vector_graphics.as_ref().map(|v| VectorGraphics {
+                    shapes: v
+                        .shapes
+                        .iter()
+                        .map(|s| VectorShape {
+                            bbox: VectorRect {
+                                x: s.bbox.x,
+                                y: s.bbox.y,
+                                width: s.bbox.width,
+                                height: s.bbox.height,
+                            },
+                            stroke: s.stroke,
+                            stroke_color: s.stroke_color.clone(),
+                            fill: s.fill,
+                            fill_color: s.fill_color.clone(),
+                            has_curve: s.has_curve,
+                        })
+                        .collect(),
+                    lines: v
+                        .lines
+                        .iter()
+                        .map(|l| VectorLine {
+                            x1: l.x1,
+                            y1: l.y1,
+                            x2: l.x2,
+                            y2: l.y2,
+                            stroke: l.stroke,
+                            stroke_width: l.stroke_width,
+                            stroke_color: l.stroke_color.clone(),
+                            fill: l.fill,
+                            fill_color: l.fill_color.clone(),
+                        })
+                        .collect(),
+                }),
             })
             .collect();
 

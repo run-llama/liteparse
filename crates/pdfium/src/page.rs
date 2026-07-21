@@ -892,3 +892,53 @@ impl Drop for Page<'_, '_> {
         unsafe { ffi!(FPDF_ClosePage(self.handle)) };
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_form_matrix_composition_transforms_path_points_in_order() {
+        // Outer form translates by (100, 20), inner form scales by (2, 3),
+        // and the path object translates by (4, 5). The collector composes
+        // these in outer(inner(path(point))) order.
+        let outer = pdfium_sys::FS_MATRIX {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 100.0,
+            f: 20.0,
+        };
+        let inner = pdfium_sys::FS_MATRIX {
+            a: 2.0,
+            b: 0.0,
+            c: 0.0,
+            d: 3.0,
+            e: 0.0,
+            f: 0.0,
+        };
+        let object = pdfium_sys::FS_MATRIX {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 4.0,
+            f: 5.0,
+        };
+        let nested = compose_matrix(&compose_matrix(&outer, &inner), &object);
+        let x = nested.a * 1.0 + nested.c * 2.0 + nested.e;
+        let y = nested.b * 1.0 + nested.d * 2.0 + nested.f;
+        assert_eq!((x, y), (110.0, 41.0));
+
+        let viewport = ViewportTransform {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: -1.0,
+            e: 0.0,
+            f: 200.0,
+        };
+        assert_eq!(viewport.transform_point(x, y), (110.0, 159.0));
+    }
+}

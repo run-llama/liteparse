@@ -2,7 +2,7 @@ use crate::error::LiteParseError;
 use crate::glyph_names::resolve_glyph_name;
 use crate::types::{
     ExtractedImage, GraphicPrimitive, ImageRef, OutlineTarget, Page as LitePage, PdfInput, Rect,
-    StructNode, TextItem, WordBox,
+    StructNode, TextItem, VectorGraphics, VectorLine, VectorShape, WordBox,
 };
 use image::ImageEncoder;
 use pdfium::{
@@ -49,7 +49,16 @@ pub(crate) fn extract_pages_from_document(
     target_pages: Option<&[u32]>,
     max_pages: usize,
 ) -> Result<Vec<LitePage>, LiteParseError> {
-    Ok(extract_pages_and_images(document, target_pages, max_pages, false, false, None, false)?.0)
+    Ok(extract_pages_and_images(
+        document,
+        target_pages,
+        max_pages,
+        false,
+        false,
+        None,
+        ExtractionOutputOptions::default(),
+    )?
+    .0)
 }
 
 /// Same as `extract_pages_from_document` but optionally also renders every
@@ -64,7 +73,7 @@ pub(crate) fn extract_pages_and_images(
     render_images: bool,
     extract_links: bool,
     glyph_resolver: Option<&dyn crate::GlyphResolver>,
-    emit_word_boxes: bool,
+    output_options: ExtractionOutputOptions,
 ) -> Result<(Vec<LitePage>, Vec<ExtractedImage>), LiteParseError> {
     let page_count = document.page_count();
     let mut pages = Vec::new();
@@ -96,12 +105,16 @@ pub(crate) fn extract_pages_and_images(
             &text_page,
             &view_box,
             glyph_resolver,
-            emit_word_boxes,
+            output_options.emit_word_boxes,
         )?;
         if extract_links {
             assign_links(&mut text_items, &page.links(&view_box));
         }
-        let graphics = extract_page_graphics(&page, &view_box);
+        let paths = page.path_objects(&view_box);
+        let graphics = extract_layout_graphics(&paths);
+        let vector_graphics = output_options
+            .extract_vector_graphics
+            .then(|| build_vector_graphics(&paths));
         assign_strikethrough(&mut text_items, &graphics);
         let struct_nodes = extract_page_struct_nodes(&page, &view_box);
         let image_refs = extract_page_image_refs(&page, page_number);
@@ -116,12 +129,19 @@ pub(crate) fn extract_pages_and_images(
             page_height: page.height(),
             text_items,
             graphics,
+            vector_graphics,
             struct_nodes,
             image_refs,
         });
     }
 
     Ok((pages, images))
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ExtractionOutputOptions {
+    pub emit_word_boxes: bool,
+    pub extract_vector_graphics: bool,
 }
 
 /// Assign hyperlink URIs to text items whose bbox center falls inside a link
@@ -424,11 +444,10 @@ fn extract_page_image_refs(page: &Page, page_number: u32) -> Vec<ImageRef> {
 ///
 /// BezierTo segments don't emit strokes (we just advance the current point so
 /// later LineTos start from the right place).
-fn extract_page_graphics(page: &Page, view_box: &RectF) -> Vec<GraphicPrimitive> {
-    let paths: Vec<PathObject> = page.path_objects(view_box);
+fn extract_layout_graphics(paths: &[PathObject]) -> Vec<GraphicPrimitive> {
     let mut out = Vec::new();
 
-    for path in &paths {
+    for path in paths {
         // Filled paths: emit one Rect for the full bbox. Cheap signal for
         // cell backgrounds / figure clusters / code-block fills.
         if path.is_filled {
@@ -489,6 +508,263 @@ fn extract_page_graphics(page: &Page, view_box: &RectF) -> Vec<GraphicPrimitive>
     }
 
     out
+}
+
+const PATH_EPSILON: f32 = 0.001;
+const LINE_AXIS_TOLERANCE: f32 = 1.0;
+
+#[derive(Clone)]
+struct LineCandidate {
+    line: VectorLine,
+    shape_index: usize,
+}
+
+fn build_vector_graphics(paths: &[PathObject]) -> VectorGraphics {
+    let painted: Vec<(usize, &PathObject)> = paths
+        .iter()
+        .enumerate()
+        .filter(|(_, path)| path.is_stroked || path.is_filled)
+        .collect();
+    let raw_shapes: Vec<VectorShape> = painted
+        .iter()
+        .map(|(_, path)| VectorShape {
+            bbox: rectf_to_rect(&path.bbox),
+            stroke: path.is_stroked,
+            stroke_color: path
+                .is_stroked
+                .then(|| path.stroke_color.as_ref().map(color_to_argb_hex))
+                .flatten(),
+            fill: path.is_filled,
+            fill_color: path
+                .is_filled
+                .then(|| path.fill_color.as_ref().map(color_to_argb_hex))
+                .flatten(),
+            has_curve: path
+                .segments
+                .iter()
+                .any(|s| s.kind == SegmentKind::BezierTo),
+        })
+        .collect();
+
+    // LlamaParse collapses consecutively drawn, same-color solid fills when
+    // one contains the other. Preserve order because intervening paint
+    // operations intentionally stop merging.
+    let mut keep = vec![true; raw_shapes.len()];
+    for i in 0..raw_shapes.len().saturating_sub(1) {
+        if !keep[i] || !mergeable_shape(&raw_shapes[i]) {
+            continue;
+        }
+        for j in i + 1..raw_shapes.len() {
+            if !keep[j] {
+                continue;
+            }
+            if !mergeable_shape(&raw_shapes[j])
+                || raw_shapes[i].fill_color != raw_shapes[j].fill_color
+            {
+                break;
+            }
+            if rect_contains(&raw_shapes[i].bbox, &raw_shapes[j].bbox) {
+                keep[j] = false;
+            } else if rect_contains(&raw_shapes[j].bbox, &raw_shapes[i].bbox) {
+                keep[i] = false;
+            } else {
+                break;
+            }
+        }
+    }
+    let shapes = raw_shapes
+        .iter()
+        .cloned()
+        .zip(keep.iter().copied())
+        .filter_map(|(shape, retained)| retained.then_some(shape))
+        .collect();
+
+    let mut horizontal = Vec::new();
+    let mut vertical = Vec::new();
+    for (shape_index, (_, path)) in painted.iter().enumerate() {
+        let mut current = None;
+        for segment in &path.segments {
+            match segment.kind {
+                SegmentKind::MoveTo => current = Some((segment.x, segment.y)),
+                SegmentKind::BezierTo => current = Some((segment.x, segment.y)),
+                SegmentKind::LineTo => {
+                    if let Some(from) = current {
+                        push_axis_line(
+                            path,
+                            shape_index,
+                            from,
+                            (segment.x, segment.y),
+                            &mut horizontal,
+                            &mut vertical,
+                        );
+                    }
+                    current = Some((segment.x, segment.y));
+                }
+            }
+        }
+    }
+    horizontal.sort_by(|a: &LineCandidate, b| {
+        a.line
+            .y1
+            .total_cmp(&b.line.y1)
+            .then(a.line.x1.total_cmp(&b.line.x1))
+    });
+    vertical.sort_by(|a: &LineCandidate, b| {
+        a.line
+            .x1
+            .total_cmp(&b.line.x1)
+            .then(a.line.y1.total_cmp(&b.line.y1))
+    });
+    let mut lines = merge_axis_lines(horizontal, true, &raw_shapes, &keep);
+    lines.extend(merge_axis_lines(vertical, false, &raw_shapes, &keep));
+    VectorGraphics { shapes, lines }
+}
+
+fn mergeable_shape(s: &VectorShape) -> bool {
+    s.fill && !s.stroke && s.fill_color.is_some()
+}
+fn rect_contains(a: &Rect, b: &Rect) -> bool {
+    a.x - PATH_EPSILON <= b.x + PATH_EPSILON
+        && a.y - PATH_EPSILON <= b.y + PATH_EPSILON
+        && a.x + a.width + PATH_EPSILON >= b.x + b.width - PATH_EPSILON
+        && a.y + a.height + PATH_EPSILON >= b.y + b.height - PATH_EPSILON
+}
+
+fn push_axis_line(
+    path: &PathObject,
+    shape_index: usize,
+    a: (f32, f32),
+    b: (f32, f32),
+    h: &mut Vec<LineCandidate>,
+    v: &mut Vec<LineCandidate>,
+) {
+    let (mut x1, mut y1, mut x2, mut y2) = (a.0, a.1, b.0, b.1);
+    let target = if (y2 - y1).abs() < LINE_AXIS_TOLERANCE {
+        if x2 < x1 {
+            std::mem::swap(&mut x1, &mut x2);
+        }
+        &mut *h
+    } else if (x2 - x1).abs() < LINE_AXIS_TOLERANCE {
+        if y2 < y1 {
+            std::mem::swap(&mut y1, &mut y2);
+        }
+        &mut *v
+    } else {
+        return;
+    };
+    target.push(LineCandidate {
+        shape_index,
+        line: VectorLine {
+            x1,
+            y1,
+            x2,
+            y2,
+            stroke: path.is_stroked,
+            stroke_width: path.is_stroked.then_some(path.stroke_width),
+            stroke_color: path
+                .is_stroked
+                .then(|| path.stroke_color.as_ref().map(color_to_argb_hex))
+                .flatten(),
+            fill: path.is_filled,
+            fill_color: path
+                .is_filled
+                .then(|| path.fill_color.as_ref().map(color_to_argb_hex))
+                .flatten(),
+        },
+    });
+}
+
+fn merge_axis_lines(
+    mut candidates: Vec<LineCandidate>,
+    horizontal: bool,
+    shapes: &[VectorShape],
+    shape_retained: &[bool],
+) -> Vec<VectorLine> {
+    let mut retained = vec![true; candidates.len()];
+    for i in 0..candidates.len() {
+        if !retained[i]
+            || is_merged_shape_boundary(&candidates[i], horizontal, shapes, shape_retained)
+        {
+            retained[i] = false;
+            continue;
+        }
+        for j in i + 1..candidates.len() {
+            let same_axis = if horizontal {
+                (candidates[i].line.y1 - candidates[j].line.y1).abs() < PATH_EPSILON
+            } else {
+                (candidates[i].line.x1 - candidates[j].line.x1).abs() < PATH_EPSILON
+            };
+            if !same_axis {
+                break;
+            }
+            if !retained[j]
+                || is_merged_shape_boundary(&candidates[j], horizontal, shapes, shape_retained)
+            {
+                retained[j] = false;
+                continue;
+            }
+            let a = &candidates[i].line;
+            let b = &candidates[j].line;
+            let compatible = a.stroke == b.stroke
+                && (a.stroke || (a.fill && b.fill))
+                && (!a.stroke
+                    || ((a.stroke_width.unwrap_or(0.0) - b.stroke_width.unwrap_or(0.0)).abs()
+                        < PATH_EPSILON
+                        && (a.stroke_color.is_none()
+                            || b.stroke_color.is_none()
+                            || a.stroke_color == b.stroke_color)))
+                && (a.stroke || a.fill_color == b.fill_color);
+            if !compatible {
+                continue;
+            }
+            let threshold = PATH_EPSILON
+                + if a.stroke {
+                    a.stroke_width.unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+            let touching = if horizontal {
+                b.x1 < a.x2 + threshold && b.x2 > a.x1 - threshold
+            } else {
+                b.y1 < a.y2 + threshold && b.y2 > a.y1 - threshold
+            };
+            if touching {
+                let b = candidates[j].line.clone();
+                if horizontal {
+                    candidates[i].line.x1 = candidates[i].line.x1.min(b.x1);
+                    candidates[i].line.x2 = candidates[i].line.x2.max(b.x2);
+                } else {
+                    candidates[i].line.y1 = candidates[i].line.y1.min(b.y1);
+                    candidates[i].line.y2 = candidates[i].line.y2.max(b.y2);
+                }
+                retained[j] = false;
+            }
+        }
+    }
+    candidates
+        .into_iter()
+        .zip(retained)
+        .filter_map(|(c, keep)| keep.then_some(c.line))
+        .collect()
+}
+
+fn is_merged_shape_boundary(
+    candidate: &LineCandidate,
+    horizontal: bool,
+    shapes: &[VectorShape],
+    shape_retained: &[bool],
+) -> bool {
+    if shape_retained[candidate.shape_index] {
+        return false;
+    }
+    let shape = &shapes[candidate.shape_index].bbox;
+    if horizontal {
+        (candidate.line.y1 - shape.y).abs() < PATH_EPSILON
+            || (candidate.line.y1 - (shape.y + shape.height)).abs() < PATH_EPSILON
+    } else {
+        (candidate.line.x1 - shape.x).abs() < PATH_EPSILON
+            || (candidate.line.x1 - (shape.x + shape.width)).abs() < PATH_EPSILON
+    }
 }
 
 fn rectf_to_rect(r: &RectF) -> Rect {
@@ -2012,6 +2288,7 @@ mod tests {
             page_height: 100.0,
             text_items: items,
             graphics: Vec::new(),
+            vector_graphics: None,
             struct_nodes: Vec::new(),
             image_refs: Vec::new(),
         }
@@ -2166,6 +2443,178 @@ mod tests {
             a: 0,
         };
         assert_eq!(color_to_argb_hex(&z), "00000000");
+    }
+
+    fn vector_path(
+        bbox: RectF,
+        segments: Vec<pdfium::PathSegment>,
+        stroke: bool,
+        fill: bool,
+        stroke_width: f32,
+        color: pdfium::Color,
+    ) -> PathObject {
+        PathObject {
+            bbox,
+            stroke_color: stroke.then_some(color),
+            fill_color: fill.then_some(color),
+            stroke_width,
+            is_stroked: stroke,
+            is_filled: fill,
+            segments,
+        }
+    }
+
+    #[test]
+    fn vector_graphics_reports_paint_curve_and_merges_axis_lines() {
+        let black = pdfium::Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let paths = vec![
+            vector_path(
+                RectF {
+                    left: 10.0,
+                    top: 10.0,
+                    right: 30.0,
+                    bottom: 11.0,
+                },
+                vec![
+                    pdfium::PathSegment {
+                        kind: SegmentKind::MoveTo,
+                        x: 10.0,
+                        y: 10.0,
+                        close: false,
+                    },
+                    pdfium::PathSegment {
+                        kind: SegmentKind::LineTo,
+                        x: 20.0,
+                        y: 10.0,
+                        close: false,
+                    },
+                    pdfium::PathSegment {
+                        kind: SegmentKind::BezierTo,
+                        x: 20.0,
+                        y: 10.0,
+                        close: false,
+                    },
+                ],
+                true,
+                false,
+                1.0,
+                black,
+            ),
+            vector_path(
+                RectF {
+                    left: 20.0,
+                    top: 10.2,
+                    right: 30.0,
+                    bottom: 11.0,
+                },
+                vec![
+                    pdfium::PathSegment {
+                        kind: SegmentKind::MoveTo,
+                        x: 20.0,
+                        y: 10.0,
+                        close: false,
+                    },
+                    pdfium::PathSegment {
+                        kind: SegmentKind::LineTo,
+                        x: 30.0,
+                        y: 10.0,
+                        close: false,
+                    },
+                ],
+                true,
+                false,
+                1.0,
+                black,
+            ),
+        ];
+        let output = build_vector_graphics(&paths);
+        assert_eq!(output.shapes.len(), 2);
+        assert!(output.shapes[0].has_curve);
+        assert_eq!(output.shapes[0].stroke_color.as_deref(), Some("ff000000"));
+        assert_eq!(output.lines.len(), 1);
+        assert!((output.lines[0].x1 - 10.0).abs() < 0.001);
+        assert!((output.lines[0].x2 - 30.0).abs() < 0.001);
+        assert_eq!(output.lines[0].stroke_width, Some(1.0));
+    }
+
+    #[test]
+    fn vector_graphics_merges_consecutive_contained_solid_fills() {
+        let blue = pdfium::Color {
+            r: 0,
+            g: 0,
+            b: 255,
+            a: 255,
+        };
+        let paths = vec![
+            vector_path(
+                RectF {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 20.0,
+                    bottom: 20.0,
+                },
+                vec![],
+                false,
+                true,
+                0.0,
+                blue,
+            ),
+            vector_path(
+                RectF {
+                    left: 2.0,
+                    top: 2.0,
+                    right: 10.0,
+                    bottom: 10.0,
+                },
+                vec![],
+                false,
+                true,
+                0.0,
+                blue,
+            ),
+        ];
+        let output = build_vector_graphics(&paths);
+        assert_eq!(output.shapes.len(), 1);
+        assert_eq!(output.shapes[0].bbox.width, 20.0);
+        assert_eq!(output.shapes[0].fill_color.as_deref(), Some("ff0000ff"));
+    }
+
+    #[test]
+    fn vector_graphics_ignores_unpainted_and_diagonal_paths() {
+        let path = vector_path(
+            RectF {
+                left: 0.0,
+                top: 0.0,
+                right: 10.0,
+                bottom: 10.0,
+            },
+            vec![
+                pdfium::PathSegment {
+                    kind: SegmentKind::MoveTo,
+                    x: 0.0,
+                    y: 0.0,
+                    close: false,
+                },
+                pdfium::PathSegment {
+                    kind: SegmentKind::LineTo,
+                    x: 10.0,
+                    y: 10.0,
+                    close: false,
+                },
+            ],
+            false,
+            false,
+            0.0,
+            pdfium::Color::default(),
+        );
+        let output = build_vector_graphics(&[path]);
+        assert!(output.shapes.is_empty());
+        assert!(output.lines.is_empty());
     }
 
     #[test]

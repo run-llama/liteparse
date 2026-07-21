@@ -59,6 +59,7 @@ const parser = new LiteParse({
   outputFormat: 'json',          // "json" | "text" | "markdown"
   imageMode: 'placeholder',      // Markdown image handling: "placeholder" | "off" | "embed"
   extractLinks: true,            // Render [text](url) links in markdown output
+  extractVectorGraphics: false,  // Opt-in shapes + merged H/V lines per page
   preserveVerySmallText: false,  // Keep tiny text
   password: undefined,           // Password for protected documents
   quiet: false,                  // Suppress progress output

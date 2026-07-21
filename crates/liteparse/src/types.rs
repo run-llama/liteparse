@@ -101,6 +101,10 @@ pub struct Page {
     /// Not emitted in JSON/text outputs — consumed by the markdown layout pass.
     #[serde(skip)]
     pub graphics: Vec<GraphicPrimitive>,
+    /// Lossless-enough, PDFium-compatible path output requested by the caller.
+    /// Kept separate from the lossy internal `graphics` layout primitives.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_graphics: Option<VectorGraphics>,
     /// Structure-tree nodes for this page when the PDF is tagged. Each node
     /// carries its role, marked-content ids, and the union bbox of its tagged
     /// content. Empty for untagged PDFs.
@@ -164,6 +168,9 @@ pub struct ParsedPage {
     /// the JSON/text output.
     #[serde(skip)]
     pub graphics: Vec<GraphicPrimitive>,
+    /// Public vector path extraction. Absent unless explicitly enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_graphics: Option<VectorGraphics>,
     /// Figure-region bounding rectangles derived from `graphics`. Pre-computed
     /// in `to_parsed_pages` so the XY-cut layout pass can treat them as
     /// obstacles, and reused downstream for figure classification.
@@ -222,6 +229,45 @@ pub struct Rect {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+}
+
+/// Page-scoped vector path output. Coordinates use the same top-left,
+/// 72-DPI viewport space as text items.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct VectorGraphics {
+    pub shapes: Vec<VectorShape>,
+    pub lines: Vec<VectorLine>,
+}
+
+/// One PDF path object's paint state and viewport bounding box.
+#[derive(Debug, Clone, Serialize)]
+pub struct VectorShape {
+    pub bbox: Rect,
+    pub stroke: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_color: Option<String>,
+    pub fill: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill_color: Option<String>,
+    pub has_curve: bool,
+}
+
+/// A strict horizontal or vertical path segment after adjacent compatible
+/// segments have been merged, matching LlamaParse PDFium path semantics.
+#[derive(Debug, Clone, Serialize)]
+pub struct VectorLine {
+    pub x1: f32,
+    pub y1: f32,
+    pub x2: f32,
+    pub y2: f32,
+    pub stroke: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_width: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_color: Option<String>,
+    pub fill: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill_color: Option<String>,
 }
 
 /// Lightweight vector-graphic primitive derived from PDFium path objects.
@@ -433,6 +479,7 @@ mod tests {
             page_height: 200.0,
             text_items: vec![sample_item()],
             graphics: vec![],
+            vector_graphics: None,
             struct_nodes: vec![],
             image_refs: vec![],
         };

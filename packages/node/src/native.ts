@@ -41,6 +41,7 @@ export interface LiteParseNativeConfig {
   cropBox?: NativeCropBox;
   skipDiagonalText?: boolean;
   includeComplexity?: boolean;
+  extractVectorGraphics?: boolean;
 }
 
 export interface NativeCropBox {
@@ -104,6 +105,23 @@ export interface NativeParsedPage {
   markdown: string;
   textItems: NativeTextItem[];
   complexity?: NativePageComplexityStats;
+  vectorGraphics?: NativeVectorGraphics;
+}
+
+export interface NativeVectorGraphics {
+  shapes: Array<{
+    bbox: { x: number; y: number; width: number; height: number };
+    stroke: boolean;
+    strokeColor?: string;
+    fill: boolean;
+    fillColor?: string;
+    hasCurve: boolean;
+  }>;
+  lines: Array<{
+    x1: number; y1: number; x2: number; y2: number;
+    stroke: boolean; strokeWidth?: number; strokeColor?: string;
+    fill: boolean; fillColor?: string;
+  }>;
 }
 
 export interface NativeExtractedImage {
