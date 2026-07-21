@@ -111,7 +111,7 @@ async fn test_parse_bytes_office_integration() {
         .parse_input(input)
         .await
         .expect("Should be able to parse");
-    assert_eq!(parsed.pages.len(), 2);
+    assert_eq!(parsed.pages.len(), 3);
 }
 
 #[tokio::test]
@@ -146,6 +146,47 @@ async fn test_parse_office_doc_integration() {
         .await
         .expect("Should be able to parse");
     assert_eq!(parsed.pages.len(), 2);
+}
+
+#[tokio::test]
+#[serial]
+#[cfg(feature = "native-docx")]
+async fn test_parse_docx_doc_native_integration() {
+    let env_var = std::env::var("SKIP_INTEGRATION_TESTS");
+    if let Ok(v) = env_var
+        && v == "yes"
+    {
+        return;
+    }
+    let lit = LiteParse::new(LiteParseConfig::default());
+    let parsed = lit
+        .parse("../../integration_tests_data/sample.docx")
+        .await
+        .expect("Should be able to parse");
+    assert_eq!(parsed.pages.len(), 4);
+}
+
+#[tokio::test]
+#[serial]
+#[cfg(feature = "native-docx")]
+async fn test_parse_bytes_docx_native_integration() {
+    let env_var = std::env::var("SKIP_INTEGRATION_TESTS");
+    if let Ok(v) = env_var
+        && v == "yes"
+    {
+        return;
+    }
+    let fixture_path = "../../integration_tests_data/sample.docx";
+    let lit = LiteParse::new(LiteParseConfig::default());
+    let data = tokio::fs::read(fixture_path)
+        .await
+        .expect("Should be able to read file");
+    let input = PdfInput::Bytes(data);
+    let parsed = lit
+        .parse_input(input)
+        .await
+        .expect("Should be able to parse");
+    assert_eq!(parsed.pages.len(), 4);
 }
 
 #[tokio::test]

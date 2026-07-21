@@ -354,12 +354,31 @@ pub async fn find_libre_office_command() -> Option<String> {
     None
 }
 
+#[cfg(feature = "native-docx")]
+pub fn convert_docx(file_path: &str, output_dir: &str) -> Result<String, LiteParseError> {
+    let file_name = Path::new(&file_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file.pdf".to_string());
+
+    let pdf_path = Path::new(output_dir).join(Path::new(&file_name).with_extension("pdf"));
+    docxide_pdf::convert_docx_to_pdf(Path::new(file_path), &pdf_path)
+        .map_err(|e| LiteParseError::Conversion(e.to_string()))?;
+    Ok(pdf_path.to_string_lossy().to_string())
+}
+
 /// Convert office documents using LibreOffice.
 pub async fn convert_office_document(
     file_path: &str,
     output_dir: &str,
     password: Option<&str>,
 ) -> Result<String, LiteParseError> {
+    #[cfg(feature = "native-docx")]
+    if file_path.ends_with(".docx") {
+        let path = convert_docx(file_path, output_dir)?;
+        return Ok(path);
+    }
+
     let libre_office_cmd = find_libre_office_command().await.ok_or_else(|| {
         LiteParseError::Conversion(
             "LibreOffice is not installed. Please install LibreOffice to convert office documents. \

@@ -25,6 +25,7 @@ oar-ocr-coreml = ["oar-ocr", "oar-ocr/coreml"]
 oar-ocr-webgpu = ["oar-ocr", "oar-ocr/webgpu"]
 oar-ocr-openvino = ["oar-ocr", "oar-ocr/openvino"]
 tesseract = ["dep:tesseract-rs"]
+native-docx = ["dep:docxide-pdf"]
 
 [dependencies]
 blake3 = "1"
@@ -46,6 +47,7 @@ web-time = "1.1.0"
 flate2 = "1.1.9"
 resvg = "0.44"
 usvg = "0.44"
+docxide-pdf = { version = "0.16.2", default-features = false, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 oar-ocr = { version = "0.8", optional = true }
