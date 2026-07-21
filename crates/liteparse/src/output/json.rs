@@ -8,10 +8,32 @@ pub(crate) struct JsonTextItem {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    pub rotation: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_size: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_height: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_ascent: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_descent: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_weight: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_width: Option<f32>,
+    pub font_is_buggy: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcid: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_color: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub char_codes: Vec<u32>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub tsg: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
 }
@@ -49,8 +71,20 @@ pub(crate) fn build_json(pages: &[ParsedPage]) -> ParseResultJson {
                         y: item.y,
                         width: item.width,
                         height: item.height,
+                        rotation: item.rotation,
                         font_name: item.font_name.clone(),
                         font_size: item.font_size,
+                        font_height: item.font_height,
+                        font_ascent: item.font_ascent,
+                        font_descent: item.font_descent,
+                        font_weight: item.font_weight,
+                        text_width: item.text_width,
+                        font_is_buggy: item.font_is_buggy,
+                        mcid: item.mcid,
+                        fill_color: item.fill_color.clone(),
+                        stroke_color: item.stroke_color.clone(),
+                        char_codes: item.char_codes.clone(),
+                        tsg: item.tsg,
                         confidence: item.confidence.or(Some(1.0)),
                     })
                     .collect(),
@@ -122,6 +156,38 @@ mod tests {
         assert!(s.contains("\n"));
         assert!(s.contains("\"text\": \"hi\""));
         assert!(s.contains("\"page\": 1"));
+    }
+
+    #[test]
+    fn test_build_json_preserves_text_metadata() {
+        let mut text_item = item("hi", None);
+        text_item.font_height = Some(11.0);
+        text_item.font_ascent = Some(8.0);
+        text_item.font_descent = Some(-2.0);
+        text_item.font_weight = Some(700);
+        text_item.text_width = Some(9.5);
+        text_item.font_is_buggy = true;
+        text_item.mcid = Some(4);
+        text_item.fill_color = Some("ff112233".into());
+        text_item.stroke_color = Some("ff445566".into());
+        text_item.char_codes = vec![104, 105, 32];
+        text_item.tsg = true;
+
+        let value: serde_json::Value =
+            serde_json::from_str(&format_json(&[page(vec![text_item])]).unwrap()).unwrap();
+        let item = &value["pages"][0]["text_items"][0];
+        assert_eq!(item["font_height"], 11.0);
+        assert_eq!(item["font_ascent"], 8.0);
+        assert_eq!(item["font_descent"], -2.0);
+        assert_eq!(item["font_weight"], 700);
+        assert_eq!(item["text_width"], 9.5);
+        assert_eq!(item["font_is_buggy"], true);
+        assert_eq!(item["mcid"], 4);
+        assert_eq!(item["fill_color"], "ff112233");
+        assert_eq!(item["stroke_color"], "ff445566");
+        assert_eq!(item["char_codes"], serde_json::json!([104, 105, 32]));
+        assert_eq!(item["tsg"], true);
+        assert_eq!(item["rotation"], 0.0);
     }
 
     #[test]

@@ -643,7 +643,13 @@ fn extract_page_text_items(
 
         // Spaces: mark that we're in a pending-space state.
         if c == ' ' {
-            seg.mark_pending_space();
+            seg.mark_pending_space(is_generated, ch.char_code());
+            // Keep PDFium-generated gaps as item boundaries so the emitted
+            // item can retain the same trailing-space-generated distinction
+            // as the source extractor. The visible text remains trimmed.
+            if is_generated {
+                seg.flush(&mut items);
+            }
             continue;
         }
 
@@ -1479,6 +1485,9 @@ struct SegmentBuilder {
     mcid: Option<i32>,
     fill_color: Option<String>,
     stroke_color: Option<String>,
+    char_codes: Vec<u32>,
+    pending_space_char_codes: Vec<u32>,
+    pending_space_generated: bool,
     has_content: bool,
     pending_space: bool,
     // Per-word sub-boxes, finalized at each inter-word space break. The
@@ -1523,6 +1532,9 @@ impl SegmentBuilder {
             mcid: None,
             fill_color: None,
             stroke_color: None,
+            char_codes: Vec::new(),
+            pending_space_char_codes: Vec::new(),
+            pending_space_generated: false,
             has_content: false,
             pending_space: false,
             words: Vec::new(),
@@ -1615,10 +1627,14 @@ impl SegmentBuilder {
         self.unmapped_char_count = if ch.has_unicode_map_error() { 1 } else { 0 };
         self.has_content = true;
         self.pending_space = false;
+        self.pending_space_char_codes.clear();
+        self.pending_space_generated = false;
         self.words.clear();
         self.word_has = false;
         self.add_word_char(c, vp_loose);
         self.text_width = 0.0;
+        self.char_codes.clear();
+        self.char_codes.push(ch.char_code());
         self.font_is_buggy = false;
         self.font_is_embedded = false;
         self.font = None;
@@ -1711,6 +1727,7 @@ impl SegmentBuilder {
         self.last_char_loose_right = vp_loose.right;
         self.last_char_bottom = vp_strict.bottom;
         self.char_count += 1;
+        self.char_codes.push(ch.char_code());
         if ch.has_unicode_map_error() {
             self.unmapped_char_count += 1;
         }
@@ -1753,9 +1770,11 @@ impl SegmentBuilder {
     }
 
     /// Record that a space was seen.
-    fn mark_pending_space(&mut self) {
+    fn mark_pending_space(&mut self, is_generated: bool, char_code: u32) {
         if self.has_content {
             self.pending_space = true;
+            self.pending_space_generated = is_generated;
+            self.pending_space_char_codes.push(char_code);
         }
     }
 
@@ -1764,7 +1783,9 @@ impl SegmentBuilder {
         if self.pending_space {
             self.break_word();
             self.text.push(' ');
+            self.char_codes.append(&mut self.pending_space_char_codes);
             self.pending_space = false;
+            self.pending_space_generated = false;
         }
     }
 
@@ -1775,6 +1796,7 @@ impl SegmentBuilder {
         }
 
         self.break_word();
+        self.char_codes.append(&mut self.pending_space_char_codes);
         let trimmed = self.text.trim();
         if !trimmed.is_empty() {
             let width = self.vp_right - self.vp_left;
@@ -1810,6 +1832,8 @@ impl SegmentBuilder {
                 mcid: self.mcid,
                 fill_color: self.fill_color.clone(),
                 stroke_color: self.stroke_color.clone(),
+                char_codes: std::mem::take(&mut self.char_codes),
+                tsg: self.pending_space_generated,
                 confidence: None,
                 link: None,
                 strike: false,
@@ -1825,6 +1849,43 @@ impl SegmentBuilder {
 mod tests {
     use super::*;
     use std::f32::consts::PI;
+
+    fn segment_with_one_char() -> SegmentBuilder {
+        let mut segment = SegmentBuilder::new(false);
+        segment.text = "A".into();
+        segment.vp_left = 1.0;
+        segment.vp_right = 7.0;
+        segment.vp_top = 2.0;
+        segment.vp_bottom = 12.0;
+        segment.char_count = 1;
+        segment.has_content = true;
+        segment.char_codes = vec![65];
+        segment
+    }
+
+    #[test]
+    fn generated_trailing_space_is_exposed_without_changing_trimmed_text() {
+        let mut segment = segment_with_one_char();
+        segment.mark_pending_space(true, 32);
+        let mut items = Vec::new();
+        segment.flush(&mut items);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "A");
+        assert_eq!(items[0].char_codes, vec![65, 32]);
+        assert!(items[0].tsg);
+    }
+
+    #[test]
+    fn real_trailing_space_is_not_marked_as_generated() {
+        let mut segment = segment_with_one_char();
+        segment.mark_pending_space(false, 32);
+        let mut items = Vec::new();
+        segment.flush(&mut items);
+
+        assert_eq!(items[0].char_codes, vec![65, 32]);
+        assert!(!items[0].tsg);
+    }
 
     fn strike_item() -> TextItem {
         TextItem {

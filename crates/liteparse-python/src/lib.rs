@@ -67,6 +67,32 @@ struct PyTextItem {
     #[pyo3(get)]
     font_size: Option<f64>,
     #[pyo3(get)]
+    font_height: Option<f64>,
+    #[pyo3(get)]
+    font_ascent: Option<f64>,
+    #[pyo3(get)]
+    font_descent: Option<f64>,
+    #[pyo3(get)]
+    font_weight: Option<i32>,
+    #[pyo3(get)]
+    text_width: Option<f64>,
+    #[pyo3(get)]
+    font_is_buggy: bool,
+    #[pyo3(get)]
+    mcid: Option<i32>,
+    /// Fill color as an eight-character ARGB hex string.
+    #[pyo3(get)]
+    fill_color: Option<String>,
+    /// Stroke color as an eight-character ARGB hex string.
+    #[pyo3(get)]
+    stroke_color: Option<String>,
+    /// Raw PDF content-stream character codes for the source glyphs.
+    #[pyo3(get)]
+    char_codes: Vec<u32>,
+    /// True when the trailing source space was synthesized by PDFium.
+    #[pyo3(get)]
+    tsg: bool,
+    #[pyo3(get)]
     confidence: Option<f64>,
     /// Rotation in degrees (viewport space). Defaults to 0.
     #[pyo3(get)]
@@ -98,6 +124,17 @@ impl PyTextItem {
             rotation: self.rotation as f32,
             font_name: self.font_name.clone(),
             font_size: self.font_size.map(|v| v as f32),
+            font_height: self.font_height.map(|v| v as f32),
+            font_ascent: self.font_ascent.map(|v| v as f32),
+            font_descent: self.font_descent.map(|v| v as f32),
+            font_weight: self.font_weight,
+            text_width: self.text_width.map(|v| v as f32),
+            font_is_buggy: self.font_is_buggy,
+            mcid: self.mcid,
+            fill_color: self.fill_color.clone(),
+            stroke_color: self.stroke_color.clone(),
+            char_codes: self.char_codes.clone(),
+            tsg: self.tsg,
             confidence: self.confidence.map(|v| v as f32),
             ..Default::default()
         }
@@ -112,6 +149,17 @@ impl PyTextItem {
             height: item.height as f64,
             font_name: item.font_name,
             font_size: item.font_size.map(|v| v as f64),
+            font_height: item.font_height.map(|v| v as f64),
+            font_ascent: item.font_ascent.map(|v| v as f64),
+            font_descent: item.font_descent.map(|v| v as f64),
+            font_weight: item.font_weight,
+            text_width: item.text_width.map(|v| v as f64),
+            font_is_buggy: item.font_is_buggy,
+            mcid: item.mcid,
+            fill_color: item.fill_color,
+            stroke_color: item.stroke_color,
+            char_codes: item.char_codes,
+            tsg: item.tsg,
             confidence: item.confidence.map(|v| v as f64).or(Some(1.0)),
             rotation: item.rotation as f64,
             words: item.words.into_iter().map(PyWordBox::from_rust).collect(),
@@ -691,4 +739,45 @@ fn _liteparse(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_cli, m)?)?;
     m.add_function(wrap_pyfunction!(search_items, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_metadata_round_trips_through_python_type() {
+        let item = liteparse::types::TextItem {
+            text: "A".into(),
+            font_height: Some(12.0),
+            font_ascent: Some(9.0),
+            font_descent: Some(-3.0),
+            font_weight: Some(700),
+            text_width: Some(8.0),
+            font_is_buggy: true,
+            mcid: Some(2),
+            fill_color: Some("ff112233".into()),
+            stroke_color: Some("ff445566".into()),
+            char_codes: vec![65, 32],
+            tsg: true,
+            ..Default::default()
+        };
+
+        let py = PyTextItem::from_rust(item);
+        assert_eq!(py.char_codes, vec![65, 32]);
+        assert!(py.tsg);
+        assert_eq!(py.fill_color.as_deref(), Some("ff112233"));
+
+        let round_trip = py.to_rust();
+        assert_eq!(round_trip.font_height, Some(12.0));
+        assert_eq!(round_trip.font_ascent, Some(9.0));
+        assert_eq!(round_trip.font_descent, Some(-3.0));
+        assert_eq!(round_trip.font_weight, Some(700));
+        assert_eq!(round_trip.text_width, Some(8.0));
+        assert!(round_trip.font_is_buggy);
+        assert_eq!(round_trip.mcid, Some(2));
+        assert_eq!(round_trip.stroke_color.as_deref(), Some("ff445566"));
+        assert_eq!(round_trip.char_codes, vec![65, 32]);
+        assert!(round_trip.tsg);
+    }
 }

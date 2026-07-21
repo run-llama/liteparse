@@ -243,6 +243,21 @@ pub struct JsTextItem {
     pub height: f64,
     pub font_name: Option<String>,
     pub font_size: Option<f64>,
+    pub font_height: Option<f64>,
+    pub font_ascent: Option<f64>,
+    pub font_descent: Option<f64>,
+    pub font_weight: Option<i32>,
+    pub text_width: Option<f64>,
+    pub font_is_buggy: Option<bool>,
+    pub mcid: Option<i32>,
+    /// Fill color as an eight-character ARGB hex string.
+    pub fill_color: Option<String>,
+    /// Stroke color as an eight-character ARGB hex string.
+    pub stroke_color: Option<String>,
+    /// Raw PDF content-stream character codes for the source glyphs.
+    pub char_codes: Option<Vec<u32>>,
+    /// True when the trailing source space was synthesized by PDFium.
+    pub tsg: Option<bool>,
     pub confidence: Option<f64>,
     /// Rotation in degrees (viewport space). Defaults to 0 when omitted.
     pub rotation: Option<f64>,
@@ -262,6 +277,17 @@ impl JsTextItem {
             rotation: self.rotation.unwrap_or(0.0) as f32,
             font_name: self.font_name.clone(),
             font_size: self.font_size.map(|v| v as f32),
+            font_height: self.font_height.map(|v| v as f32),
+            font_ascent: self.font_ascent.map(|v| v as f32),
+            font_descent: self.font_descent.map(|v| v as f32),
+            font_weight: self.font_weight,
+            text_width: self.text_width.map(|v| v as f32),
+            font_is_buggy: self.font_is_buggy.unwrap_or(false),
+            mcid: self.mcid,
+            fill_color: self.fill_color.clone(),
+            stroke_color: self.stroke_color.clone(),
+            char_codes: self.char_codes.clone().unwrap_or_default(),
+            tsg: self.tsg.unwrap_or(false),
             confidence: self.confidence.map(|v| v as f32),
             ..Default::default()
         }
@@ -277,6 +303,17 @@ impl JsTextItem {
             rotation: Some(item.rotation as f64),
             font_name: item.font_name.clone(),
             font_size: item.font_size.map(|v| v as f64),
+            font_height: item.font_height.map(|v| v as f64),
+            font_ascent: item.font_ascent.map(|v| v as f64),
+            font_descent: item.font_descent.map(|v| v as f64),
+            font_weight: item.font_weight,
+            text_width: item.text_width.map(|v| v as f64),
+            font_is_buggy: Some(item.font_is_buggy),
+            mcid: item.mcid,
+            fill_color: item.fill_color.clone(),
+            stroke_color: item.stroke_color.clone(),
+            char_codes: Some(item.char_codes.clone()),
+            tsg: Some(item.tsg),
             confidence: item.confidence.map(|v| v as f64).or(Some(1.0)),
             words: item.words.iter().map(JsWordBox::from_rust).collect(),
         }
@@ -510,5 +547,46 @@ impl JsParseResult {
                 })
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_metadata_round_trips_through_napi_type() {
+        let item = TextItem {
+            text: "A".into(),
+            font_height: Some(12.0),
+            font_ascent: Some(9.0),
+            font_descent: Some(-3.0),
+            font_weight: Some(700),
+            text_width: Some(8.0),
+            font_is_buggy: true,
+            mcid: Some(2),
+            fill_color: Some("ff112233".into()),
+            stroke_color: Some("ff445566".into()),
+            char_codes: vec![65, 32],
+            tsg: true,
+            ..Default::default()
+        };
+
+        let js = JsTextItem::from_rust(&item);
+        assert_eq!(js.char_codes, Some(vec![65, 32]));
+        assert_eq!(js.tsg, Some(true));
+        assert_eq!(js.fill_color.as_deref(), Some("ff112233"));
+
+        let round_trip = js.to_rust();
+        assert_eq!(round_trip.font_height, Some(12.0));
+        assert_eq!(round_trip.font_ascent, Some(9.0));
+        assert_eq!(round_trip.font_descent, Some(-3.0));
+        assert_eq!(round_trip.font_weight, Some(700));
+        assert_eq!(round_trip.text_width, Some(8.0));
+        assert!(round_trip.font_is_buggy);
+        assert_eq!(round_trip.mcid, Some(2));
+        assert_eq!(round_trip.stroke_color.as_deref(), Some("ff445566"));
+        assert_eq!(round_trip.char_codes, vec![65, 32]);
+        assert!(round_trip.tsg);
     }
 }

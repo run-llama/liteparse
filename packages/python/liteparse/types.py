@@ -27,6 +27,21 @@ class TextItem:
     height: float
     font_name: Optional[str] = None
     font_size: Optional[float] = None
+    font_height: Optional[float] = None
+    font_ascent: Optional[float] = None
+    font_descent: Optional[float] = None
+    font_weight: Optional[int] = None
+    text_width: Optional[float] = None
+    font_is_buggy: bool = False
+    mcid: Optional[int] = None
+    #: Fill color as an eight-character ARGB hex string.
+    fill_color: Optional[str] = None
+    #: Stroke color as an eight-character ARGB hex string.
+    stroke_color: Optional[str] = None
+    #: Raw PDF content-stream character codes for the source glyphs.
+    char_codes: List[int] = field(default_factory=list)
+    #: True when the trailing source space was synthesized by PDFium.
+    tsg: bool = False
     confidence: Optional[float] = None
     rotation: float = 0.0
     #: Per-word sub-boxes. Empty unless the parser was configured with

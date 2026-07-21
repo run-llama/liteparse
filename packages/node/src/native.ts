@@ -65,6 +65,17 @@ export interface NativeTextItem {
   height: number;
   fontName?: string;
   fontSize?: number;
+  fontHeight?: number;
+  fontAscent?: number;
+  fontDescent?: number;
+  fontWeight?: number;
+  textWidth?: number;
+  fontIsBuggy?: boolean;
+  mcid?: number;
+  fillColor?: string;
+  strokeColor?: string;
+  charCodes?: number[];
+  tsg?: boolean;
   confidence?: number;
   rotation?: number;
   words?: NativeWordBox[];

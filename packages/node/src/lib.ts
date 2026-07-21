@@ -104,6 +104,24 @@ export interface TextItem {
   height: number;
   fontName?: string;
   fontSize?: number;
+  /** Font size after applying the text matrix's vertical scale. */
+  fontHeight?: number;
+  fontAscent?: number;
+  fontDescent?: number;
+  fontWeight?: number;
+  /** Sum of source glyph widths in points. */
+  textWidth?: number;
+  fontIsBuggy?: boolean;
+  /** Marked-content ID from the PDF structure tree. */
+  mcid?: number;
+  /** Fill color as an eight-character ARGB hex string. */
+  fillColor?: string;
+  /** Stroke color as an eight-character ARGB hex string. */
+  strokeColor?: string;
+  /** Raw PDF content-stream character codes for the source glyphs. */
+  charCodes?: number[];
+  /** True when the trailing source space was synthesized by PDFium. */
+  tsg?: boolean;
   confidence?: number;
   /** Rotation in degrees (viewport space). Defaults to 0 when omitted. */
   rotation?: number;
@@ -396,6 +414,17 @@ function toTextItem(item: NativeTextItem): TextItem {
     height: item.height,
     fontName: item.fontName,
     fontSize: item.fontSize,
+    fontHeight: item.fontHeight,
+    fontAscent: item.fontAscent,
+    fontDescent: item.fontDescent,
+    fontWeight: item.fontWeight,
+    textWidth: item.textWidth,
+    fontIsBuggy: item.fontIsBuggy,
+    mcid: item.mcid,
+    fillColor: item.fillColor,
+    strokeColor: item.strokeColor,
+    charCodes: item.charCodes,
+    tsg: item.tsg,
     confidence: item.confidence,
     rotation: item.rotation,
     words: item.words,

@@ -100,6 +100,21 @@ export interface JsTextItem {
   height: number
   fontName?: string
   fontSize?: number
+  fontHeight?: number
+  fontAscent?: number
+  fontDescent?: number
+  fontWeight?: number
+  textWidth?: number
+  fontIsBuggy?: boolean
+  mcid?: number
+  /** Fill color as an eight-character ARGB hex string. */
+  fillColor?: string
+  /** Stroke color as an eight-character ARGB hex string. */
+  strokeColor?: string
+  /** Raw PDF content-stream character codes for the source glyphs. */
+  charCodes?: Array<number>
+  /** True when the trailing source space was synthesized by PDFium. */
+  tsg?: boolean
   confidence?: number
   /** Rotation in degrees (viewport space). Defaults to 0 when omitted. */
   rotation?: number

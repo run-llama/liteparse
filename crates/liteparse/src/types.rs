@@ -55,6 +55,15 @@ pub struct TextItem {
     /// Stroke color as ARGB hex string.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stroke_color: Option<String>,
+    /// Raw character codes from the PDF content stream. These correspond to
+    /// source glyphs rather than Unicode scalar values, so ligature expansion
+    /// can produce more text characters than entries in this array.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub char_codes: Vec<u32>,
+    /// Whether the trailing source space was synthesized by PDFium rather than
+    /// represented by a real space glyph in the PDF content stream.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub tsg: bool,
     /// OCR confidence score (0.0–1.0). None for native PDF text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
