@@ -2881,9 +2881,18 @@ pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
                 page.page_width,
                 page.page_height,
             );
-            let mut obstacles: Vec<Rect> = Vec::with_capacity(figures.len() + table_rects.len());
+            // Borderless tables with centered cell text have no vector grid for
+            // `detect_table_rects` to find. Their varying left edges can look
+            // exactly like a multi-column page to XY-cut, even though their
+            // cell centers form stable tracks. Detect that shape before XY-cut
+            // so the table is kept together for the normal markdown detector.
+            let centered_table_rects =
+                detect_centered_text_table_rects(&projected_items, page.page_width);
+            let mut obstacles: Vec<Rect> =
+                Vec::with_capacity(figures.len() + table_rects.len() + centered_table_rects.len());
             obstacles.extend(figures.iter().cloned());
             obstacles.extend(table_rects.iter().cloned());
+            obstacles.extend(centered_table_rects);
             let (projected_lines, regions) = build_projected_lines(
                 &projected_items,
                 page.page_width,
@@ -2925,6 +2934,166 @@ pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
 }
 
 // ── ProjectedLine derivation ────────────────────────────────────────────────
+/// Detect borderless tables whose columns are aligned by cell center rather
+/// than by their left edge.
+///
+/// The normal markdown table detector can already match centered body cells
+/// once it receives whole rows. This helper has a narrower responsibility: it
+/// creates XY-cut obstacles for centered tables so their column gutters are
+/// not mistaken for page-column gutters before markdown classification.
+///
+/// A candidate needs at least three columns and two visual rows. To keep this
+/// specific to centered tables (and not suppress legitimate page-column
+/// splits), at least one column must have changing left edges while its center
+/// remains stable across the candidate rows.
+fn detect_centered_text_table_rects(items: &[ProjectedTextItem], page_width: f32) -> Vec<Rect> {
+    const MIN_COLUMNS: usize = 3;
+    const MIN_ROWS: usize = 2;
+    const CENTER_TOLERANCE_PT: f32 = 6.0;
+    const CENTERED_START_SPREAD_PT: f32 = CENTER_TOLERANCE_PT * 2.0;
+    const ROW_GAP_MULTIPLIER: f32 = 2.5;
+
+    struct Row<'a> {
+        items: Vec<&'a ProjectedTextItem>,
+        y: f32,
+        height: f32,
+    }
+
+    let mut sorted: Vec<&ProjectedTextItem> = items
+        .iter()
+        .filter(|item| !item.item.text.trim().is_empty())
+        .collect();
+    sorted.sort_by(|a, b| {
+        a.item
+            .y
+            .total_cmp(&b.item.y)
+            .then(a.item.x.total_cmp(&b.item.x))
+    });
+
+    let mut rows: Vec<Row> = Vec::new();
+    for item in sorted {
+        let item_height = item.item.height.clamp(1.0, 24.0);
+        if let Some(row) = rows.last_mut() {
+            let same_baseline = (item.item.y - row.y).abs() <= row.height.min(item_height) * 0.5;
+            if same_baseline {
+                row.y = row.y.min(item.item.y);
+                row.height = row.height.max(item_height);
+                row.items.push(item);
+                continue;
+            }
+        }
+        rows.push(Row {
+            items: vec![item],
+            y: item.item.y,
+            height: item_height,
+        });
+    }
+
+    for row in &mut rows {
+        row.items.sort_by(|a, b| a.item.x.total_cmp(&b.item.x));
+    }
+
+    let centers = |row: &Row| -> Vec<f32> {
+        row.items
+            .iter()
+            .map(|item| item.item.x + item.item.width.max(0.0) * 0.5)
+            .collect()
+    };
+    let same_tracks = |row: &Row, tracks: &[f32]| -> bool {
+        let row_centers = centers(row);
+        row_centers.len() == tracks.len()
+            && row_centers
+                .iter()
+                .zip(tracks)
+                .all(|(center, track)| (center - track).abs() <= CENTER_TOLERANCE_PT)
+    };
+
+    let mut rects = Vec::new();
+    let mut start = 0usize;
+    while start < rows.len() {
+        if rows[start].items.len() < MIN_COLUMNS {
+            start += 1;
+            continue;
+        }
+
+        let tracks = centers(&rows[start]);
+        let mut matched_rows = vec![start];
+        let mut end = start + 1;
+        let mut last_full_row = start;
+        while end < rows.len() {
+            let gap = rows[end].y - (rows[last_full_row].y + rows[last_full_row].height);
+            let max_gap = rows[end].height.max(rows[last_full_row].height) * ROW_GAP_MULTIPLIER;
+            if gap > max_gap {
+                break;
+            }
+            if same_tracks(&rows[end], &tracks) {
+                matched_rows.push(end);
+                last_full_row = end;
+                end += 1;
+                continue;
+            }
+            // A single-cell line inside the row rhythm is commonly a wrapped
+            // value in one table column. It belongs inside the obstacle even
+            // though it cannot itself prove the full table shape.
+            if rows[end].items.len() == 1 {
+                end += 1;
+                continue;
+            }
+            break;
+        }
+
+        if matched_rows.len() >= MIN_ROWS {
+            let mut left_edges: Vec<Vec<f32>> = vec![Vec::new(); tracks.len()];
+            for &row_idx in &matched_rows {
+                for (col, item) in rows[row_idx].items.iter().enumerate() {
+                    left_edges[col].push(item.item.x);
+                }
+            }
+            let has_centered_column = left_edges.iter().any(|starts| {
+                let min = starts.iter().copied().fold(f32::INFINITY, f32::min);
+                let max = starts.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                max - min > CENTERED_START_SPREAD_PT
+            });
+
+            if has_centered_column {
+                let candidate_rows = &rows[start..end];
+                let x0 = candidate_rows
+                    .iter()
+                    .flat_map(|row| row.items.iter())
+                    .map(|item| item.item.x)
+                    .fold(f32::INFINITY, f32::min);
+                let y0 = candidate_rows
+                    .iter()
+                    .map(|row| row.y)
+                    .fold(f32::INFINITY, f32::min);
+                let x1 = candidate_rows
+                    .iter()
+                    .flat_map(|row| row.items.iter())
+                    .map(|item| item.item.x + item.item.width.max(0.0))
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let y1 = candidate_rows
+                    .iter()
+                    .map(|row| row.y + row.height)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                // A page-wide table has a meaningful horizontal span. This
+                // blocks false positives from small centered form controls.
+                if x1 > x0 && y1 > y0 && x1 - x0 >= page_width.max(1.0) * 0.25 {
+                    rects.push(Rect {
+                        x: x0,
+                        y: y0,
+                        width: x1 - x0,
+                        height: y1 - y0,
+                    });
+                }
+            }
+        }
+
+        start = end.max(start + 1);
+    }
+
+    rects
+}
+
 //
 // `build_projected_lines` groups already-projected items (in reading order)
 // into per-line structural metadata consumed by the markdown emitter. Lines
@@ -5519,5 +5688,52 @@ mod tests {
         // including angles near (but not within tolerance of) 360°.
         assert_eq!(canonical_rotation(45.0), 45);
         assert_eq!(canonical_rotation(357.0), 357);
+    }
+    fn centered_table_items(row_count: usize) -> Vec<ProjectedTextItem> {
+        let centers = [78.0, 188.0, 334.0, 481.0];
+        let widths = [
+            [18.0, 36.0, 36.0, 36.0],
+            [5.0, 66.0, 90.0, 36.0],
+            [5.0, 66.0, 135.0, 126.0],
+            [5.0, 66.0, 108.0, 36.0],
+        ];
+        let mut items = Vec::new();
+        for row in 0..row_count {
+            for col in 0..centers.len() {
+                let width = widths[row % widths.len()][col];
+                let text = format!("r{row}c{col}");
+                items.push(item_at(
+                    &text,
+                    centers[col] - width * 0.5,
+                    100.0 + row as f32 * 19.0,
+                    width,
+                    12.0,
+                ));
+            }
+        }
+        items
+    }
+
+    #[test]
+    fn centered_text_table_obstacle_accepts_two_visual_rows() {
+        let items = centered_table_items(2);
+        let rects = detect_centered_text_table_rects(&items, 612.0);
+
+        assert_eq!(rects.len(), 1);
+        assert!(rects[0].width > 300.0);
+        assert!(rects[0].height >= 31.0);
+    }
+
+    #[test]
+    fn centered_text_table_obstacle_blocks_vertical_table_slicing() {
+        let items = centered_table_items(4);
+        let rects = detect_centered_text_table_rects(&items, 612.0);
+        assert_eq!(rects.len(), 1);
+
+        let region = xy_cut(&items, 612.0, 792.0, &rects);
+        assert!(
+            !has_vertical_split(&region),
+            "the centered table obstacle must prevent XY-cut from slicing its columns"
+        );
     }
 }
