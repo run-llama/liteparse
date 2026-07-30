@@ -383,6 +383,7 @@ class LiteParseConfig:
     extract_xfa_packets: bool = False
     detect_screenshot_rects: bool = False
     extract_content_bounds: bool = False
+    render_form_fields: bool = False
 
 
 class ParseError(Exception):

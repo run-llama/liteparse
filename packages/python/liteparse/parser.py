@@ -682,6 +682,7 @@ class LiteParse:
             extract_xfa_packets=cfg.extract_xfa_packets,
             extract_content_bounds=cfg.extract_content_bounds,
             detect_screenshot_rects=cfg.detect_screenshot_rects,
+            render_form_fields=cfg.render_form_fields,
         )
 
     def __repr__(self) -> str:
