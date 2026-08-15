@@ -2889,6 +2889,7 @@ pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
                 page.page_width,
                 page.page_height,
                 &obstacles,
+                &table_rects,
             );
             ParsedPage {
                 page_number: page.page_number,
@@ -4597,6 +4598,7 @@ pub(crate) fn build_projected_lines(
     page_width: f32,
     page_height: f32,
     figures: &[Rect],
+    table_rects: &[Rect],
 ) -> (Vec<ProjectedLine>, Region) {
     if items.is_empty() {
         return (Vec::new(), Region::default());
@@ -4619,7 +4621,7 @@ pub(crate) fn build_projected_lines(
         .cloned()
         .collect();
 
-    let mut out: Vec<ProjectedLine> = Vec::new();
+    let mut out: Vec<TableOwnedLine> = Vec::new();
     for (path, indices) in leaves {
         // Sort within the leaf by y, tie-break by x. `build_one_line` re-sorts
         // by x for left→right concatenation; the y-banding loop here only
@@ -4672,31 +4674,37 @@ pub(crate) fn build_projected_lines(
             let height_mismatch = raw_h > Y_BAND_HEIGHT_CAP && raw_h > current_h * 2.0;
             let tol_factor = if height_mismatch { 0.3 } else { 0.5 };
             let same = (y - current_y).abs() < current_h.min(h) * tol_factor;
-            if same {
+            let item_region = table_region_for_item(table_rects, &items[idx]);
+            let current_region = table_region_for_group(table_rects, items, &current);
+            let crosses_independent_tables = item_region.is_some_and(|next| {
+                current.iter().any(|&current_index| {
+                    table_region_for_item(table_rects, &items[current_index])
+                        .is_some_and(|current| current != next)
+                })
+            });
+            if same && !crosses_independent_tables {
                 current.push(idx);
                 current_y = current_y.min(y);
                 current_h = current_h.max(h);
             } else {
-                out.push(build_one_line(
-                    items,
-                    &current,
-                    path.clone(),
-                    &heading_excl_figures,
-                ));
+                out.push(TableOwnedLine {
+                    line: build_one_line(items, &current, path.clone(), &heading_excl_figures),
+                    region: current_region,
+                });
                 current = vec![idx];
                 current_y = y;
                 current_h = h;
             }
         }
         if !current.is_empty() {
-            out.push(build_one_line(
-                items,
-                &current,
-                path.clone(),
-                &heading_excl_figures,
-            ));
+            out.push(TableOwnedLine {
+                line: build_one_line(items, &current, path.clone(), &heading_excl_figures),
+                region: table_region_for_group(table_rects, items, &current),
+            });
         }
     }
+
+    reorder_independent_table_lines(&mut out, table_rects);
 
     // Normalize `indent_x` to be leaf-relative: subtract each leaf's minimum
     // line bbox.x from every line in that leaf. This way list-nesting and
@@ -4707,7 +4715,8 @@ pub(crate) fn build_projected_lines(
     {
         use std::collections::HashMap;
         let mut leaf_min: HashMap<Vec<u16>, f32> = HashMap::new();
-        for line in &out {
+        for owned in &out {
+            let line = &owned.line;
             let e = leaf_min
                 .entry(line.region_path.clone())
                 .or_insert(f32::INFINITY);
@@ -4715,7 +4724,8 @@ pub(crate) fn build_projected_lines(
                 *e = line.indent_x;
             }
         }
-        for line in &mut out {
+        for owned in &mut out {
+            let line = &mut owned.line;
             if let Some(min) = leaf_min.get(&line.region_path)
                 && min.is_finite()
             {
@@ -4727,7 +4737,166 @@ pub(crate) fn build_projected_lines(
         }
     }
 
-    (out, region)
+    (out.into_iter().map(|owned| owned.line).collect(), region)
+}
+
+#[derive(Clone)]
+struct TableOwnedLine {
+    line: ProjectedLine,
+    region: Option<usize>,
+}
+
+/// Return the ruled-table region that owns an item. Besides text inside the
+/// grid, include a short label immediately above it; table captions and
+/// section headings commonly sit just outside the top border. A label that
+/// overlaps multiple tables remains page-spanning and is not assigned to
+/// either one.
+fn table_region_for_item(rects: &[Rect], item: &ProjectedTextItem) -> Option<usize> {
+    let item_left = item.orig_x;
+    let item_right = item.orig_x + item.orig_width;
+    let item_top = item.orig_y;
+    let item_bottom = item.orig_y + item.orig_height;
+    let nearby_above = |rect: &Rect| {
+        let gap = rect.y - item_bottom;
+        gap >= -TABLE_LABEL_OVERLAP_PT && gap <= item.orig_height.max(TABLE_LABEL_GAP_PT)
+    };
+
+    let mut matches = rects.iter().enumerate().filter_map(|(index, rect)| {
+        let overlap_x = (item_right.min(rect.x + rect.width) - item_left.max(rect.x)).max(0.0);
+        let horizontally_owned = item.orig_width > 0.0 && overlap_x / item.orig_width >= 0.5;
+        let inside_y = item_top <= rect.y + rect.height && item_bottom >= rect.y;
+        (horizontally_owned && (inside_y || nearby_above(rect))).then_some(index)
+    });
+
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+const TABLE_LABEL_GAP_PT: f32 = 12.0;
+const TABLE_LABEL_OVERLAP_PT: f32 = 2.0;
+
+fn table_region_for_group(
+    rects: &[Rect],
+    items: &[ProjectedTextItem],
+    indices: &[usize],
+) -> Option<usize> {
+    let mut regions = indices
+        .iter()
+        .map(|&index| table_region_for_item(rects, &items[index]));
+    let first = regions.next()??;
+    regions.all(|region| region == Some(first)).then_some(first)
+}
+
+/// Same-y rows from side-by-side grids naturally alternate left/right. Group
+/// lines by their owning grid so the table detector sees one complete table
+/// at a time. Non-table lines keep their original slots and relative order.
+fn reorder_independent_table_lines(lines: &mut [TableOwnedLine], rects: &[Rect]) {
+    if rects.len() < 2 {
+        return;
+    }
+
+    let Some(region_ranks) = table_region_ranks(rects) else {
+        return;
+    };
+    let positions: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, owned)| owned.region.map(|_| index))
+        .collect();
+    let mut grouped: Vec<TableOwnedLine> = positions
+        .iter()
+        .map(|&index| lines[index].clone())
+        .collect();
+
+    grouped.sort_by(|left, right| {
+        region_ranks[left.region.unwrap()]
+            .cmp(&region_ranks[right.region.unwrap()])
+            .then(left.line.bbox.y.total_cmp(&right.line.bbox.y))
+            .then(left.line.bbox.x.total_cmp(&right.line.bbox.x))
+    });
+
+    for (position, owned) in positions.into_iter().zip(grouped) {
+        lines[position] = owned;
+    }
+}
+
+/// Produce a stable page-reading rank for every table rectangle. Rectangles
+/// sharing a common vertical interval form one side-by-side band and sort by
+/// x; separate bands sort top-to-bottom. `None` means there is no side-by-side
+/// relationship, so projection order does not need rewriting.
+fn table_region_ranks(rects: &[Rect]) -> Option<Vec<usize>> {
+    struct Band {
+        top: f32,
+        common_top: f32,
+        common_bottom: f32,
+        regions: Vec<usize>,
+    }
+
+    let mut by_y: Vec<usize> = (0..rects.len()).collect();
+    by_y.sort_by(|&left, &right| {
+        rects[left]
+            .y
+            .total_cmp(&rects[right].y)
+            .then(rects[left].x.total_cmp(&rects[right].x))
+    });
+    let mut bands: Vec<Band> = Vec::new();
+    for region in by_y {
+        let rect = &rects[region];
+        let bottom = rect.y + rect.height;
+        if let Some(band) = bands
+            .iter_mut()
+            .find(|band| rect.y < band.common_bottom && bottom > band.common_top)
+        {
+            band.common_top = band.common_top.max(rect.y);
+            band.common_bottom = band.common_bottom.min(bottom);
+            band.regions.push(region);
+        } else {
+            bands.push(Band {
+                top: rect.y,
+                common_top: rect.y,
+                common_bottom: bottom,
+                regions: vec![region],
+            });
+        }
+    }
+
+    let has_side_by_side = bands.iter().any(|band| {
+        band.regions.iter().enumerate().any(|(position, &left)| {
+            band.regions[position + 1..].iter().any(|&right| {
+                rects[left].x + rects[left].width <= rects[right].x
+                    || rects[right].x + rects[right].width <= rects[left].x
+            })
+        })
+    });
+    if !has_side_by_side {
+        return None;
+    }
+
+    bands.sort_by(|left, right| left.top.total_cmp(&right.top));
+    let mut ordered = Vec::with_capacity(rects.len());
+    for band in &mut bands {
+        band.regions.sort_by(|&left, &right| {
+            rects[left]
+                .x
+                .total_cmp(&rects[right].x)
+                .then(rects[left].y.total_cmp(&rects[right].y))
+        });
+        ordered.extend(band.regions.iter().copied());
+    }
+
+    let mut ranks = vec![0; rects.len()];
+    for (rank, region) in ordered.into_iter().enumerate() {
+        ranks[region] = rank;
+    }
+    Some(ranks)
+}
+
+#[cfg(test)]
+fn regions_in_rank_order(rects: &[Rect]) -> Vec<usize> {
+    let ranks = table_region_ranks(rects).expect("side-by-side regions");
+    let mut regions: Vec<usize> = (0..rects.len()).collect();
+    regions.sort_by_key(|&region| ranks[region]);
+    regions
 }
 
 fn build_one_line(
@@ -5073,6 +5242,40 @@ mod tests {
         }
     }
 
+    fn table_rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn table_region_ranks_order_two_side_by_side_bands_top_to_bottom() {
+        let rects = [
+            table_rect(400.0, 300.0, 180.0, 80.0),
+            table_rect(40.0, 100.0, 180.0, 80.0),
+            table_rect(40.0, 300.0, 180.0, 80.0),
+            table_rect(400.0, 100.0, 180.0, 80.0),
+        ];
+
+        assert_eq!(regions_in_rank_order(&rects), vec![1, 3, 2, 0]);
+    }
+
+    #[test]
+    fn table_region_ranks_do_not_bridge_non_overlapping_outer_tables() {
+        // A overlaps B and B overlaps C, but A and C only touch. Treating
+        // overlap as a transitive relation would order A/C by x before B.
+        let rects = [
+            table_rect(40.0, 0.0, 180.0, 100.0),
+            table_rect(400.0, 50.0, 180.0, 100.0),
+            table_rect(40.0, 100.0, 180.0, 100.0),
+        ];
+
+        assert_eq!(regions_in_rank_order(&rects), vec![0, 1, 2]);
+    }
+
     #[test]
     fn xy_cut_finds_column_gutter_on_two_column_layout() {
         // Two columns, 50pt-wide gutter centered at x=300. Each column has
@@ -5126,7 +5329,7 @@ mod tests {
             items.push(item_at("L", 50.0, y, 200.0, 10.0));
             items.push(item_at("R", 350.0, y, 200.0, 10.0));
         }
-        let (lines, _region) = build_projected_lines(&items, 612.0, 792.0, &[]);
+        let (lines, _region) = build_projected_lines(&items, 612.0, 792.0, &[], &[]);
         // Left col's 5 lines come first (path [0, ...]), then right col's 5
         // (path [1, ...]).
         assert_eq!(lines.len(), 10);
@@ -5159,7 +5362,7 @@ mod tests {
             items.push(item_at("left side text", 50.0, y, 200.0, 10.0));
             items.push(item_at("right side text", 350.0, y, 200.0, 10.0));
         }
-        let (lines, _region) = build_projected_lines(&items, 612.0, 792.0, &[]);
+        let (lines, _region) = build_projected_lines(&items, 612.0, 792.0, &[], &[]);
         // First line (in pre-order) must be the title.
         let first = lines.first().expect("at least one line");
         assert!(
