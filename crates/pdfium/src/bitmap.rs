@@ -54,6 +54,32 @@ impl<'lib> Bitmap<'lib> {
         })
     }
 
+    /// Copy `rows` scanlines from `src` — starting at its row `src_y` — into
+    /// `self` starting at row `dst_y`. Both bitmaps must be BGRA and the same
+    /// width; strides may differ.
+    ///
+    /// Used to assemble a strip-rendered page: each strip is rendered slightly
+    /// taller than it owns (a one-row halo top and bottom) so that every owned
+    /// row is interior to the render and free of clip-edge anti-aliasing, then
+    /// only the owned rows are copied into the full bitmap — leaving no seam.
+    pub fn blit_rows_from(&self, src: &Bitmap<'_>, src_y: i32, dst_y: i32, rows: i32) {
+        let row_bytes = (self.width() * 4) as usize;
+        let dst_stride = self.stride() as usize;
+        let src_stride = src.stride() as usize;
+        let dst = unsafe { ffi!(FPDFBitmap_GetBuffer(self.handle)) } as *mut u8;
+        let src_ptr = unsafe { ffi!(FPDFBitmap_GetBuffer(src.handle)) } as *const u8;
+        for r in 0..rows as usize {
+            let so = (src_y as usize + r) * src_stride;
+            let doff = (dst_y as usize + r) * dst_stride;
+            // SAFETY: caller guarantees the row ranges lie within both buffers
+            // and the width matches; source and destination never overlap
+            // (distinct bitmaps).
+            unsafe {
+                std::ptr::copy_nonoverlapping(src_ptr.add(so), dst.add(doff), row_bytes);
+            }
+        }
+    }
+
     pub fn handle(&self) -> pdfium_sys::FPDF_BITMAP {
         self.handle
     }

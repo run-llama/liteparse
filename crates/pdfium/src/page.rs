@@ -181,6 +181,267 @@ pub struct PdfLink {
     pub uri: String,
 }
 
+/// Strip rendering only activates past this many drawable objects; ordinary
+/// pages stay on the single-shot path.
+const RENDER_STRIP_MIN_OBJECTS: i32 = 700;
+/// One strip per this many drawable objects (the driver of clip-mask cost).
+/// Deliberately finer than the activation threshold: once a page is
+/// clip-mask-bound, per-strip cost keeps dropping until strip height
+/// approaches `RENDER_MIN_STRIP_PX`, so heavy pages want more strips than the
+/// activation point alone would give (measured on a 22k-path chart page:
+/// ~1.2s at 31 strips → ~0.7s at 63).
+const RENDER_OBJECTS_PER_TILE: i32 = 350;
+/// Upper bound on strip count, to keep per-strip overhead in check.
+const RENDER_MAX_TILES: i32 = 128;
+/// Never make a strip thinner than this many device pixels. Below ~16px,
+/// output stops matching a single-shot render: PDFium picks different
+/// rasterization fast paths for tiny chart marks once the clip box shrinks to
+/// their scale, and per-pixel deltas jump from ≤31 to ~244 (measured at 8px
+/// strips). Do not lower this for more speed.
+const RENDER_MIN_STRIP_PX: i32 = 16;
+/// Guard against pathological form-XObject nesting when counting objects.
+const RENDER_MAX_FORM_DEPTH: u32 = 6;
+
+/// Choose how many horizontal strips to render a page in.
+///
+/// Strip rendering pays off only on pages with many clipped vector paths (see
+/// [`Page::render`]), so the count scales with object count and collapses to a
+/// single whole-page render for ordinary pages. It is also capped, and never
+/// makes strips thinner than `RENDER_MIN_STRIP_PX`, to bound per-strip
+/// overhead.
+fn render_tile_count(obj_count: i32, height: i32) -> i32 {
+    if obj_count <= RENDER_STRIP_MIN_OBJECTS || height <= 0 {
+        return 1;
+    }
+    let by_objects = (obj_count / RENDER_OBJECTS_PER_TILE).min(RENDER_MAX_TILES);
+    let by_height = (height / RENDER_MIN_STRIP_PX).max(1);
+    by_objects.min(by_height).max(1)
+}
+
+/// Objects at most this many device pixels tall are "small" for strip-boundary
+/// placement: a strip boundary must not cut through them (see
+/// [`plan_strip_boundaries`]). Taller objects tolerate being cut — the only
+/// residual difference is anti-aliasing-level (≤ ~31/255 per channel), whereas
+/// cut small marks can change outright (deltas up to ~244) because PDFium
+/// picks different rasterization fast paths once the clip box shrinks to
+/// their scale.
+const STRIP_SMALL_OBJ_MAX_PX: f32 = 24.0;
+
+/// Text objects get a much larger protection ceiling than paths — glyph
+/// rasterization changes visibly when cut by a clip edge, and text lines are
+/// vertically sparse, so protecting whole lines costs little placement
+/// freedom. Bounded so a degenerate page-sized text object cannot mark every
+/// row as hostile.
+const STRIP_TEXT_OBJ_MAX_PX: f32 = 96.0;
+
+/// 2D affine transform in PDF order: x' = a·x + c·y + e, y' = b·x + d·y + f.
+#[derive(Clone, Copy)]
+struct Mat {
+    a: f32,
+    b: f32,
+    c: f32,
+    d: f32,
+    e: f32,
+    f: f32,
+}
+
+impl Mat {
+    const IDENTITY: Mat = Mat {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        e: 0.0,
+        f: 0.0,
+    };
+
+    /// `self` applied after `inner` (i.e. maps inner-space coords outward).
+    fn compose(&self, inner: &Mat) -> Mat {
+        Mat {
+            a: self.a * inner.a + self.c * inner.b,
+            b: self.b * inner.a + self.d * inner.b,
+            c: self.a * inner.c + self.c * inner.d,
+            d: self.b * inner.c + self.d * inner.d,
+            e: self.a * inner.e + self.c * inner.f + self.e,
+            f: self.b * inner.e + self.d * inner.f + self.f,
+        }
+    }
+
+    fn map_y(&self, x: f32, y: f32) -> f32 {
+        self.b * x + self.d * y + self.f
+    }
+}
+
+/// Walk drawable (non-form) objects reachable from `obj`, recursing into form
+/// XObjects, counting them and — when `covered` is present — marking which
+/// device rows must not become strip boundaries because a small object spans
+/// them. `to_page` composes the enclosing form matrices (child object bounds
+/// are reported in their form's coordinate space). Stops once `*count`
+/// reaches `cap` — the exact total past the strip-count ceiling is
+/// irrelevant, and this bounds the walk on huge pages.
+#[allow(clippy::too_many_arguments)]
+fn walk_drawable_objects(
+    obj: pdfium_sys::FPDF_PAGEOBJECT,
+    depth: u32,
+    cap: i32,
+    count: &mut i32,
+    to_page: &Mat,
+    page_top: f32,
+    scale: f32,
+    covered: &mut Option<Vec<u16>>,
+) {
+    if *count >= cap {
+        return;
+    }
+    let obj_type = unsafe { ffi!(FPDFPageObj_GetType(obj)) };
+    if obj_type == pdfium_sys::FPDF_PAGEOBJ_FORM as i32 {
+        if depth >= RENDER_MAX_FORM_DEPTH {
+            return;
+        }
+        // Child bounds are in the form's space; fold the form's matrix in.
+        let mut m = pdfium_sys::FS_MATRIX {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 0.0,
+            f: 0.0,
+        };
+        let got = unsafe { ffi!(FPDFPageObj_GetMatrix(obj, &mut m)) };
+        let child_to_page = if got != 0 {
+            to_page.compose(&Mat {
+                a: m.a,
+                b: m.b,
+                c: m.c,
+                d: m.d,
+                e: m.e,
+                f: m.f,
+            })
+        } else {
+            *to_page
+        };
+        let n = unsafe { ffi!(FPDFFormObj_CountObjects(obj)) };
+        for i in 0..n {
+            let child = unsafe { ffi!(FPDFFormObj_GetObject(obj, i as std::os::raw::c_ulong)) };
+            if child.is_null() {
+                continue;
+            }
+            walk_drawable_objects(
+                child,
+                depth + 1,
+                cap,
+                count,
+                &child_to_page,
+                page_top,
+                scale,
+                covered,
+            );
+            if *count >= cap {
+                return;
+            }
+        }
+    } else {
+        // Shadings don't count toward strip activation: their render cost is
+        // per-covered-pixel (gradient evaluation and transparency-group
+        // compositing), which strips conserve rather than reduce — measured
+        // flat from 1 to 64 strips on a 591-shading page. Counting them
+        // would strip-render shading/transparency-heavy pages for no gain.
+        if obj_type != pdfium_sys::FPDF_PAGEOBJ_SHADING as i32 {
+            *count += 1;
+        }
+        let Some(rows) = covered else { return };
+        let (mut l, mut b, mut r, mut t) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        let ok = unsafe { ffi!(FPDFPageObj_GetBounds(obj, &mut l, &mut b, &mut r, &mut t)) };
+        if ok == 0 {
+            return;
+        }
+        // The matrix may rotate; take the device-Y extent over all 4 corners.
+        let ys = [
+            to_page.map_y(l, b),
+            to_page.map_y(r, b),
+            to_page.map_y(l, t),
+            to_page.map_y(r, t),
+        ];
+        let y_min_pt = ys.iter().cloned().fold(f32::INFINITY, f32::min);
+        let y_max_pt = ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        // Page space is Y-up; device rows are Y-down from the page top.
+        let dev_y0 = (page_top - y_max_pt) * scale;
+        let dev_y1 = (page_top - y_min_pt) * scale;
+        // Text objects are protected at any plausible line height — glyph
+        // rasterization is clip-sensitive, so a boundary through a text line
+        // shifts whole glyph edges, not just anti-aliasing. Other objects
+        // only need protecting when small (see STRIP_SMALL_OBJ_MAX_PX).
+        let max_px = if obj_type == pdfium_sys::FPDF_PAGEOBJ_TEXT as i32 {
+            STRIP_TEXT_OBJ_MAX_PX
+        } else {
+            STRIP_SMALL_OBJ_MAX_PX
+        };
+        if dev_y1 - dev_y0 > max_px {
+            return;
+        }
+        let height = rows.len() as i32;
+        // A boundary at row y splits an object spanning rows [y0, y1] iff
+        // y0 < y <= y1; mark that interval as boundary-hostile.
+        let first = (dev_y0.floor() as i32 + 1).clamp(0, height - 1);
+        let last = (dev_y1.ceil() as i32).clamp(0, height - 1);
+        for y in first..=last {
+            rows[y as usize] = rows[y as usize].saturating_add(1);
+        }
+    }
+}
+
+/// Pick the device row for each strip boundary. Strips march down the page
+/// with a nominal stride, but each boundary snaps to the nearest row that
+/// crosses no protected object (see [`STRIP_SMALL_OBJ_MAX_PX`] /
+/// [`STRIP_TEXT_OBJ_MAX_PX`]) — variable spacing, constant count. If no free
+/// row exists within a stride of the ideal position (an unusually tall
+/// hostile run), the search stretches up to one extra stride before giving
+/// up and cutting the least-covered row. Returns ascending rows starting at
+/// 0 and ending at `height`.
+fn plan_strip_boundaries(covered: Option<&[u16]>, height: i32, n_tiles: i32) -> Vec<i32> {
+    let stride = height as f32 / n_tiles as f32;
+    let Some(rows) = covered else {
+        let mut bounds: Vec<i32> = (0..n_tiles).map(|i| (height * i) / n_tiles).collect();
+        bounds.push(height);
+        return bounds;
+    };
+
+    let mut bounds = vec![0];
+    loop {
+        let prev = *bounds.last().unwrap();
+        let ideal = prev as f32 + stride;
+        // The last strip absorbs any remainder shorter than half a stride.
+        if ideal > height as f32 - stride * 0.5 {
+            break;
+        }
+        let pick = |lo: i32, hi: i32, free_only: bool| -> Option<i32> {
+            let (mut best, mut best_cost) = (None, u32::MAX);
+            for y in lo.max(prev + 2)..=hi.min(height - 2) {
+                if free_only && rows[y as usize] != 0 {
+                    continue;
+                }
+                let dist = (y as f32 - ideal).abs() as u32;
+                let cost = (rows[y as usize] as u32) * 1000 + dist;
+                if cost < best_cost {
+                    best_cost = cost;
+                    best = Some(y);
+                }
+            }
+            best
+        };
+        let half = (stride / 2.0) as i32;
+        let chosen = pick(ideal as i32 - half, ideal as i32 + half, true)
+            .or_else(|| pick(prev + 2, ideal as i32 + (stride as i32), true))
+            .or_else(|| pick(ideal as i32 - half, ideal as i32 + half, false));
+        match chosen {
+            Some(y) => bounds.push(y),
+            None => break,
+        }
+    }
+    bounds.push(height);
+    bounds
+}
+
 /// One PDF annotation with geometry normalized to viewport space (top-left
 /// origin, 72 DPI). String fields mirror the standard annotation dictionary.
 #[derive(Debug, Clone)]
@@ -318,6 +579,154 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
         }
     }
 
+    /// Debug helper for the `probe_object_rows` example: print every drawable
+    /// object whose device-space bounds (or clip-path bounds) overlap rows
+    /// `[row0, row1]`, with type, bounds, and clip extent.
+    pub fn debug_probe_rows(&self, page_top: f32, scale: f32, row0: f32, row1: f32) {
+        fn clip_dev_rows(
+            obj: pdfium_sys::FPDF_PAGEOBJECT,
+            page_top: f32,
+            scale: f32,
+        ) -> Option<(f32, f32, usize)> {
+            let clip = unsafe { ffi!(FPDFPageObj_GetClipPath(obj)) };
+            if clip.is_null() {
+                return None;
+            }
+            let n_paths = unsafe { ffi!(FPDFClipPath_CountPaths(clip)) };
+            if n_paths <= 0 {
+                return None;
+            }
+            let mut y_min = f32::INFINITY;
+            let mut y_max = f32::NEG_INFINITY;
+            let mut n_pts = 0usize;
+            for p in 0..n_paths {
+                let n_segs = unsafe { ffi!(FPDFClipPath_CountPathSegments(clip, p)) };
+                for s in 0..n_segs {
+                    let seg = unsafe { ffi!(FPDFClipPath_GetPathSegment(clip, p, s)) };
+                    if seg.is_null() {
+                        continue;
+                    }
+                    let (mut x, mut y) = (0.0f32, 0.0f32);
+                    if unsafe { ffi!(FPDFPathSegment_GetPoint(seg, &mut x, &mut y)) } != 0 {
+                        y_min = y_min.min(y);
+                        y_max = y_max.max(y);
+                        n_pts += 1;
+                    }
+                }
+            }
+            if n_pts == 0 {
+                return None;
+            }
+            Some((
+                (page_top - y_max) * scale,
+                (page_top - y_min) * scale,
+                n_pts,
+            ))
+        }
+
+        fn walk(
+            obj: pdfium_sys::FPDF_PAGEOBJECT,
+            depth: u32,
+            idx_path: String,
+            page_top: f32,
+            scale: f32,
+            row0: f32,
+            row1: f32,
+        ) {
+            let obj_type = unsafe { ffi!(FPDFPageObj_GetType(obj)) };
+            if obj_type == pdfium_sys::FPDF_PAGEOBJ_FORM as i32 {
+                if depth >= RENDER_MAX_FORM_DEPTH {
+                    return;
+                }
+                let n = unsafe { ffi!(FPDFFormObj_CountObjects(obj)) };
+                for i in 0..n {
+                    let child =
+                        unsafe { ffi!(FPDFFormObj_GetObject(obj, i as std::os::raw::c_ulong)) };
+                    if !child.is_null() {
+                        walk(
+                            child,
+                            depth + 1,
+                            format!("{idx_path}/{i}"),
+                            page_top,
+                            scale,
+                            row0,
+                            row1,
+                        );
+                    }
+                }
+                return;
+            }
+            let (mut l, mut b, mut r, mut t) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            if unsafe { ffi!(FPDFPageObj_GetBounds(obj, &mut l, &mut b, &mut r, &mut t)) } == 0 {
+                return;
+            }
+            // NOTE: bounds here are used as reported (page space assumed);
+            // good enough for a debug probe on unrotated single-level pages.
+            let dev_y0 = (page_top - t) * scale;
+            let dev_y1 = (page_top - b) * scale;
+            let clip = clip_dev_rows(obj, page_top, scale);
+            let obj_overlaps = dev_y1 >= row0 && dev_y0 <= row1;
+            let clip_overlaps = clip.is_some_and(|(c0, c1, _)| c1 >= row0 && c0 <= row1);
+            if obj_overlaps || clip_overlaps {
+                let names = ["?", "text", "path", "image", "shading", "form"];
+                let name = names.get(obj_type as usize).unwrap_or(&"?");
+                println!(
+                    "{idx_path} {name} dev_rows=[{dev_y0:.1},{dev_y1:.1}] dev_cols=[{:.1},{:.1}] clip_rows={:?}",
+                    l * scale,
+                    r * scale,
+                    clip.map(|(c0, c1, n)| format!("[{c0:.1},{c1:.1}] ({n} pts)")),
+                );
+            }
+        }
+
+        let top_count = unsafe { ffi!(FPDFPage_CountObjects(self.handle)) };
+        for i in 0..top_count {
+            let obj = unsafe { ffi!(FPDFPage_GetObject(self.handle, i)) };
+            if !obj.is_null() {
+                walk(obj, 0, format!("{i}"), page_top, scale, row0, row1);
+            }
+        }
+    }
+
+    /// Debug helper: count page objects by type, recursing into form
+    /// XObjects, e.g. `"text:120 path:3401 image:2 shading:15 form:7"`.
+    /// Used by the `render_timing` example to attribute slow renders.
+    pub fn object_type_breakdown(&self) -> String {
+        fn walk(obj: pdfium_sys::FPDF_PAGEOBJECT, depth: u32, counts: &mut [i64; 6]) {
+            let obj_type = unsafe { ffi!(FPDFPageObj_GetType(obj)) };
+            if (0..6).contains(&obj_type) {
+                counts[obj_type as usize] += 1;
+            }
+            if obj_type == pdfium_sys::FPDF_PAGEOBJ_FORM as i32 && depth < RENDER_MAX_FORM_DEPTH {
+                let n = unsafe { ffi!(FPDFFormObj_CountObjects(obj)) };
+                for i in 0..n {
+                    let child =
+                        unsafe { ffi!(FPDFFormObj_GetObject(obj, i as std::os::raw::c_ulong)) };
+                    if !child.is_null() {
+                        walk(child, depth + 1, counts);
+                    }
+                }
+            }
+        }
+
+        let mut counts = [0i64; 6];
+        let top_count = unsafe { ffi!(FPDFPage_CountObjects(self.handle)) };
+        for i in 0..top_count {
+            let obj = unsafe { ffi!(FPDFPage_GetObject(self.handle, i)) };
+            if !obj.is_null() {
+                walk(obj, 0, &mut counts);
+            }
+        }
+        let names = ["unknown", "text", "path", "image", "shading", "form"];
+        names
+            .iter()
+            .zip(counts.iter())
+            .filter(|&(_, &c)| c > 0)
+            .map(|(name, c)| format!("{name}:{c}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     pub fn text(&self) -> Result<TextPage<'_, 'lib>, PdfiumError> {
         let handle = unsafe { ffi!(FPDFText_LoadPage(self.handle)) };
         if handle.is_null() {
@@ -383,22 +792,127 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
         // tied to that same lock lifetime.
         let bitmap = unsafe { Bitmap::new(width, height) }?;
 
-        // Fill with white (ARGB: 0xFFFFFFFF)
-        bitmap.fill_rect(0, 0, width, height, 0xFFFFFFFF);
-
         let flags = (pdfium_sys::FPDF_ANNOT | pdfium_sys::FPDF_PRINTING) as i32;
 
-        unsafe {
-            ffi!(FPDF_RenderPageBitmap(
-                bitmap.handle(),
-                self.handle,
-                0,      // start_x
-                0,      // start_y
-                width,  // size_x
-                height, // size_y
-                0,      // rotation
-                flags,
-            ));
+        // Pages with thousands of clipped vector paths spend nearly all of
+        // their render time inside PDFium allocating one device-sized clip
+        // mask per object. Rendering the page in horizontal strips bounds each
+        // clip mask to the strip height, cutting that cost roughly linearly
+        // with the strip count — a 22k-path page drops from ~50s to ~0.7s at
+        // 63 strips (each strip reuses the exact whole-page transform via a
+        // negative Y offset, so rotation and sampling match a single-shot
+        // render). Ordinary pages gain nothing and would only pay per-strip
+        // display-list traversal, so the strip count scales with object count
+        // and collapses to 1 for them.
+        //
+        // Output is near-identical to a single-shot render, not byte-equal:
+        // strip boundaries are placed on rows free of small objects (see
+        // `plan_strip_boundaries`), and objects that must still be cut only
+        // differ at anti-aliasing level along the cut.
+        //
+        // Count drawable objects, recursing into form XObjects —
+        // `FPDFPage_CountObjects` only reports top-level objects, and heavy
+        // pages routinely bury thousands of paths inside a handful of forms.
+        // The same walk records which device rows small objects span, so
+        // strip boundaries can avoid cutting them.
+        let cap = RENDER_OBJECTS_PER_TILE.saturating_mul(RENDER_MAX_TILES);
+        let mut obj_count = 0;
+        // Row bookkeeping assumes the identity page-to-device flow of an
+        // unrotated page; for rotated pages fall back to uniform boundaries.
+        let mut covered: Option<Vec<u16>> = if self.rotation() == 0 && height > 0 {
+            Some(vec![0u16; height as usize])
+        } else {
+            None
+        };
+        // Device row 0 corresponds to the top of the page's visible box.
+        let page_top = self.view_box().map_or(self.height(), |vb| vb.top);
+        let top_count = unsafe { ffi!(FPDFPage_CountObjects(self.handle)) };
+        for i in 0..top_count {
+            let obj = unsafe { ffi!(FPDFPage_GetObject(self.handle, i)) };
+            if obj.is_null() {
+                continue;
+            }
+            walk_drawable_objects(
+                obj,
+                0,
+                cap,
+                &mut obj_count,
+                &Mat::IDENTITY,
+                page_top,
+                scale,
+                &mut covered,
+            );
+            if obj_count >= cap {
+                break;
+            }
+        }
+        let n_tiles = render_tile_count(obj_count, height);
+
+        if n_tiles <= 1 {
+            bitmap.fill_rect(0, 0, width, height, 0xFFFFFFFF);
+            unsafe {
+                ffi!(FPDF_RenderPageBitmap(
+                    bitmap.handle(),
+                    self.handle,
+                    0,      // start_x
+                    0,      // start_y
+                    width,  // size_x
+                    height, // size_y
+                    0,      // rotation
+                    flags,
+                ));
+            }
+            return Ok(bitmap);
+        }
+
+        // Place strip boundaries on rows free of small objects — a boundary
+        // that cuts a small mark changes how PDFium rasterizes it (visible
+        // deltas), whereas cut large objects only differ at anti-aliasing
+        // level along the cut.
+        let boundaries = plan_strip_boundaries(covered.as_deref(), height, n_tiles);
+
+        // Render one row of halo above and below each strip so every owned
+        // row is interior to its render (clip-edge anti-aliasing only touches
+        // the halo rows, which are discarded) — this leaves no seam at the
+        // strip boundaries. One row suffices: objects that would render
+        // differently when cut are protected by boundary placement above,
+        // and larger halos are superlinearly expensive (each object renders
+        // into every strip whose halo reaches it — measured 5.6× slower at
+        // halo 16). Every output row is owned by exactly one strip, so the
+        // blits fully cover the bitmap and no separate background fill is
+        // needed.
+        const HALO: i32 = 1;
+        // Iterate boundary pairs — the planner may produce fewer strips than
+        // `n_tiles` when free rows are scarce.
+        for w in boundaries.windows(2) {
+            let (y0, y1) = (w[0], w[1]);
+            let render_y0 = (y0 - HALO).max(0);
+            let render_y1 = (y1 + HALO).min(height);
+            let render_h = render_y1 - render_y0;
+
+            let strip = unsafe { Bitmap::new(width, render_h) }?;
+            strip.fill_rect(0, 0, width, render_h, 0xFFFFFFFF);
+
+            // Render the full page shifted up by `render_y0` so device rows
+            // [render_y0, render_y1) fall inside the strip; PDFium clips the
+            // rest. Reusing the whole-page size and transform keeps rotation
+            // and sampling identical to a single-shot render.
+            unsafe {
+                ffi!(FPDF_RenderPageBitmap(
+                    strip.handle(),
+                    self.handle,
+                    0,          // start_x
+                    -render_y0, // start_y — shift the page up into this strip
+                    width,      // size_x (full page width)
+                    height,     // size_y (full page height)
+                    0,          // rotation
+                    flags,
+                ));
+            }
+
+            // Copy only the owned rows [y0, y1) — skipping the halo — into the
+            // full bitmap.
+            bitmap.blit_rows_from(&strip, y0 - render_y0, y0, y1 - y0);
         }
 
         if let Some(form) = form {
@@ -1940,7 +2454,64 @@ impl Drop for Page<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Library;
+    use crate::library;
+
+    fn check_invariants(bounds: &[i32], height: i32) {
+        assert_eq!(*bounds.first().unwrap(), 0);
+        assert_eq!(*bounds.last().unwrap(), height);
+        assert!(
+            bounds.windows(2).all(|w| w[0] < w[1]),
+            "not ascending: {bounds:?}"
+        );
+    }
+
+    #[test]
+    fn uniform_boundaries_without_coverage() {
+        let bounds = plan_strip_boundaries(None, 1000, 10);
+        check_invariants(&bounds, 1000);
+        assert_eq!(bounds.len(), 11);
+        assert_eq!(bounds[5], 500);
+    }
+
+    #[test]
+    fn boundaries_avoid_covered_rows() {
+        let mut rows = vec![0u16; 1000];
+        // Hostile band around every uniform target except the edges.
+        for target in [100, 200, 300] {
+            for y in target - 3..=target + 3 {
+                rows[y as usize] = 1;
+            }
+        }
+        let bounds = plan_strip_boundaries(Some(&rows), 1000, 10);
+        check_invariants(&bounds, 1000);
+        for &b in &bounds[1..bounds.len() - 1] {
+            assert_eq!(rows[b as usize], 0, "boundary {b} lands on a covered row");
+        }
+    }
+
+    #[test]
+    fn fully_covered_page_still_produces_strips() {
+        let rows = vec![1u16; 1000];
+        let bounds = plan_strip_boundaries(Some(&rows), 1000, 10);
+        check_invariants(&bounds, 1000);
+        // Forced cuts: strip count should stay close to the request.
+        assert!(
+            bounds.len() >= 9,
+            "collapsed to {} strips",
+            bounds.len() - 1
+        );
+    }
+
+    #[test]
+    fn tile_count_activation_threshold() {
+        assert_eq!(render_tile_count(RENDER_STRIP_MIN_OBJECTS, 2000), 1);
+        assert!(render_tile_count(RENDER_STRIP_MIN_OBJECTS + 1, 2000) > 1);
+        // Strip height never drops below the fidelity floor.
+        let n = render_tile_count(50_000, 2000);
+        assert!(2000 / n >= RENDER_MIN_STRIP_PX);
+        // Degenerate heights collapse to a single strip.
+        assert_eq!(render_tile_count(50_000, 0), 1);
+    }
 
     #[test]
     fn nested_form_matrix_composition_transforms_path_points_in_order() {

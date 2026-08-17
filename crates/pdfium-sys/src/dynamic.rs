@@ -197,6 +197,15 @@ pub struct PdfiumBindings {
         unsafe extern "C" fn(FPDF_PATHSEGMENT, *mut f32, *mut f32) -> FPDF_BOOL,
     pub FPDFPathSegment_GetType: unsafe extern "C" fn(FPDF_PATHSEGMENT) -> std::os::raw::c_int,
     pub FPDFPathSegment_GetClose: unsafe extern "C" fn(FPDF_PATHSEGMENT) -> FPDF_BOOL,
+    pub FPDFPageObj_GetClipPath: unsafe extern "C" fn(FPDF_PAGEOBJECT) -> FPDF_CLIPPATH,
+    pub FPDFClipPath_CountPaths: unsafe extern "C" fn(FPDF_CLIPPATH) -> std::os::raw::c_int,
+    pub FPDFClipPath_CountPathSegments:
+        unsafe extern "C" fn(FPDF_CLIPPATH, std::os::raw::c_int) -> std::os::raw::c_int,
+    pub FPDFClipPath_GetPathSegment: unsafe extern "C" fn(
+        FPDF_CLIPPATH,
+        std::os::raw::c_int,
+        std::os::raw::c_int,
+    ) -> FPDF_PATHSEGMENT,
 
     // -- TextPage --
     pub FPDFText_LoadPage: unsafe extern "C" fn(FPDF_PAGE) -> FPDF_TEXTPAGE,
@@ -600,6 +609,10 @@ impl PdfiumBindings {
             FPDFPathSegment_GetPoint: load_fn!(lib, "FPDFPathSegment_GetPoint"),
             FPDFPathSegment_GetType: load_fn!(lib, "FPDFPathSegment_GetType"),
             FPDFPathSegment_GetClose: load_fn!(lib, "FPDFPathSegment_GetClose"),
+            FPDFPageObj_GetClipPath: load_fn!(lib, "FPDFPageObj_GetClipPath"),
+            FPDFClipPath_CountPaths: load_fn!(lib, "FPDFClipPath_CountPaths"),
+            FPDFClipPath_CountPathSegments: load_fn!(lib, "FPDFClipPath_CountPathSegments"),
+            FPDFClipPath_GetPathSegment: load_fn!(lib, "FPDFClipPath_GetPathSegment"),
             FPDFText_LoadPage: load_fn!(lib, "FPDFText_LoadPage"),
             FPDFText_ClosePage: load_fn!(lib, "FPDFText_ClosePage"),
             FPDFText_CountChars: load_fn!(lib, "FPDFText_CountChars"),
