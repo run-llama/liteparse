@@ -1348,22 +1348,26 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> 
                 continue;
             }
         }
-        // If the row has *more* cells than column_count, it likely picked up
-        // content from an adjacent page column that the projection placed on
-        // the same line (e.g. left-table-row + right-column body text). Try
-        // to recover by keeping only the cells whose center lands inside one
-        // of our established column tracks; drop the rest.
+        // If the row has *more* cells than column_count, its relationship to
+        // the header tracks is ambiguous: it may contain an adjacent page
+        // column, or nested label/value pairs inside a visual panel.
         if cells.len() > column_count {
-            let kept: Vec<TableCell> = cells
+            // A table guess must never make source text disappear. Extra cells
+            // may be nested label/value pairs (for example, "City" followed by
+            // "Boston, MA" inside one visual panel), not unrelated page-column
+            // noise. Preserve the entire uncertain region verbatim instead of
+            // silently deleting the unmatched cells.
+            let raw = lines[start_idx..=j]
                 .iter()
-                .filter(|c| match_track_idx(c, &track_ranges).is_some())
-                .cloned()
+                .map(|line| line.text.trim_end().to_string())
                 .collect();
-            if kept.len() == column_count {
-                cells = kept;
-            } else {
-                break;
-            }
+            return Some(TableRun {
+                start: start_idx,
+                end: j + 1,
+                body_start: start_idx,
+                bbox: lines_bbox(lines, start_idx, j + 1),
+                block: Block::GridFallback { lines: raw },
+            });
         }
         if cells.len() != column_count {
             break;
@@ -5087,6 +5091,60 @@ mod tests {
             .into_iter()
             .map(|p| p.text)
             .collect()
+    }
+
+    #[test]
+    fn extra_cells_fall_back_without_losing_invoice_values() {
+        // Three side-by-side detail panels can put each panel's label/value
+        // pair on one projected line. The header establishes three tracks,
+        // while the body line legitimately contains five cells. The old
+        // adjacent-column heuristic kept the track-aligned labels and silently
+        // deleted the two values between them.
+        let lines = vec![
+            line_with_spans(
+                &[
+                    ("Vehicle Details", 17.0),
+                    ("Customer Details", 161.0),
+                    ("Fleet Details", 325.0),
+                ],
+                100.0,
+                6.0,
+            ),
+            line_with_spans(
+                &[
+                    ("2021 RAM ProMaster 2500", 17.0),
+                    ("Organization", 161.0),
+                    ("Amazon", 223.0),
+                    ("City", 325.0),
+                    ("Boston, MA", 387.0),
+                ],
+                115.0,
+                6.0,
+            ),
+        ];
+
+        let run = try_detect_table(&lines, 0, 0).expect("expected a lossless fallback");
+        match run.block {
+            Block::GridFallback { lines } => {
+                let rendered = lines.join("\n");
+                for expected in [
+                    "Vehicle Details",
+                    "Customer Details",
+                    "Fleet Details",
+                    "2021 RAM ProMaster 2500",
+                    "Organization",
+                    "Amazon",
+                    "City",
+                    "Boston, MA",
+                ] {
+                    assert!(
+                        rendered.contains(expected),
+                        "fallback dropped source text: {expected}"
+                    );
+                }
+            }
+            other => panic!("expected Block::GridFallback, got {other:?}"),
+        }
     }
 
     #[test]
