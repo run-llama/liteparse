@@ -4621,6 +4621,19 @@ pub(crate) fn build_projected_lines(
         .cloned()
         .collect();
 
+    // Ruled-table ownership per item, resolved once up front. The y-banding
+    // loop below consults it for every item, and rescanning `table_rects`
+    // there would make line construction quadratic in the size of a y-band.
+    let item_regions: Vec<Option<usize>> = if table_rects.is_empty() {
+        Vec::new()
+    } else {
+        items
+            .iter()
+            .map(|item| table_region_for_item(table_rects, item))
+            .collect()
+    };
+    let region_of = |index: usize| item_regions.get(index).copied().flatten();
+
     let mut out: Vec<TableOwnedLine> = Vec::new();
     for (path, indices) in leaves {
         // Sort within the leaf by y, tie-break by x. `build_one_line` re-sorts
@@ -4638,6 +4651,13 @@ pub(crate) fn build_projected_lines(
         let mut current: Vec<usize> = Vec::new();
         let mut current_y: f32 = 0.0;
         let mut current_h: f32 = 0.0;
+        // Ruled-table ownership of `current`, tracked incrementally. A band is
+        // split as soon as an owned item meets a differently-owned one, so at
+        // most one `Some` region is ever present. `current_unowned` records
+        // whether a page-spanning item joined; that makes the whole line
+        // page-spanning rather than table-owned.
+        let mut current_region: Option<usize> = None;
+        let mut current_unowned = false;
         // PDFium occasionally reports anomalously large item heights (e.g.
         // 56pt for a single-word run whose real glyph height is ~13pt) when
         // the font's bounding box / line-height is baked into the text-matrix
@@ -4654,6 +4674,8 @@ pub(crate) fn build_projected_lines(
                 current.push(idx);
                 current_y = y;
                 current_h = h;
+                current_region = region_of(idx);
+                current_unowned = current_region.is_none();
                 continue;
             }
             // Use the SMALLER of the two heights for the y-band tolerance —
@@ -4674,32 +4696,41 @@ pub(crate) fn build_projected_lines(
             let height_mismatch = raw_h > Y_BAND_HEIGHT_CAP && raw_h > current_h * 2.0;
             let tol_factor = if height_mismatch { 0.3 } else { 0.5 };
             let same = (y - current_y).abs() < current_h.min(h) * tol_factor;
-            let item_region = table_region_for_item(table_rects, &items[idx]);
-            let current_region = table_region_for_group(table_rects, items, &current);
-            let crosses_independent_tables = item_region.is_some_and(|next| {
-                current.iter().any(|&current_index| {
-                    table_region_for_item(table_rects, &items[current_index])
-                        .is_some_and(|current| current != next)
-                })
-            });
+            let item_region = region_of(idx);
+            let crosses_independent_tables = item_region
+                .is_some_and(|next| current_region.is_some_and(|current| current != next));
             if same && !crosses_independent_tables {
                 current.push(idx);
                 current_y = current_y.min(y);
                 current_h = current_h.max(h);
+                match item_region {
+                    Some(region) => current_region = Some(region),
+                    None => current_unowned = true,
+                }
             } else {
                 out.push(TableOwnedLine {
                     line: build_one_line(items, &current, path.clone(), &heading_excl_figures),
-                    region: current_region,
+                    region: if current_unowned {
+                        None
+                    } else {
+                        current_region
+                    },
                 });
                 current = vec![idx];
                 current_y = y;
                 current_h = h;
+                current_region = item_region;
+                current_unowned = item_region.is_none();
             }
         }
         if !current.is_empty() {
             out.push(TableOwnedLine {
                 line: build_one_line(items, &current, path.clone(), &heading_excl_figures),
-                region: table_region_for_group(table_rects, items, &current),
+                region: if current_unowned {
+                    None
+                } else {
+                    current_region
+                },
             });
         }
     }
@@ -4740,7 +4771,6 @@ pub(crate) fn build_projected_lines(
     (out.into_iter().map(|owned| owned.line).collect(), region)
 }
 
-#[derive(Clone)]
 struct TableOwnedLine {
     line: ProjectedLine,
     region: Option<usize>,
@@ -4775,21 +4805,9 @@ fn table_region_for_item(rects: &[Rect], item: &ProjectedTextItem) -> Option<usi
 const TABLE_LABEL_GAP_PT: f32 = 12.0;
 const TABLE_LABEL_OVERLAP_PT: f32 = 2.0;
 
-fn table_region_for_group(
-    rects: &[Rect],
-    items: &[ProjectedTextItem],
-    indices: &[usize],
-) -> Option<usize> {
-    let mut regions = indices
-        .iter()
-        .map(|&index| table_region_for_item(rects, &items[index]));
-    let first = regions.next()??;
-    regions.all(|region| region == Some(first)).then_some(first)
-}
-
 /// Same-y rows from side-by-side grids naturally alternate left/right. Group
 /// lines by their owning grid so the table detector sees one complete table
-/// at a time. Non-table lines keep their original slots and relative order.
+/// at a time.
 fn reorder_independent_table_lines(lines: &mut [TableOwnedLine], rects: &[Rect]) {
     if rects.len() < 2 {
         return;
@@ -4798,26 +4816,52 @@ fn reorder_independent_table_lines(lines: &mut [TableOwnedLine], rects: &[Rect])
     let Some(region_ranks) = table_region_ranks(rects) else {
         return;
     };
-    let positions: Vec<usize> = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, owned)| owned.region.map(|_| index))
-        .collect();
-    let mut grouped: Vec<TableOwnedLine> = positions
-        .iter()
-        .map(|&index| lines[index].clone())
-        .collect();
 
-    grouped.sort_by(|left, right| {
-        region_ranks[left.region.unwrap()]
-            .cmp(&region_ranks[right.region.unwrap()])
+    // Reorder one xy-cut leaf at a time. `markdown_layout` recovers regions by
+    // scanning for maximal runs of equal `region_path` (`classify.rs`), so
+    // carrying a line across a leaf boundary would shatter that leaf into
+    // phantom regions and misalign the per-region table runs keyed off it.
+    let mut start = 0;
+    while start < lines.len() {
+        let mut end = start + 1;
+        while end < lines.len() && lines[end].line.region_path == lines[start].line.region_path {
+            end += 1;
+        }
+        reorder_leaf_table_lines(&mut lines[start..end], &region_ranks);
+        start = end;
+    }
+}
+
+/// Sort one leaf's table-owned lines into whole-table order. Only the span
+/// between the leaf's first and last table line moves, and only when every
+/// line in that span is table-owned: a page-spanning line interleaved between
+/// table rows belongs to no grid and so has no rank to sort by. Sorting around
+/// it would strand it mid-table, splitting the table it lands in — worse than
+/// the interleaved rows this reordering exists to fix. Such a page is left in
+/// projection order instead.
+fn reorder_leaf_table_lines(lines: &mut [TableOwnedLine], region_ranks: &[usize]) {
+    let Some(first) = lines.iter().position(|owned| owned.region.is_some()) else {
+        return;
+    };
+    let last = lines
+        .iter()
+        .rposition(|owned| owned.region.is_some())
+        .unwrap_or(first);
+
+    let span = &mut lines[first..=last];
+    if span.iter().any(|owned| owned.region.is_none()) {
+        return;
+    }
+
+    span.sort_by(|left, right| {
+        let (Some(left_region), Some(right_region)) = (left.region, right.region) else {
+            return std::cmp::Ordering::Equal;
+        };
+        region_ranks[left_region]
+            .cmp(&region_ranks[right_region])
             .then(left.line.bbox.y.total_cmp(&right.line.bbox.y))
             .then(left.line.bbox.x.total_cmp(&right.line.bbox.x))
     });
-
-    for (position, owned) in positions.into_iter().zip(grouped) {
-        lines[position] = owned;
-    }
 }
 
 /// Produce a stable page-reading rank for every table rectangle. Rectangles

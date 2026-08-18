@@ -331,3 +331,63 @@ fn spanning_heading_above_side_by_side_tables_remains_spanning() {
 
     assert_eq!(markdown, expected);
 }
+
+#[test]
+fn spanning_line_between_rows_does_not_split_side_by_side_tables() {
+    // A page-spanning note sitting vertically between the data rows of two
+    // side-by-side grids belongs to neither one, so it has no grid rank to
+    // sort by. Reordering the tables around it must not strand it mid-table:
+    // every row of both grids has to survive as table content.
+    let mut text_items = vec![text_item(
+        "Shared service matrix",
+        250.0,
+        80.0,
+        290.0,
+        18.0,
+        true,
+    )];
+    for row in 0..6 {
+        let y = 124.0 + row as f32 * 24.0;
+        for ((text, x), width) in [format!("L{row}a"), format!("L{row}b"), format!("L{row}c")]
+            .into_iter()
+            .zip([56.0, 136.0, 216.0])
+            .zip([60.0, 65.0, 65.0])
+        {
+            text_items.push(text_item(&text, x, y, width, 10.0, row == 0));
+        }
+        for ((text, x), width) in [format!("R{row}a"), format!("R{row}b"), format!("R{row}c")]
+            .into_iter()
+            .zip([426.0, 506.0, 586.0])
+            .zip([60.0, 65.0, 65.0])
+        {
+            text_items.push(text_item(&text, x, y + 0.8, width, 10.0, row == 0));
+        }
+    }
+    text_items.push(text_item(
+        "Note: spanning remark placed after the second data row of both tables.",
+        56.0,
+        184.0,
+        604.0,
+        10.0,
+        false,
+    ));
+
+    let ys = [116.0, 140.0, 164.0, 188.0, 212.0, 236.0, 260.0];
+    let mut graphics = ruled_grid(&[50.0, 130.0, 210.0, 290.0], &ys);
+    graphics.extend(ruled_grid(
+        &[420.0, 500.0, 580.0, 660.0],
+        &ys.map(|y| y + 0.8),
+    ));
+
+    let markdown = markdown_for(text_items, graphics);
+    for row in 0..6 {
+        for label in [format!("L{row}a"), format!("R{row}a")] {
+            assert!(
+                markdown
+                    .lines()
+                    .any(|line| line.starts_with('|') && line.contains(&label)),
+                "{label} is not table content:\n{markdown}"
+            );
+        }
+    }
+}
