@@ -77,7 +77,11 @@ const parser = new LiteParse({
   tessdataPath: undefined,       // Path to tessdata directory (optional)
   maxPages: 1000,                // Max pages to parse
   targetPages: '1-5,10',        // Specific pages (optional)
-  extractScreenshots: false,    // Return parsed pages as PNG buffers
+  extractScreenshots: false,    // Return rendered pages
+  screenshot: {
+    format: 'png',               // 'png' (default) or packed 'rgb8'
+    png: { compression: 'fast' }, // 'fast' (default), 'default', or 'best'
+  },
   continueOnPageError: false,   // Skip broken pages and return pageErrors
   dpi: 150,                      // Rendering DPI
   outputFormat: 'json',          // "json" | "text" | "markdown"
@@ -152,7 +156,7 @@ console.log(result.text);
 
 ## Screenshots
 
-Generate PNG screenshots of document pages:
+Generate screenshots of document pages:
 
 ```typescript
 const screenshots = parser.screenshot('document.pdf', [1, 2, 3]);

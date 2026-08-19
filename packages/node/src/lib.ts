@@ -19,6 +19,24 @@ import {
 export type LiteParseInput = string | Buffer | Uint8Array;
 export type OutputFormat = "json" | "text" | "markdown";
 export type ImageMode = "off" | "placeholder" | "embed";
+export type ScreenshotFormat = "png" | "rgb8";
+export type PngCompression = "fast" | "default" | "best";
+
+export interface PngScreenshotOptions {
+  compression: PngCompression;
+}
+
+export interface ScreenshotOptions {
+  format: ScreenshotFormat;
+  png: PngScreenshotOptions;
+}
+
+export type LiteParseUserConfig = Partial<Omit<LiteParseConfig, "screenshot">> & {
+  screenshot?: {
+    format?: ScreenshotFormat;
+    png?: Partial<PngScreenshotOptions>;
+  };
+};
 
 export interface LiteParseConfig {
   ocrLanguage: string;
@@ -29,8 +47,9 @@ export interface LiteParseConfig {
   tessdataPath?: string;
   maxPages: number;
   targetPages?: string;
-  /** Render parsed pages to PNG and return them in `ParseResult.screenshots`. */
+  /** Render parsed pages and return them in `ParseResult.screenshots`. */
   extractScreenshots: boolean;
+  screenshot: ScreenshotOptions;
   /** Continue after page-level extraction failures and collect `pageErrors`. */
   continueOnPageError: boolean;
   dpi: number;
@@ -419,7 +438,7 @@ export interface ParseResult {
   text: string;
   /** Populated only when `extractImages` is true. */
   images: ExtractedImage[];
-  /** PNG screenshots of parsed pages when `extractScreenshots` is enabled. */
+  /** Rendered pages when `extractScreenshots` is enabled. */
   screenshots: ScreenshotResult[];
   /** Embedded image objects that PDFium could not render or encode. */
   imageErrorCount: number;
@@ -494,6 +513,9 @@ export interface ScreenshotResult {
   width: number;
   height: number;
   imageBuffer: Buffer;
+  format: ScreenshotFormat;
+  /** Bytes per row for raw formats; absent for encoded images. */
+  stride?: number;
   /** True when every pixel has the same color (blank page after render). */
   isSolidFill: boolean;
   /** Solid rectangles/lines detected in the raster (viewport coords). Populated only with `detectScreenshotRects`. */
@@ -607,7 +629,7 @@ export class LiteParse {
   private _native: LiteParseNative;
   private _config: LiteParseConfig;
 
-  constructor(userConfig: Partial<LiteParseConfig> = {}) {
+  constructor(userConfig: LiteParseUserConfig = {}) {
     const nativeConfig: LiteParseNativeConfig = {
       ocrLanguage: userConfig.ocrLanguage,
       ocrEnabled: userConfig.ocrEnabled,
@@ -617,6 +639,7 @@ export class LiteParse {
       maxPages: userConfig.maxPages,
       targetPages: userConfig.targetPages,
       extractScreenshots: userConfig.extractScreenshots,
+      screenshot: userConfig.screenshot,
       continueOnPageError: userConfig.continueOnPageError,
       dpi: userConfig.dpi,
       outputFormat: userConfig.outputFormat,
@@ -661,6 +684,12 @@ export class LiteParse {
       maxPages: resolved.maxPages ?? 1000,
       targetPages: resolved.targetPages ?? undefined,
       extractScreenshots: resolved.extractScreenshots ?? false,
+      screenshot: {
+        format: resolved.screenshot?.format ?? "png",
+        png: {
+          compression: resolved.screenshot?.png?.compression ?? "fast",
+        },
+      },
       continueOnPageError: resolved.continueOnPageError ?? false,
       dpi: resolved.dpi ?? 150,
       outputFormat: (resolved.outputFormat as OutputFormat) ?? "json",
@@ -799,6 +828,8 @@ export class LiteParse {
       width: r.width,
       height: r.height,
       imageBuffer: r.imageBuffer,
+      format: r.format,
+      stride: r.stride,
       isSolidFill: r.isSolidFill,
       rects: r.rects,
     }));
@@ -942,6 +973,8 @@ function toScreenshot(result: NativeScreenshotResult): ScreenshotResult {
     width: result.width,
     height: result.height,
     imageBuffer: result.imageBuffer,
+    format: result.format,
+    stride: result.stride,
     isSolidFill: result.isSolidFill,
     rects: result.rects,
   };

@@ -3,7 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Optional, Tuple, Union
+from typing import Dict, Iterator, List, Literal, Optional, Tuple, TypedDict, Union
+
+ScreenshotFormat = Literal["png", "rgb8"]
+PngCompression = Literal["fast", "default", "best"]
+
+
+class PngScreenshotOptions(TypedDict, total=False):
+    compression: PngCompression
+
+
+class ScreenshotOptions(TypedDict, total=False):
+    format: ScreenshotFormat
+    png: PngScreenshotOptions
 
 
 @dataclass
@@ -369,6 +381,10 @@ class ScreenshotResult:
     width: int
     height: int
     image_bytes: bytes
+    #: ``"png"`` or raw ``"rgb8"``.
+    format: ScreenshotFormat
+    #: Bytes per row for raw formats; ``None`` for encoded images.
+    stride: Optional[int]
     #: True when every pixel has the same color (blank page after render).
     is_solid_fill: bool = False
     #: Solid rectangles/lines detected in the raster. Populated only when
@@ -456,6 +472,7 @@ class LiteParseConfig:
     max_pages: int
     target_pages: Optional[str]
     extract_screenshots: bool
+    screenshot: ScreenshotOptions
     continue_on_page_error: bool
     dpi: float
     output_format: str

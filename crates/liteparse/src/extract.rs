@@ -891,8 +891,26 @@ fn render_page_images(
 /// Encode RGBA pixel bytes to PNG. Used by both the image-embed path and the
 /// `render` module (page rasterization / screenshots).
 pub(crate) fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, LiteParseError> {
+    encode_png_with_compression(rgba, width, height, crate::config::PngCompression::Fast)
+}
+
+pub(crate) fn encode_png_with_compression(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    compression: crate::config::PngCompression,
+) -> Result<Vec<u8>, LiteParseError> {
     let mut png_buf = Vec::new();
-    let encoder = image::codecs::png::PngEncoder::new(&mut png_buf);
+    let compression = match compression {
+        crate::config::PngCompression::Fast => image::codecs::png::CompressionType::Fast,
+        crate::config::PngCompression::Default => image::codecs::png::CompressionType::Default,
+        crate::config::PngCompression::Best => image::codecs::png::CompressionType::Best,
+    };
+    let encoder = image::codecs::png::PngEncoder::new_with_quality(
+        &mut png_buf,
+        compression,
+        image::codecs::png::FilterType::Adaptive,
+    );
     encoder.write_image(rgba, width, height, image::ColorType::Rgba8.into())?;
     Ok(png_buf)
 }

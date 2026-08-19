@@ -28,6 +28,7 @@ export interface LiteParseNativeConfig {
   maxPages?: number;
   targetPages?: string;
   extractScreenshots?: boolean;
+  screenshot?: NativeScreenshotOptions;
   continueOnPageError?: boolean;
   dpi?: number;
   outputFormat?: string;
@@ -57,6 +58,13 @@ export interface LiteParseNativeConfig {
   skipDiagonalText?: boolean;
   includeComplexity?: boolean;
   extractVectorGraphics?: boolean;
+}
+
+export interface NativeScreenshotOptions {
+  format?: "png" | "rgb8";
+  png?: {
+    compression?: "fast" | "default" | "best";
+  };
 }
 
 export interface NativeCropBox {
@@ -303,6 +311,8 @@ export interface NativeScreenshotResult {
   width: number;
   height: number;
   imageBuffer: Buffer;
+  format: "png" | "rgb8";
+  stride?: number;
   isSolidFill: boolean;
   rects: NativeScreenshotRect[];
 }

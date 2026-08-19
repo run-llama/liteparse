@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use napi_derive::napi;
 
-use liteparse::config::{CropBox, ImageMode, LiteParseConfig, OutputFormat};
+use liteparse::config::{
+    CropBox, ImageMode, LiteParseConfig, OutputFormat, PngCompression as CorePngCompression,
+    ScreenshotFormat as CoreScreenshotFormat, ScreenshotOptions as CoreScreenshotOptions,
+};
 use liteparse::layout::{LayoutBlock, LayoutCell};
 use liteparse::parser::ParseResult;
 use liteparse::types::{
@@ -33,9 +36,10 @@ pub struct JsLiteParseConfig {
     pub max_pages: Option<u32>,
     /// Specific pages to parse (e.g., "1-5,10,15-20").
     pub target_pages: Option<String>,
-    /// Render parsed pages to PNG and return them in `ParseResult.screenshots`.
-    /// Default false; PNG payloads can be large.
+    /// Render parsed pages and return them in `ParseResult.screenshots`.
+    /// Default false; screenshot payloads can be large.
     pub extract_screenshots: Option<bool>,
+    pub screenshot: Option<JsScreenshotOptions>,
     /// Continue after page-level extraction failures and return them in
     /// `ParseResult.pageErrors`. Default false.
     pub continue_on_page_error: Option<bool>,
@@ -121,6 +125,94 @@ pub struct JsLiteParseConfig {
     pub extract_vector_graphics: Option<bool>,
 }
 
+#[napi(string_enum = "lowercase")]
+pub enum ScreenshotFormat {
+    Png,
+    Rgb8,
+}
+
+#[napi(string_enum = "lowercase")]
+pub enum PngCompression {
+    Fast,
+    Default,
+    Best,
+}
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsPngScreenshotOptions {
+    pub compression: Option<PngCompression>,
+}
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsScreenshotOptions {
+    pub format: Option<ScreenshotFormat>,
+    pub png: Option<JsPngScreenshotOptions>,
+}
+
+impl From<ScreenshotFormat> for CoreScreenshotFormat {
+    fn from(value: ScreenshotFormat) -> Self {
+        match value {
+            ScreenshotFormat::Png => Self::Png,
+            ScreenshotFormat::Rgb8 => Self::Rgb8,
+        }
+    }
+}
+
+impl From<CoreScreenshotFormat> for ScreenshotFormat {
+    fn from(value: CoreScreenshotFormat) -> Self {
+        match value {
+            CoreScreenshotFormat::Png => Self::Png,
+            CoreScreenshotFormat::Rgb8 => Self::Rgb8,
+        }
+    }
+}
+
+impl From<PngCompression> for CorePngCompression {
+    fn from(value: PngCompression) -> Self {
+        match value {
+            PngCompression::Fast => Self::Fast,
+            PngCompression::Default => Self::Default,
+            PngCompression::Best => Self::Best,
+        }
+    }
+}
+
+impl From<CorePngCompression> for PngCompression {
+    fn from(value: CorePngCompression) -> Self {
+        match value {
+            CorePngCompression::Fast => Self::Fast,
+            CorePngCompression::Default => Self::Default,
+            CorePngCompression::Best => Self::Best,
+        }
+    }
+}
+
+impl JsScreenshotOptions {
+    fn into_core(self) -> CoreScreenshotOptions {
+        let mut options = CoreScreenshotOptions::default();
+        if let Some(format) = self.format {
+            options.format = format.into();
+        }
+        if let Some(png) = self.png
+            && let Some(compression) = png.compression
+        {
+            options.png.compression = compression.into();
+        }
+        options
+    }
+
+    fn from_core(options: &CoreScreenshotOptions) -> Self {
+        Self {
+            format: Some(options.format.into()),
+            png: Some(JsPngScreenshotOptions {
+                compression: Some(options.png.compression.into()),
+            }),
+        }
+    }
+}
+
 /// A page sub-region as the fraction cropped from each side (top-left origin,
 /// each in `[0, 1]`).
 #[napi(object)]
@@ -158,6 +250,9 @@ impl JsLiteParseConfig {
         }
         if let Some(v) = self.extract_screenshots {
             cfg.extract_screenshots = v;
+        }
+        if let Some(options) = self.screenshot {
+            cfg.screenshot = options.into_core();
         }
         if let Some(v) = self.continue_on_page_error {
             cfg.continue_on_page_error = v;
@@ -276,6 +371,7 @@ impl JsLiteParseConfig {
             max_pages: Some(cfg.max_pages as u32),
             target_pages: cfg.target_pages.clone(),
             extract_screenshots: Some(cfg.extract_screenshots),
+            screenshot: Some(JsScreenshotOptions::from_core(&cfg.screenshot)),
             continue_on_page_error: Some(cfg.continue_on_page_error),
             dpi: Some(cfg.dpi as f64),
             output_format: Some(match cfg.output_format {
@@ -1132,6 +1228,8 @@ pub struct JsScreenshotResult {
     pub width: u32,
     pub height: u32,
     pub image_buffer: napi::bindgen_prelude::Buffer,
+    pub format: ScreenshotFormat,
+    pub stride: Option<u32>,
     /// True when every pixel has the same color (blank page after render).
     pub is_solid_fill: bool,
     /// Solid rectangles/lines detected in the raster (viewport coords).
@@ -1174,6 +1272,8 @@ impl JsScreenshotResult {
             width: result.width,
             height: result.height,
             image_buffer: result.image_bytes.clone().into(),
+            format: result.format.into(),
+            stride: result.stride,
             is_solid_fill: result.is_solid_fill,
             rects: result
                 .rects
@@ -1385,6 +1485,26 @@ mod tests {
         assert_eq!(js.extract_text_metadata, Some(false));
         js.extract_text_metadata = Some(true);
         assert!(js.into_rust().extract_text_metadata);
+    }
+
+    #[test]
+    fn screenshot_options_round_trip_through_napi_type() {
+        let mut js = JsLiteParseConfig::from_rust(&LiteParseConfig::default());
+        let screenshot = js.screenshot.as_ref().unwrap();
+        assert!(matches!(screenshot.format, Some(ScreenshotFormat::Png)));
+        assert!(matches!(
+            screenshot.png.as_ref().unwrap().compression,
+            Some(PngCompression::Fast)
+        ));
+        js.screenshot = Some(JsScreenshotOptions {
+            format: Some(ScreenshotFormat::Rgb8),
+            png: Some(JsPngScreenshotOptions {
+                compression: Some(PngCompression::Best),
+            }),
+        });
+        let core = js.into_rust();
+        assert_eq!(core.screenshot.format, CoreScreenshotFormat::Rgb8);
+        assert_eq!(core.screenshot.png.compression, CorePngCompression::Best);
     }
 
     #[test]

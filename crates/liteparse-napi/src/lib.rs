@@ -124,7 +124,7 @@ impl LiteParse {
         Ok(stats.iter().map(JsPageComplexityStats::from_rust).collect())
     }
 
-    /// Take screenshots of document pages. Returns PNG image buffers.
+    /// Take screenshots of document pages in the configured format.
     ///
     /// Non-PDF files are automatically converted to PDF before rendering when
     /// LibreOffice/ImageMagick are available.
@@ -154,6 +154,8 @@ impl LiteParse {
                 width: r.width,
                 height: r.height,
                 image_buffer: r.image_bytes.into(),
+                format: r.format.into(),
+                stride: r.stride,
                 is_solid_fill: r.is_solid_fill,
                 rects: r
                     .rects

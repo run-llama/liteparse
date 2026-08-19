@@ -1,22 +1,33 @@
+use crate::config::{PngCompression, ScreenshotFormat, ScreenshotOptions};
 use crate::error::LiteParseError;
-use crate::extract::{encode_png, load_document_from_input};
+use crate::extract::{encode_png_with_compression, load_document_from_input};
 use crate::types::{PdfInput, ScreenshotRect};
 use pdfium::Library;
 use serde::Serialize;
 
-/// A single rendered page as PNG bytes, plus raster-derived signals.
+/// A single rendered page image, plus raster-derived signals.
 #[derive(Debug, Clone)]
 pub struct RenderedPage {
     pub page_num: u32,
     pub width: u32,
     pub height: u32,
-    pub png_bytes: Vec<u8>,
+    pub image_bytes: Vec<u8>,
+    pub format: ScreenshotFormat,
+    /// Bytes per row for raw formats; absent for encoded images.
+    pub stride: Option<u32>,
     /// True when every pixel has the same color (blank page after render).
     pub is_solid_fill: bool,
     /// Solid rectangles/lines detected in the raster (viewport coords).
     /// Empty unless rect detection was requested; also empty for
     /// solid-fill pages, where detection is skipped.
     pub rects: Vec<ScreenshotRect>,
+}
+
+struct RenderedScreenshot {
+    image_bytes: Vec<u8>,
+    stride: Option<u32>,
+    is_solid_fill: bool,
+    rects: Vec<ScreenshotRect>,
 }
 
 /// Render selected pages from a PDF input to PNG bytes.
@@ -47,6 +58,30 @@ pub fn render_pages_to_png(
         detect_rects,
         render_form_fields,
         false,
+        &ScreenshotOptions::default(),
+    )
+}
+
+/// Render selected pages using the requested output format.
+pub fn render_pages(
+    input: &PdfInput,
+    page_numbers: Option<&[u32]>,
+    dpi: f32,
+    password: Option<&str>,
+    detect_rects: bool,
+    render_form_fields: bool,
+    options: &ScreenshotOptions,
+) -> Result<Vec<RenderedPage>, LiteParseError> {
+    let lib = Library::init();
+    let document = load_document_from_input(&lib, input, password)?;
+    render_document_pages(
+        &document,
+        page_numbers,
+        dpi,
+        detect_rects,
+        render_form_fields,
+        false,
+        options,
     )
 }
 
@@ -57,6 +92,7 @@ pub(crate) fn render_document_pages(
     detect_rects: bool,
     render_form_fields: bool,
     continue_on_page_error: bool,
+    options: &ScreenshotOptions,
 ) -> Result<Vec<RenderedPage>, LiteParseError> {
     let page_count = document.page_count() as u32;
     let pages: Vec<u32> = match page_numbers {
@@ -84,32 +120,23 @@ pub(crate) fn render_document_pages(
             let bitmap = page.render_with_form(dpi, form.as_ref())?;
             let width = bitmap.width() as u32;
             let height = bitmap.height() as u32;
-            let rgba = bitmap.to_rgba();
-
-            let is_solid_fill = is_solid_fill_rgba(&rgba, width as usize, height as usize);
-            // A solid-fill page has no structure to find; skip the scan (this is
-            // also the extract binary's cheap blank-page short-circuit).
-            let rects = if detect_rects && !is_solid_fill {
-                find_solid_rects_rgba(
-                    &rgba,
-                    width as usize,
-                    height as usize,
-                    page.width(),
-                    page.height(),
-                )
-            } else {
-                Vec::new()
-            };
-
-            let png_bytes = encode_png(&rgba, width, height)?;
+            let format = options.format;
+            let screenshot = match format {
+                ScreenshotFormat::Png => {
+                    render_png_screenshot(&bitmap, &page, detect_rects, options.png.compression)
+                }
+                ScreenshotFormat::Rgb8 => render_rgb8_screenshot(&bitmap, &page, detect_rects),
+            }?;
 
             Ok(RenderedPage {
                 page_num,
                 width,
                 height,
-                png_bytes,
-                is_solid_fill,
-                rects,
+                image_bytes: screenshot.image_bytes,
+                format,
+                stride: screenshot.stride,
+                is_solid_fill: screenshot.is_solid_fill,
+                rects: screenshot.rects,
             })
         })();
 
@@ -125,6 +152,116 @@ pub(crate) fn render_document_pages(
     }
 
     Ok(results)
+}
+
+fn render_png_screenshot(
+    bitmap: &pdfium::Bitmap<'_>,
+    page: &pdfium::Page<'_, '_>,
+    detect_rects: bool,
+    compression: PngCompression,
+) -> Result<RenderedScreenshot, LiteParseError> {
+    let width = bitmap.width() as u32;
+    let height = bitmap.height() as u32;
+    let rgba = bitmap.to_rgba();
+    let is_solid_fill = is_solid_fill_rgba(&rgba, width as usize, height as usize);
+    let rects = screenshot_rects(
+        &rgba,
+        width,
+        height,
+        page.width(),
+        page.height(),
+        detect_rects,
+        is_solid_fill,
+    );
+
+    Ok(RenderedScreenshot {
+        image_bytes: encode_png_with_compression(&rgba, width, height, compression)?,
+        stride: None,
+        is_solid_fill,
+        rects,
+    })
+}
+
+fn render_rgb8_screenshot(
+    bitmap: &pdfium::Bitmap<'_>,
+    page: &pdfium::Page<'_, '_>,
+    detect_rects: bool,
+) -> Result<RenderedScreenshot, LiteParseError> {
+    let width = bitmap.width() as u32;
+    let height = bitmap.height() as u32;
+    let (rgb, is_solid_fill, rects) = if detect_rects {
+        let rgba = bitmap.to_rgba();
+        let is_solid_fill = is_solid_fill_rgba(&rgba, width as usize, height as usize);
+        let rects = screenshot_rects(
+            &rgba,
+            width,
+            height,
+            page.width(),
+            page.height(),
+            true,
+            is_solid_fill,
+        );
+        (rgba_to_rgb(&rgba), is_solid_fill, rects)
+    } else {
+        let rgb = bitmap.to_rgb();
+        let is_solid_fill = is_solid_fill_rgb(&rgb, width as usize, height as usize);
+        (rgb, is_solid_fill, Vec::new())
+    };
+
+    let stride = width
+        .checked_mul(3)
+        .ok_or_else(|| LiteParseError::Other("RGB screenshot stride overflow".into()))?;
+    let expected_len = (stride as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| LiteParseError::Other("RGB screenshot size overflow".into()))?;
+    if rgb.len() != expected_len {
+        return Err(LiteParseError::Other(format!(
+            "invalid RGB screenshot length: expected {expected_len}, got {}",
+            rgb.len()
+        )));
+    }
+
+    Ok(RenderedScreenshot {
+        image_bytes: rgb,
+        stride: Some(stride),
+        is_solid_fill,
+        rects,
+    })
+}
+
+fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
+    rgba.chunks_exact(4)
+        .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
+        .collect()
+}
+
+fn is_solid_fill_rgb(rgb: &[u8], width: usize, height: usize) -> bool {
+    if width == 0 || height == 0 || rgb.len() < width * height * 3 {
+        return false;
+    }
+    let first = &rgb[..3];
+    rgb[3..].chunks_exact(3).all(|pixel| pixel == first)
+}
+
+fn screenshot_rects(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    page_width: f32,
+    page_height: f32,
+    detect_rects: bool,
+    is_solid_fill: bool,
+) -> Vec<ScreenshotRect> {
+    if !detect_rects || is_solid_fill {
+        return Vec::new();
+    }
+    find_solid_rects_rgba(
+        rgba,
+        width as usize,
+        height as usize,
+        page_width,
+        page_height,
+    )
 }
 
 /// Minimum rect dimension as a fraction of page height: 0.5%. Small renders
@@ -267,7 +404,7 @@ pub fn screenshot(
         .next()
         .ok_or_else(|| LiteParseError::Other("no page rendered".into()))?;
 
-    std::fs::write(output_path, &page.png_bytes)?;
+    std::fs::write(output_path, &page.image_bytes)?;
 
     eprintln!(
         "[rust-bin] rendered page {} at {dpi} DPI → {output_path} ({}×{})",

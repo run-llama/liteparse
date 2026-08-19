@@ -18,6 +18,8 @@ use wasm_bindgen_futures::JsFuture;
 
 use liteparse::config::{
     CropBox as CoreCropBox, ImageMode, LiteParseConfig as CoreConfig, OutputFormat,
+    PngCompression as CorePngCompression, ScreenshotFormat as CoreScreenshotFormat,
+    ScreenshotOptions as CoreScreenshotOptions,
 };
 use liteparse::ocr::{OcrEngine, OcrOptions, OcrResult as CoreOcrResult};
 use liteparse::parser::LiteParse as CoreLiteParse;
@@ -38,6 +40,100 @@ pub fn __wasm_start() {
 // JS-facing config (camelCase to match the Node package)
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenshotFormat {
+    Png,
+    Rgb8,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+#[serde(rename_all = "lowercase")]
+pub enum PngCompression {
+    Fast,
+    Default,
+    Best,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PngScreenshotOptions {
+    compression: Option<PngCompression>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ScreenshotOptions {
+    format: Option<ScreenshotFormat>,
+    png: Option<PngScreenshotOptions>,
+}
+
+impl From<ScreenshotFormat> for CoreScreenshotFormat {
+    fn from(value: ScreenshotFormat) -> Self {
+        match value {
+            ScreenshotFormat::Png => Self::Png,
+            ScreenshotFormat::Rgb8 => Self::Rgb8,
+        }
+    }
+}
+
+impl From<CoreScreenshotFormat> for ScreenshotFormat {
+    fn from(value: CoreScreenshotFormat) -> Self {
+        match value {
+            CoreScreenshotFormat::Png => Self::Png,
+            CoreScreenshotFormat::Rgb8 => Self::Rgb8,
+        }
+    }
+}
+
+impl From<PngCompression> for CorePngCompression {
+    fn from(value: PngCompression) -> Self {
+        match value {
+            PngCompression::Fast => Self::Fast,
+            PngCompression::Default => Self::Default,
+            PngCompression::Best => Self::Best,
+        }
+    }
+}
+
+impl From<CorePngCompression> for PngCompression {
+    fn from(value: CorePngCompression) -> Self {
+        match value {
+            CorePngCompression::Fast => Self::Fast,
+            CorePngCompression::Default => Self::Default,
+            CorePngCompression::Best => Self::Best,
+        }
+    }
+}
+
+impl ScreenshotOptions {
+    fn into_core(self) -> CoreScreenshotOptions {
+        let mut options = CoreScreenshotOptions::default();
+        if let Some(format) = self.format {
+            options.format = format.into();
+        }
+        if let Some(png) = self.png
+            && let Some(compression) = png.compression
+        {
+            options.png.compression = compression.into();
+        }
+        options
+    }
+
+    fn from_core(options: &CoreScreenshotOptions) -> Self {
+        Self {
+            format: Some(options.format.into()),
+            png: Some(PngScreenshotOptions {
+                compression: Some(options.png.compression.into()),
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, Tsify)]
 #[tsify(into_wasm_abi, from_wasm_abi)]
 #[serde(rename_all = "camelCase", default)]
@@ -52,9 +148,10 @@ pub struct LiteParseConfig {
     /// Skip page-level PDF extraction failures and report them in
     /// `ParseResult.pageErrors`. Document-level failures remain fatal.
     continue_on_page_error: Option<bool>,
-    /// Render parsed pages to PNG and return them in
-    /// `ParseResult.screenshots`. Default false; PNG payloads can be large.
+    /// Render parsed pages and return them in `ParseResult.screenshots`.
+    /// Default false; screenshot payloads can be large.
     extract_screenshots: Option<bool>,
+    screenshot: Option<ScreenshotOptions>,
     /// Scan rendered screenshots for solid rectangles/lines and attach
     /// them to each screenshot result. Default false.
     detect_screenshot_rects: Option<bool>,
@@ -152,6 +249,9 @@ impl LiteParseConfig {
         }
         if let Some(v) = self.extract_screenshots {
             cfg.extract_screenshots = v;
+        }
+        if let Some(options) = self.screenshot {
+            cfg.screenshot = options.into_core();
         }
         if let Some(v) = self.detect_screenshot_rects {
             cfg.detect_screenshot_rects = v;
@@ -269,6 +369,7 @@ impl LiteParseConfig {
             target_pages: cfg.target_pages.clone(),
             continue_on_page_error: Some(cfg.continue_on_page_error),
             extract_screenshots: Some(cfg.extract_screenshots),
+            screenshot: Some(ScreenshotOptions::from_core(&cfg.screenshot)),
             detect_screenshot_rects: Some(cfg.detect_screenshot_rects),
             dpi: Some(cfg.dpi),
             output_format: Some(match cfg.output_format {
@@ -767,8 +868,7 @@ pub struct ParseResult {
     pub pages: Vec<ParsedPage>,
     pub text: String,
     pub images: Vec<ExtractedImage>,
-    /// Page screenshots encoded as PNG. Empty unless `extractScreenshots`
-    /// is enabled.
+    /// Rendered page screenshots. Empty unless `extractScreenshots` is enabled.
     pub screenshots: Vec<ScreenshotResult>,
     pub image_error_count: u32,
     pub page_errors: Vec<PageError>,
@@ -797,7 +897,7 @@ pub struct PageError {
     pub message: String,
 }
 
-/// One page rendered to PNG, plus raster-derived signals.
+/// One rendered page, plus raster-derived signals.
 #[derive(Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
 #[serde(rename_all = "camelCase")]
@@ -805,8 +905,12 @@ pub struct ScreenshotResult {
     pub page_num: u32,
     pub width: u32,
     pub height: u32,
-    /// PNG-encoded image bytes.
+    /// PNG bytes or tightly packed RGB pixels.
+    #[serde(with = "serde_bytes")]
+    #[tsify(type = "Uint8Array")]
     pub image_bytes: Vec<u8>,
+    pub format: ScreenshotFormat,
+    pub stride: Option<u32>,
     /// True when every pixel has the same color (blank page after render).
     pub is_solid_fill: bool,
     /// Solid rectangles/lines detected in the raster (viewport coords).
@@ -1264,6 +1368,8 @@ fn to_js_result(result: &liteparse::ParseResult, extract_text_metadata: bool) ->
             width: shot.width,
             height: shot.height,
             image_bytes: shot.image_bytes.clone(),
+            format: shot.format.into(),
+            stride: shot.stride,
             is_solid_fill: shot.is_solid_fill,
             rects: shot
                 .rects

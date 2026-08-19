@@ -48,6 +48,8 @@ print(result.text)  # rendered Markdown
 All options are passed to the constructor:
 
 ```python
+from liteparse import LiteParse
+
 parser = LiteParse(
     ocr_enabled=True,              # Enable OCR (default: True)
     ocr_language="eng",            # Tesseract language code
@@ -55,7 +57,13 @@ parser = LiteParse(
     tessdata_path=None,            # Path to tessdata directory (optional)
     max_pages=1000,                # Max pages to parse
     target_pages="1-5,10",         # Specific pages (optional)
-    extract_screenshots=False,      # Return parsed pages as PNG bytes
+    extract_screenshots=False,      # Return rendered pages
+    screenshot={
+        "format": "png",            # "png" (default) or packed "rgb8"
+        "png": {
+            "compression": "fast",   # "fast" (default), "default", or "best"
+        },
+    },
     continue_on_page_error=False,   # Skip broken pages and return page_errors
     dpi=150,                       # Rendering DPI
     output_format="json",          # "json" | "text" | "markdown"
@@ -116,7 +124,7 @@ print(result.text)
 
 ## Screenshots
 
-Generate PNG screenshots of document pages:
+Generate screenshots of document pages:
 
 ```python
 screenshots = parser.screenshot("document.pdf", page_numbers=[1, 2, 3])
@@ -124,6 +132,20 @@ for s in screenshots:
     print(f"Page {s.page_num}: {s.width}x{s.height}")
     with open(f"page_{s.page_num}.png", "wb") as f:
         f.write(s.image_bytes)
+```
+
+Raw RGB avoids an intermediate PNG when another encoder should own the final format:
+
+```python
+from io import BytesIO
+from PIL import Image
+from liteparse import LiteParse
+
+parser = LiteParse(screenshot={"format": "rgb8"})
+page = parser.screenshot("document.pdf", page_numbers=[1])[0]
+image = Image.frombytes("RGB", (page.width, page.height), page.image_bytes)
+output = BytesIO()
+image.save(output, format="JPEG", quality=85, optimize=True)
 ```
 
 ## Document Complexity

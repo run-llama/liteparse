@@ -1,4 +1,4 @@
-use crate::config::{LiteParseConfig, parse_target_pages};
+use crate::config::{LiteParseConfig, ScreenshotFormat, parse_target_pages};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::conversion;
 use crate::error::LiteParseError;
@@ -38,8 +38,7 @@ pub struct ParseResult {
     /// `id` and `format` the markdown emitter referenced, so the caller can
     /// match them up without parsing markdown.
     pub images: Vec<ExtractedImage>,
-    /// Page screenshots encoded as PNG. Empty unless `extract_screenshots`
-    /// is enabled.
+    /// Rendered page screenshots. Empty unless `extract_screenshots` is enabled.
     pub screenshots: Vec<ScreenshotResult>,
     /// Number of embedded image objects that could not be extracted. A bad
     /// image does not fail the rest of the document parse.
@@ -68,6 +67,9 @@ pub struct ScreenshotResult {
     pub width: u32,
     pub height: u32,
     pub image_bytes: Vec<u8>,
+    pub format: ScreenshotFormat,
+    /// Bytes per row for raw formats; absent for encoded images.
+    pub stride: Option<u32>,
     /// True when every pixel has the same color (blank page after render).
     pub is_solid_fill: bool,
     /// Solid rectangles/lines detected in the raster (viewport coords).
@@ -754,13 +756,16 @@ impl LiteParse {
                     self.config.detect_screenshot_rects,
                     self.config.render_form_fields,
                     self.config.continue_on_page_error,
+                    &self.config.screenshot,
                 )?
                 .into_iter()
                 .map(|page| ScreenshotResult {
                     page_num: page.page_num,
                     width: page.width,
                     height: page.height,
-                    image_bytes: page.png_bytes,
+                    image_bytes: page.image_bytes,
+                    format: page.format,
+                    stride: page.stride,
                     is_solid_fill: page.is_solid_fill,
                     rects: page.rects,
                 })
@@ -923,7 +928,7 @@ impl LiteParse {
         }
     }
 
-    /// Generate screenshots of document pages as PNG bytes.
+    /// Generate screenshots of document pages in the configured format.
     ///
     /// Non-PDF files are automatically converted to PDF first (requires
     /// LibreOffice/ImageMagick on the system). Plain-text formats cannot be
@@ -960,13 +965,14 @@ impl LiteParse {
             log("[liteparse] converted input to PDF for screenshot rendering");
         }
 
-        let rendered = render::render_pages_to_png(
+        let rendered = render::render_pages(
             &validated_input,
             page_numbers.as_deref(),
             self.config.dpi,
             self.config.password.as_deref(),
             self.config.detect_screenshot_rects,
             self.config.render_form_fields,
+            &self.config.screenshot,
         )?;
 
         Ok(rendered
@@ -975,7 +981,9 @@ impl LiteParse {
                 page_num: page.page_num,
                 width: page.width,
                 height: page.height,
-                image_bytes: page.png_bytes,
+                image_bytes: page.image_bytes,
+                format: page.format,
+                stride: page.stride,
                 is_solid_fill: page.is_solid_fill,
                 rects: page.rects,
             })

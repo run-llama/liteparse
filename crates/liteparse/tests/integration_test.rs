@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use liteparse::config::OutputFormat;
+use liteparse::config::{
+    OutputFormat, PngCompression, PngScreenshotOptions, ScreenshotFormat, ScreenshotOptions,
+};
 use liteparse::conversion::convert_data_to_pdf;
 use liteparse::ocr_merge::ComplexityReason;
 use liteparse::types::PdfInput;
@@ -62,6 +64,69 @@ async fn test_parse_can_return_screenshots() {
             .image_bytes
             .starts_with(b"\x89PNG\r\n\x1a\n")
     );
+    assert_eq!(parsed.screenshots[0].format, ScreenshotFormat::Png);
+    assert_eq!(parsed.screenshots[0].stride, None);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_png_compression_preserves_rendered_pixels() {
+    let render = |compression| async move {
+        LiteParse::new(LiteParseConfig {
+            ocr_enabled: false,
+            screenshot: ScreenshotOptions {
+                format: ScreenshotFormat::Png,
+                png: PngScreenshotOptions { compression },
+            },
+            ..LiteParseConfig::default()
+        })
+        .screenshot("../../integration_tests_data/sample.pdf", Some(vec![1]))
+        .await
+        .expect("Should render a PNG screenshot")
+        .remove(0)
+        .image_bytes
+    };
+
+    let fast = render(PngCompression::Fast).await;
+    let best = render(PngCompression::Best).await;
+    let fast_image = image::load_from_memory(&fast)
+        .expect("Fast-compressed screenshot should decode")
+        .to_rgb8();
+    let best_image = image::load_from_memory(&best)
+        .expect("Best-compressed screenshot should decode")
+        .to_rgb8();
+
+    assert_eq!(fast_image.dimensions(), best_image.dimensions());
+    assert_eq!(fast_image.as_raw(), best_image.as_raw());
+    assert_ne!(fast, best);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_parse_can_return_tightly_packed_rgb8_screenshots() {
+    let lit = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        extract_screenshots: true,
+        screenshot: ScreenshotOptions {
+            format: ScreenshotFormat::Rgb8,
+            ..ScreenshotOptions::default()
+        },
+        detect_screenshot_rects: true,
+        ..LiteParseConfig::default()
+    });
+    let parsed = lit
+        .parse("../../integration_tests_data/sample.pdf")
+        .await
+        .expect("Should parse and render RGB screenshots");
+    let screenshot = &parsed.screenshots[0];
+    let stride = screenshot.width.checked_mul(3).unwrap();
+    assert_eq!(screenshot.format, ScreenshotFormat::Rgb8);
+    assert_eq!(screenshot.stride, Some(stride));
+    assert_eq!(
+        screenshot.image_bytes.len(),
+        stride as usize * screenshot.height as usize
+    );
+    assert!(!screenshot.is_solid_fill);
 }
 
 #[tokio::test]

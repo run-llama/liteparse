@@ -27,6 +27,8 @@ from .types import (
     DocumentMetadata,
     ScreenshotRect,
     ScreenshotResult,
+    ScreenshotFormat,
+    ScreenshotOptions,
     TextItem,
     XfaPacket,
     WordBox,
@@ -396,6 +398,8 @@ def _convert_native_result(native_result: Any) -> ParseResult:
                 width=screenshot.width,
                 height=screenshot.height,
                 image_bytes=screenshot.image_bytes,
+                format=screenshot.format,
+                stride=screenshot.stride,
                 is_solid_fill=getattr(screenshot, "is_solid_fill", False),
                 rects=[
                     ScreenshotRect(
@@ -460,6 +464,7 @@ class LiteParse:
         max_pages: Optional[int] = None,
         target_pages: Optional[str] = None,
         extract_screenshots: Optional[bool] = None,
+        screenshot: Optional[ScreenshotOptions] = None,
         continue_on_page_error: Optional[bool] = None,
         dpi: Optional[float] = None,
         output_format: Optional[str] = None,
@@ -502,8 +507,9 @@ class LiteParse:
             tessdata_path: Path to tessdata directory for Tesseract
             max_pages: Maximum number of pages to parse
             target_pages: Specific pages to parse (e.g., "1-5,10,15-20")
-            extract_screenshots: Render parsed pages to PNG and return them in
-                ``ParseResult.screenshots``. Default False; PNG payloads can be large.
+            extract_screenshots: Render parsed pages and return them in
+                ``ParseResult.screenshots``. Default False.
+            screenshot: Output format and format-specific encoder options.
             continue_on_page_error: Skip page-level PDF extraction failures and
                 return them in ``ParseResult.page_errors``. Document-level
                 failures remain fatal. Default False.
@@ -569,7 +575,7 @@ class LiteParse:
             extract_vector_graphics: Expose page-scoped vector shapes and
                 merged horizontal/vertical line segments. Default False.
         """
-        kwargs = {}
+        kwargs: Dict[str, Any] = {}
         if ocr_enabled is not None:
             kwargs["ocr_enabled"] = ocr_enabled
         if ocr_server_url is not None:
@@ -586,6 +592,8 @@ class LiteParse:
             kwargs["target_pages"] = target_pages
         if extract_screenshots is not None:
             kwargs["extract_screenshots"] = extract_screenshots
+        if screenshot is not None:
+            kwargs["screenshot"] = screenshot
         if continue_on_page_error is not None:
             kwargs["continue_on_page_error"] = continue_on_page_error
         if dpi is not None:
@@ -804,7 +812,7 @@ class LiteParse:
                           If None, screenshots all pages.
 
         Returns:
-            List of ScreenshotResult with PNG image bytes.
+            List of ScreenshotResult values in the configured format.
 
         Raises:
             FileNotFoundError: If the file doesn't exist.
@@ -825,6 +833,8 @@ class LiteParse:
                     width=r.width,
                     height=r.height,
                     image_bytes=r.image_bytes,
+                    format=r.format,
+                    stride=r.stride,
                     is_solid_fill=getattr(r, "is_solid_fill", False),
                     rects=[
                         ScreenshotRect(
@@ -855,6 +865,10 @@ class LiteParse:
             max_pages=cfg.max_pages,
             target_pages=cfg.target_pages,
             extract_screenshots=cfg.extract_screenshots,
+            screenshot={
+                "format": cfg.screenshot.format,
+                "png": {"compression": cfg.screenshot.png.compression},
+            },
             continue_on_page_error=cfg.continue_on_page_error,
             dpi=cfg.dpi,
             output_format=cfg.output_format,

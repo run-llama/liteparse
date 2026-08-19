@@ -19,10 +19,13 @@ pub struct LiteParseConfig {
     pub max_pages: usize,
     /// Specific pages to parse (e.g., "1-5,10,15-20"). None means all pages.
     pub target_pages: Option<String>,
-    /// Render parsed pages to PNG and return them in `ParseResult.screenshots`.
-    /// Default `false`; PNG payloads can be large.
+    /// Render parsed pages and return them in `ParseResult.screenshots`.
+    /// Default `false`; screenshot payloads can be large.
     #[serde(default)]
     pub extract_screenshots: bool,
+    /// Screenshot output and format-specific encoder options.
+    #[serde(default)]
+    pub screenshot: ScreenshotOptions,
     /// Continue parsing after a page-level PDFium extraction failure and
     /// report it in `ParseResult.page_errors`. Default `false` preserves the
     /// fail-fast behavior. Document-open and document-level failures remain
@@ -234,6 +237,7 @@ impl Default for LiteParseConfig {
             max_pages: 1000,
             target_pages: None,
             extract_screenshots: false,
+            screenshot: ScreenshotOptions::default(),
             continue_on_page_error: false,
             dpi: 150.0,
             output_format: OutputFormat::Json,
@@ -263,6 +267,61 @@ impl Default for LiteParseConfig {
             skip_diagonal_text: false,
             include_complexity: false,
             extract_vector_graphics: false,
+        }
+    }
+}
+
+/// Output used for rendered page screenshots.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenshotFormat {
+    #[default]
+    Png,
+    Rgb8,
+}
+
+/// Screenshot output and format-specific encoder options.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScreenshotOptions {
+    /// Screenshot representation returned to the caller.
+    pub format: ScreenshotFormat,
+    /// PNG encoder settings, used when `format` is [`ScreenshotFormat::Png`].
+    pub png: PngScreenshotOptions,
+}
+
+/// PNG-specific screenshot encoder settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PngScreenshotOptions {
+    pub compression: PngCompression,
+}
+
+/// PNG DEFLATE compression preset. `Fast` preserves the existing behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PngCompression {
+    #[default]
+    Fast,
+    Default,
+    Best,
+}
+
+impl PngCompression {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Default => "default",
+            Self::Best => "best",
+        }
+    }
+}
+
+impl ScreenshotFormat {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Rgb8 => "rgb8",
         }
     }
 }
@@ -410,5 +469,34 @@ mod tests {
         let back: LiteParseConfig = serde_json::from_str(&s).unwrap();
         assert_eq!(back.ocr_language, c.ocr_language);
         assert_eq!(back.output_format, c.output_format);
+        assert_eq!(back.screenshot, ScreenshotOptions::default());
+    }
+
+    #[test]
+    fn screenshot_format_uses_stable_wire_names() {
+        assert_eq!(
+            serde_json::to_string(&ScreenshotFormat::Png).unwrap(),
+            "\"png\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ScreenshotFormat::Rgb8).unwrap(),
+            "\"rgb8\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ScreenshotFormat>("\"rgb8\"").unwrap(),
+            ScreenshotFormat::Rgb8
+        );
+    }
+
+    #[test]
+    fn screenshot_options_are_additive_and_default_nested_fields() {
+        let options: ScreenshotOptions = serde_json::from_str(r#"{"format":"rgb8"}"#).unwrap();
+        assert_eq!(options.format, ScreenshotFormat::Rgb8);
+        assert_eq!(options.png.compression, PngCompression::Fast);
+
+        let options: ScreenshotOptions =
+            serde_json::from_str(r#"{"png":{"compression":"best"}}"#).unwrap();
+        assert_eq!(options.format, ScreenshotFormat::Png);
+        assert_eq!(options.png.compression, PngCompression::Best);
     }
 }

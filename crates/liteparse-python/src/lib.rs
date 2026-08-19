@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyDict};
 
-use liteparse::config::{CropBox, ImageMode, LiteParseConfig, OutputFormat};
+use liteparse::config::{
+    CropBox, ImageMode, LiteParseConfig, OutputFormat, PngCompression as CorePngCompression,
+    ScreenshotFormat as CoreScreenshotFormat, ScreenshotOptions as CoreScreenshotOptions,
+};
 use liteparse::types::PdfInput;
 
 mod cli;
@@ -981,6 +984,10 @@ struct PyScreenshotResult {
     height: u32,
     image_buffer: Vec<u8>,
     #[pyo3(get)]
+    format: String,
+    #[pyo3(get)]
+    stride: Option<u32>,
+    #[pyo3(get)]
     is_solid_fill: bool,
     #[pyo3(get)]
     rects: Vec<PyScreenshotRect>,
@@ -1022,6 +1029,8 @@ impl PyScreenshotResult {
             width: result.width,
             height: result.height,
             image_buffer: result.image_bytes,
+            format: result.format.as_str().into(),
+            stride: result.stride,
             is_solid_fill: result.is_solid_fill,
             rects: result
                 .rects
@@ -1191,6 +1200,89 @@ impl PyPageComplexityStats {
 // Config
 // ---------------------------------------------------------------------------
 
+fn parse_screenshot_format(value: &str) -> PyResult<CoreScreenshotFormat> {
+    match value {
+        "png" => Ok(CoreScreenshotFormat::Png),
+        "rgb8" => Ok(CoreScreenshotFormat::Rgb8),
+        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "unsupported screenshot format: {value}"
+        ))),
+    }
+}
+
+fn parse_png_compression(value: &str) -> PyResult<CorePngCompression> {
+    match value {
+        "fast" => Ok(CorePngCompression::Fast),
+        "default" => Ok(CorePngCompression::Default),
+        "best" => Ok(CorePngCompression::Best),
+        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "unsupported PNG screenshot compression: {value}"
+        ))),
+    }
+}
+
+struct ScreenshotOptionsInput(CoreScreenshotOptions);
+
+impl<'a, 'py> FromPyObject<'a, 'py> for ScreenshotOptionsInput {
+    type Error = PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'a, 'py, PyAny>) -> Result<Self, Self::Error> {
+        let dict = obj.cast::<PyDict>()?;
+        let mut options = CoreScreenshotOptions::default();
+        if let Some(value) = dict.get_item("format")? {
+            options.format = parse_screenshot_format(&value.extract::<String>()?)?;
+        }
+        if let Some(png) = dict.get_item("png")? {
+            let png = png.cast::<PyDict>()?;
+            if let Some(value) = png.get_item("compression")? {
+                options.png.compression = parse_png_compression(&value.extract::<String>()?)?;
+            }
+        }
+        Ok(Self(options))
+    }
+}
+
+#[pyclass(frozen, name = "_PngScreenshotOptions", skip_from_py_object)]
+#[derive(Clone)]
+struct PyPngScreenshotOptions {
+    compression: CorePngCompression,
+}
+
+#[pymethods]
+impl PyPngScreenshotOptions {
+    #[getter]
+    fn compression(&self) -> &'static str {
+        self.compression.as_str()
+    }
+}
+
+#[pyclass(frozen, name = "_ScreenshotOptions", skip_from_py_object)]
+#[derive(Clone)]
+struct PyScreenshotOptions {
+    format: CoreScreenshotFormat,
+    #[pyo3(get)]
+    png: PyPngScreenshotOptions,
+}
+
+#[pymethods]
+impl PyScreenshotOptions {
+    #[getter]
+    fn format(&self) -> &'static str {
+        self.format.as_str()
+    }
+}
+
+impl PyScreenshotOptions {
+    fn from_rust(options: &CoreScreenshotOptions) -> Self {
+        Self {
+            format: options.format,
+            png: PyPngScreenshotOptions {
+                compression: options.png.compression,
+            },
+        }
+    }
+}
+
 #[pyclass(frozen, from_py_object)]
 #[derive(Clone)]
 struct PyLiteParseConfig {
@@ -1210,6 +1302,8 @@ struct PyLiteParseConfig {
     target_pages: Option<String>,
     #[pyo3(get)]
     extract_screenshots: bool,
+    #[pyo3(get)]
+    screenshot: PyScreenshotOptions,
     #[pyo3(get)]
     continue_on_page_error: bool,
     #[pyo3(get)]
@@ -1295,6 +1389,7 @@ impl PyLiteParseConfig {
             max_pages: cfg.max_pages,
             target_pages: cfg.target_pages.clone(),
             extract_screenshots: cfg.extract_screenshots,
+            screenshot: PyScreenshotOptions::from_rust(&cfg.screenshot),
             continue_on_page_error: cfg.continue_on_page_error,
             dpi: cfg.dpi,
             output_format: match cfg.output_format {
@@ -1433,6 +1528,7 @@ impl LiteParse {
         max_pages = None,
         target_pages = None,
         extract_screenshots = None,
+        screenshot = None,
         continue_on_page_error = None,
         dpi = None,
         output_format = None,
@@ -1472,6 +1568,7 @@ impl LiteParse {
         max_pages: Option<usize>,
         target_pages: Option<String>,
         extract_screenshots: Option<bool>,
+        screenshot: Option<ScreenshotOptionsInput>,
         continue_on_page_error: Option<bool>,
         dpi: Option<f32>,
         output_format: Option<String>,
@@ -1526,6 +1623,9 @@ impl LiteParse {
         }
         if let Some(v) = extract_screenshots {
             cfg.extract_screenshots = v;
+        }
+        if let Some(options) = screenshot {
+            cfg.screenshot = options.0;
         }
         if let Some(v) = continue_on_page_error {
             cfg.continue_on_page_error = v;
@@ -1742,6 +1842,8 @@ impl LiteParse {
                     width: r.width,
                     height: r.height,
                     image_buffer: r.image_bytes,
+                    format: r.format.as_str().into(),
+                    stride: r.stride,
                     is_solid_fill: r.is_solid_fill,
                     rects: r
                         .rects
@@ -1870,6 +1972,8 @@ fn run_cli(args: Vec<String>) -> PyResult<()> {
 fn _liteparse(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LiteParse>()?;
     m.add_class::<PyLiteParseConfig>()?;
+    m.add_class::<PyScreenshotOptions>()?;
+    m.add_class::<PyPngScreenshotOptions>()?;
     m.add_class::<PyParseResult>()?;
     m.add_class::<PyPageError>()?;
     m.add_class::<PyParseBatch>()?;
@@ -1953,6 +2057,22 @@ mod tests {
         };
         let py = PyLiteParseConfig::from_rust(&config);
         assert!(py.extract_text_metadata);
+    }
+
+    #[test]
+    fn screenshot_options_keep_the_nested_python_shape() {
+        let options = CoreScreenshotOptions {
+            format: CoreScreenshotFormat::Rgb8,
+            png: liteparse::config::PngScreenshotOptions {
+                compression: CorePngCompression::Best,
+            },
+        };
+        assert_eq!(options.format, CoreScreenshotFormat::Rgb8);
+        assert_eq!(options.png.compression, CorePngCompression::Best);
+
+        let resolved = PyScreenshotOptions::from_rust(&options);
+        assert_eq!(resolved.format(), "rgb8");
+        assert_eq!(resolved.png.compression(), "best");
     }
 
     #[test]

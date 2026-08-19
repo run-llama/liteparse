@@ -22,10 +22,11 @@ export interface JsLiteParseConfig {
   /** Specific pages to parse (e.g., "1-5,10,15-20"). */
   targetPages?: string
   /**
-   * Render parsed pages to PNG and return them in `ParseResult.screenshots`.
-   * Default false; PNG payloads can be large.
+   * Render parsed pages and return them in `ParseResult.screenshots`.
+   * Default false; screenshot payloads can be large.
    */
   extractScreenshots?: boolean
+  screenshot?: JsScreenshotOptions
   /**
    * Continue after page-level extraction failures and return them in
    * `ParseResult.pageErrors`. Default false.
@@ -71,8 +72,7 @@ export interface JsLiteParseConfig {
   /**
    * Emit each page's classified layout blocks (headings, paragraphs, list
    * items, tables with per-cell boxes, code, rules, figures) with bounding
-   * boxes as `ParsedPage.blocks`. Default false. Independent of
-   * `outputFormat`; enabling it never changes the rendered markdown.
+   * boxes as `ParsedPage.blocks`. Default false.
    */
   extractBlocks?: boolean
   /** Extract AcroForm widget fields and values. */
@@ -144,6 +144,22 @@ export interface JsLiteParseConfig {
   includeComplexity?: boolean
   /** Expose page-scoped vector path extraction. Default false. */
   extractVectorGraphics?: boolean
+}
+export const enum ScreenshotFormat {
+  Png = 'png',
+  Rgb8 = 'rgb8'
+}
+export const enum PngCompression {
+  Fast = 'fast',
+  Default = 'default',
+  Best = 'best'
+}
+export interface JsPngScreenshotOptions {
+  compression?: PngCompression
+}
+export interface JsScreenshotOptions {
+  format?: ScreenshotFormat
+  png?: JsPngScreenshotOptions
 }
 /**
  * A page sub-region as the fraction cropped from each side (top-left origin,
@@ -490,6 +506,8 @@ export interface JsScreenshotResult {
   width: number
   height: number
   imageBuffer: Buffer
+  format: ScreenshotFormat
+  stride?: number
   /** True when every pixel has the same color (blank page after render). */
   isSolidFill: boolean
   /**
@@ -598,7 +616,7 @@ export declare class LiteParse {
    */
   isComplex(input: string | Buffer): Promise<Array<JsPageComplexityStats>>
   /**
-   * Take screenshots of document pages. Returns PNG image buffers.
+   * Take screenshots of document pages in the configured format.
    *
    * Non-PDF files are automatically converted to PDF before rendering when
    * LibreOffice/ImageMagick are available.
