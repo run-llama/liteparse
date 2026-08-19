@@ -4651,11 +4651,6 @@ pub(crate) fn build_projected_lines(
         let mut current: Vec<usize> = Vec::new();
         let mut current_y: f32 = 0.0;
         let mut current_h: f32 = 0.0;
-        // Ruled-table ownership of `current`, tracked incrementally. A band is
-        // split as soon as an owned item meets a differently-owned one, so at
-        // most one `Some` region is ever present. `current_unowned` records
-        // whether a page-spanning item joined; that makes the whole line
-        // page-spanning rather than table-owned.
         let mut current_region: Option<usize> = None;
         let mut current_unowned = false;
         // PDFium occasionally reports anomalously large item heights (e.g.
@@ -4832,13 +4827,7 @@ fn reorder_independent_table_lines(lines: &mut [TableOwnedLine], rects: &[Rect])
     }
 }
 
-/// Sort one leaf's table-owned lines into whole-table order. Only the span
-/// between the leaf's first and last table line moves, and only when every
-/// line in that span is table-owned: a page-spanning line interleaved between
-/// table rows belongs to no grid and so has no rank to sort by. Sorting around
-/// it would strand it mid-table, splitting the table it lands in — worse than
-/// the interleaved rows this reordering exists to fix. Such a page is left in
-/// projection order instead.
+/// Sort one leaf's table-owned lines into whole-table order.
 fn reorder_leaf_table_lines(lines: &mut [TableOwnedLine], region_ranks: &[usize]) {
     let Some(first) = lines.iter().position(|owned| owned.region.is_some()) else {
         return;
