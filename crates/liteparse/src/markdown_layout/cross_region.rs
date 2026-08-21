@@ -371,12 +371,18 @@ fn try_two_col_direct(clusters: &[Cluster], merged_len: usize, tol: f32) -> Opti
                 _ => false,
             };
             let left_rect = union_line_rects(&cluster.left);
+            let left_indices: Vec<usize> = cluster
+                .left
+                .iter()
+                .flat_map(|l| l.span_item_indices.iter().copied())
+                .collect();
             if wraps {
                 let row = rows.last_mut().unwrap();
                 if !row.0.text.is_empty() {
                     row.0.text.push(' ');
                 }
                 row.0.text.push_str(&text);
+                row.0.add_indices(left_indices);
                 if let Some(r) = &left_rect {
                     Rect::extend(&mut row.0.bbox, r);
                 }
@@ -386,7 +392,7 @@ fn try_two_col_direct(clusters: &[Cluster], merged_len: usize, tol: f32) -> Opti
                     Cell {
                         text,
                         bbox: left_rect,
-                        text_item_indices: Vec::new(),
+                        text_item_indices: left_indices,
                     },
                     Cell::default(),
                     bold,
@@ -409,6 +415,12 @@ fn try_two_col_direct(clusters: &[Cluster], merged_len: usize, tol: f32) -> Opti
                 row.1.text.push(' ');
             }
             row.1.text.push_str(&text);
+            row.1.add_indices(
+                cluster
+                    .right
+                    .iter()
+                    .flat_map(|l| l.span_item_indices.iter().copied()),
+            );
             if let Some(r) = &union_line_rects(&cluster.right) {
                 Rect::extend(&mut row.1.bbox, r);
             }
