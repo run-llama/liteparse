@@ -387,6 +387,36 @@ async fn test_extract_blocks_carries_geometry_without_changing_markdown() {
         ys.windows(2).all(|w| w[0] <= w[1]),
         "blocks should be in reading order, got {ys:?}"
     );
+
+    // Provenance (fork): every block attributes to the page's returned
+    // text_items — indices in bounds, sorted+deduped, non-empty for
+    // text-bearing kinds, and never shared between two different blocks.
+    let n_items = with.pages[0].text_items.len();
+    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for b in blocks {
+        assert!(
+            b.text_item_indices.iter().all(|&i| i < n_items),
+            "index out of bounds in {:?}",
+            b.kind
+        );
+        assert!(
+            b.text_item_indices.windows(2).all(|w| w[0] < w[1]),
+            "block indices must be strictly ascending (sorted+deduped)"
+        );
+        if !matches!(b.kind, "rule" | "figure") {
+            assert!(
+                !b.text_item_indices.is_empty(),
+                "text-bearing block {:?} carries no provenance",
+                b.kind
+            );
+        }
+        for &i in &b.text_item_indices {
+            assert!(
+                seen.insert(i),
+                "item {i} attributed to two different blocks"
+            );
+        }
+    }
 }
 
 #[tokio::test]
