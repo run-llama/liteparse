@@ -92,6 +92,8 @@ export interface LiteParseConfig {
    * Emit per-word sub-boxes on each text item ({@link TextItem.words}).
    * Default false. Word boxes roughly double the text-item payload (size + napi
    * marshalling), so enable only when doing word-level bbox attribution.
+   * With `extractBlocks` on, word geometry is always computed internally as a
+   * table-detection input, but `words` is only returned when this is set.
    */
   emitWordBoxes: boolean;
   /** Include rich PDF text metadata on returned text items. Default false. */
