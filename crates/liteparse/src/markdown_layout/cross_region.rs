@@ -281,13 +281,29 @@ fn fuse_cluster(cluster: &Cluster, path: &[u16]) -> ProjectedLine {
     }
     // Sort spans by x together with their source indices — sorting the two
     // vectors independently would silently break the positional alignment.
-    let mut zipped: Vec<(TextItem, usize)> = fused
-        .spans
-        .drain(..)
-        .zip(fused.span_item_indices.drain(..))
-        .collect();
-    zipped.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
-    (fused.spans, fused.span_item_indices) = zipped.into_iter().unzip();
+    // Guard the zip on equal lengths first: zip truncates to the shorter
+    // vector, so a misaligned line fed through here would silently DROP
+    // spans — table cell text, not just provenance. Every other consumer
+    // degrades to unattributed spans via `.get(i)` (text fidelity outranks
+    // provenance); mirror that policy here.
+    if fused.spans.len() == fused.span_item_indices.len() {
+        let mut zipped: Vec<(TextItem, usize)> = fused
+            .spans
+            .drain(..)
+            .zip(fused.span_item_indices.drain(..))
+            .collect();
+        zipped.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
+        (fused.spans, fused.span_item_indices) = zipped.into_iter().unzip();
+    } else {
+        debug_assert!(
+            false,
+            "fuse_cluster: spans/span_item_indices length mismatch ({} vs {})",
+            fused.spans.len(),
+            fused.span_item_indices.len()
+        );
+        fused.span_item_indices.clear();
+        fused.spans.sort_by(|a, b| a.x.total_cmp(&b.x));
+    }
     fused
 }
 
