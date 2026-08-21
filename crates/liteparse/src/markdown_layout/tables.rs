@@ -3950,10 +3950,8 @@ fn flatten_header_band(
                 .map(|c| {
                     let mut parts: Vec<&str> = Vec::new();
                     let mut indices: Vec<usize> = Vec::new();
-                    for (row, row_idx) in cells_repl
-                        .iter()
-                        .take(b + 1)
-                        .zip(cells_repl_indices.iter())
+                    for (row, row_idx) in
+                        cells_repl.iter().take(b + 1).zip(cells_repl_indices.iter())
                     {
                         let s = row[c].as_str();
                         if s.is_empty() {
@@ -5785,7 +5783,7 @@ mod tests {
             end_x: 200.0,
             text: "ABC-DEF-GHI".into(),
             bold: false,
-                text_item_indices: vec![],
+            text_item_indices: vec![],
         }];
         let tracks = vec![50.0, 150.0];
         assert!(recover_merged_cell(row, &tracks).is_none());
@@ -6067,8 +6065,8 @@ mod tests {
         let mut body = line_with_spans(&[("x", 50.0), ("1", 150.0)], 130.0, 10.0);
         body.span_item_indices = vec![5, 6];
         let lines = vec![top, bottom, body];
-        let (start, header) = union_header_from_above(&lines, 2, 0, &[50.0, 150.0])
-            .expect("header should absorb");
+        let (start, header) =
+            union_header_from_above(&lines, 2, 0, &[50.0, 150.0]).expect("header should absorb");
         assert_eq!(start, 0);
         assert_eq!(header[0].text, "Rated");
         assert_eq!(header[0].text_item_indices, vec![1, 3]);
@@ -6179,8 +6177,7 @@ mod tests {
         let pieces = line_pieces(&l);
         assert_eq!(pieces.len(), 1);
         assert_eq!(pieces[0].source_index, Some(0));
-        let cells =
-            cells_from_pieces(&pieces, &[50.0, 150.0], true).expect("split should succeed");
+        let cells = cells_from_pieces(&pieces, &[50.0, 150.0], true).expect("split should succeed");
         assert_eq!(cells.len(), 2);
         assert_eq!(cells[0].text, "aaaaaaaaaa");
         assert_eq!(cells[1].text, "bbbbbbbbbb");

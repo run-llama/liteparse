@@ -969,7 +969,11 @@ impl JsLayoutBlock {
 }
 
 impl JsParsedPage {
-    pub fn from_rust(page: &ParsedPage, extract_text_metadata: bool, serialize_words: bool) -> Self {
+    pub fn from_rust(
+        page: &ParsedPage,
+        extract_text_metadata: bool,
+        serialize_words: bool,
+    ) -> Self {
         Self {
             page_num: page.page_number as u32,
             width: page.page_width as f64,

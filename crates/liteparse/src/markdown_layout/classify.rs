@@ -409,7 +409,9 @@ pub fn classify_page_with_filters(
 /// stay identical.
 fn positioned_interruption(kind: Interruption) -> PositionedBlock {
     match kind {
-        Interruption::Hr(rect) => PositionedBlock::new(Block::HorizontalRule, Some(rect), Vec::new()),
+        Interruption::Hr(rect) => {
+            PositionedBlock::new(Block::HorizontalRule, Some(rect), Vec::new())
+        }
         Interruption::Figure(r) => PositionedBlock::new(
             Block::Figure {
                 id: r.id,
@@ -452,7 +454,11 @@ impl FlowState {
         {
             let bbox = acc.bbox.clone();
             let indices = std::mem::take(&mut acc.item_indices);
-            blocks.push(PositionedBlock::new(paragraph_from_accum(acc), bbox, indices));
+            blocks.push(PositionedBlock::new(
+                paragraph_from_accum(acc),
+                bbox,
+                indices,
+            ));
         }
     }
 
@@ -462,7 +468,11 @@ impl FlowState {
             && !lines.is_empty()
         {
             let lang = detect_code_language(&lines);
-            blocks.push(PositionedBlock::new(Block::CodeBlock { lines, lang }, bbox, indices));
+            blocks.push(PositionedBlock::new(
+                Block::CodeBlock { lines, lang },
+                bbox,
+                indices,
+            ));
         }
     }
 
@@ -1618,8 +1628,14 @@ mod tests {
         // final paragraph from line 3. Each block must report exactly its own
         // source lines' indices, in reading order.
         let p = page(vec![
-            tag(line("Title of the document goes here", 50.0, 50.0, 18.0, 18.0), 0),
-            tag(line("First sentence of the para-", 50.0, 80.0, 10.0, 10.0), 1),
+            tag(
+                line("Title of the document goes here", 50.0, 50.0, 18.0, 18.0),
+                0,
+            ),
+            tag(
+                line("First sentence of the para-", 50.0, 80.0, 10.0, 10.0),
+                1,
+            ),
             tag(line("graph continues here.", 50.0, 92.0, 10.0, 10.0), 2),
             tag(line("Another paragraph.", 50.0, 130.0, 10.0, 10.0), 3),
         ]);
@@ -1714,7 +1730,10 @@ mod tests {
         // Two xy_cut leaves: the paragraph's tail lands in the second leaf.
         // The stitcher fuses them (prev ends open, next starts lowercase) and
         // must union the provenance along with the text/bbox.
-        let mut a = tag(line("The sentence continues without", 50.0, 700.0, 10.0, 10.0), 0);
+        let mut a = tag(
+            line("The sentence continues without", 50.0, 700.0, 10.0, 10.0),
+            0,
+        );
         a.region_path = vec![0];
         let mut b = tag(line("ending punctuation here.", 320.0, 50.0, 10.0, 10.0), 1);
         b.region_path = vec![1];

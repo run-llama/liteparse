@@ -1466,7 +1466,11 @@ impl ParseSession {
         Ok(batch.map(|batch| ParseBatch {
             start_page: batch.start_page,
             end_page: batch.end_page,
-            result: to_js_result(&batch.result, self.extract_text_metadata, self.serialize_words),
+            result: to_js_result(
+                &batch.result,
+                self.extract_text_metadata,
+                self.serialize_words,
+            ),
         }))
     }
 }
