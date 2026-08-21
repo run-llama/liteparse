@@ -254,6 +254,11 @@ impl LiteParseConfig {
         Ok(cfg)
     }
 
+    /// Rebuild the JS-facing config from the resolved core config. Core's
+    /// `extract_blocks` word-box forcing never mutates the config (it applies
+    /// at extraction time), so `cfg.emit_word_boxes` is always the caller's
+    /// own `emitWordBoxes` request — which is also what the serialized output
+    /// honors.
     fn from_core(cfg: &CoreConfig) -> Self {
         Self {
             ocr_language: Some(cfg.ocr_language.clone()),
@@ -1074,6 +1079,10 @@ extern "C" {
 #[wasm_bindgen]
 pub struct LiteParse {
     inner: CoreLiteParse,
+    /// The resolved config as the caller requested it. Core's
+    /// `extract_blocks` word-box forcing happens at extraction time without
+    /// mutating the config, so `config.emit_word_boxes` here is always the
+    /// caller's own `emitWordBoxes` value — see [`Self::serialize_words`].
     config: CoreConfig,
 }
 
@@ -1099,6 +1108,10 @@ impl LiteParse {
                 .map_err(|e| JsError::new(&format!("invalid config: {}", e)))?
         };
         let core_cfg = js_cfg.into_core()?;
+        // With `extractBlocks` on, core forces word-box extraction internally
+        // as a table-detection input (word-anchored straddle splits) without
+        // mutating the config; the DTO mapping still omits `words` unless the
+        // caller requested them — see `serialize_words`.
         let mut parser = CoreLiteParse::new(core_cfg.clone());
         if let Some(js_engine) = ocr_engine_js {
             parser = parser.with_ocr_engine(std::sync::Arc::new(JsOcrEngine::new(js_engine)));
@@ -1126,7 +1139,21 @@ impl LiteParse {
         Ok(to_js_result(
             &result,
             self.inner.config().extract_text_metadata,
+            self.serialize_words(),
         ))
+    }
+}
+
+impl LiteParse {
+    /// Whether `TextItem::words` goes out to JS: always when the caller asked
+    /// for word boxes; with `extractBlocks` off, whatever core populated
+    /// (stock behavior — byte-identity contract); with `extractBlocks` on and
+    /// no request, never — core forces word-box extraction as a
+    /// table-detection input, but serializing those unrequested boxes
+    /// measurably bloats the `textItems` payload (2.3x on an 80-page text
+    /// PDF).
+    fn serialize_words(&self) -> bool {
+        self.config.emit_word_boxes || !self.config.extract_blocks
     }
 }
 
@@ -1134,7 +1161,16 @@ impl LiteParse {
 ///
 /// Shared by `parse()` and `ParseSession::nextBatch()` so a batch is mapped
 /// exactly the same way a whole-document result is.
-fn to_js_result(result: &liteparse::ParseResult, extract_text_metadata: bool) -> ParseResult {
+///
+/// `emit_words` is the caller's own `emitWordBoxes` request: core may have
+/// populated `TextItem::words` anyway (markdown output and `extractBlocks`
+/// both enable extraction as a table-detection input), but shipping them
+/// unrequested is pure payload.
+fn to_js_result(
+    result: &liteparse::ParseResult,
+    extract_text_metadata: bool,
+    emit_words: bool,
+) -> ParseResult {
     let pages: Vec<ParsedPage> = result
         .pages
         .iter()
@@ -1181,7 +1217,7 @@ fn to_js_result(result: &liteparse::ParseResult, extract_text_metadata: bool) ->
                             .filter(|codes| !codes.is_empty())
                             .map(<[u32]>::to_vec),
                         trailing_space_generated: meta.trailing_space_generated,
-                        words: if i.words.is_empty() {
+                        words: if !emit_words || i.words.is_empty() {
                             None
                         } else {
                             Some(
@@ -1374,6 +1410,7 @@ impl LiteParse {
 
         Ok(ParseSession {
             extract_text_metadata: self.inner.config().extract_text_metadata,
+            serialize_words: self.serialize_words(),
             inner: session,
         })
     }
@@ -1401,6 +1438,8 @@ pub struct ParseBatch {
 pub struct ParseSession {
     inner: liteparse::ParseSession,
     extract_text_metadata: bool,
+    /// See [`LiteParse::serialize_words`] — resolved once at session open.
+    serialize_words: bool,
 }
 
 #[wasm_bindgen]
@@ -1427,7 +1466,7 @@ impl ParseSession {
         Ok(batch.map(|batch| ParseBatch {
             start_page: batch.start_page,
             end_page: batch.end_page,
-            result: to_js_result(&batch.result, self.extract_text_metadata),
+            result: to_js_result(&batch.result, self.extract_text_metadata, self.serialize_words),
         }))
     }
 }
