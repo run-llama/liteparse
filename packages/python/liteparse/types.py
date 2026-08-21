@@ -46,7 +46,8 @@ class TextItem:
     confidence: Optional[float] = None
     rotation: float = 0.0
     #: Per-word sub-boxes. Empty unless the parser was configured with
-    #: ``emit_word_boxes=True``.
+    #: ``emit_word_boxes=True`` (``extract_blocks`` computes word geometry
+    #: internally for table detection, but never returns it unrequested).
     words: List[WordBox] = field(default_factory=list)
 
 
