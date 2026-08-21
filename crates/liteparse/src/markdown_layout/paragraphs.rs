@@ -269,6 +269,10 @@ pub(super) struct ParaAccum {
     /// Union of every line folded into this paragraph, so the emitted block
     /// reports the whole band it covers rather than its last line.
     pub(super) bbox: Option<crate::types::Rect>,
+    /// Source-item indices of every line folded into this paragraph, in
+    /// insertion (reading) order — the returned-text-items contract of
+    /// `ProjectedLine::span_item_indices`. Grown exactly where `bbox` grows.
+    pub(super) item_indices: Vec<usize>,
 }
 
 /// Append `next_line` to a paragraph accumulator. Maintains both the `raw` and
@@ -287,6 +291,9 @@ pub(super) fn append_to_paragraph(accum: &mut ParaAccum, next_line: &ProjectedLi
     let next_uniform: Option<SpanStyle> = line_uniform_style(next_line).filter(|s| !s.strike);
 
     crate::types::Rect::extend(&mut accum.bbox, &next_line.bbox);
+    accum
+        .item_indices
+        .extend(next_line.span_item_indices.iter().copied());
 
     if accum.raw.is_empty() {
         accum.raw.push_str(&next_raw);
