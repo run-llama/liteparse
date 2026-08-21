@@ -191,6 +191,7 @@ mod tests {
             all_mono: false,
             all_strike: false,
             spans: vec![TextItem::default()],
+            span_item_indices: vec![0],
             region_path: Vec::new(),
             mcid: None,
             in_figure: false,

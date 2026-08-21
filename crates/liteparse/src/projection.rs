@@ -4776,6 +4776,7 @@ fn build_one_line(
     let mut anchor_weights: HashMap<u8, usize> = HashMap::new();
     let mut mcid: Option<i32> = None;
     let mut spans: Vec<TextItem> = Vec::with_capacity(sorted.len());
+    let mut span_item_indices: Vec<usize> = Vec::with_capacity(sorted.len());
 
     for &i in sorted.iter() {
         let proj = &items[i];
@@ -4789,6 +4790,10 @@ fn build_one_line(
         let mut span = it.clone();
         span.rotation = proj.orig_rotation;
         spans.push(span);
+        // `i` indexes the final projected vector, which becomes the page's
+        // returned `text_items` 1:1 in `project_pages_to_grid` — so this is
+        // directly the public source-item index for the span above.
+        span_item_indices.push(i);
 
         // Collect item text. Use existing num_spaces from projection only as
         // a hint — the markdown emitter re-collapses whitespace, so we just
@@ -4986,6 +4991,7 @@ fn build_one_line(
         all_mono: majority(mono_chars),
         all_strike: false,
         spans,
+        span_item_indices,
         region_path,
         mcid,
         in_figure,
@@ -5047,6 +5053,91 @@ mod tests {
         let (_, text) = project_to_grid(&page, projection_boxes);
 
         assert!(text.is_empty());
+    }
+
+    #[test]
+    fn span_item_indices_stay_aligned_with_spans() {
+        // Two-column layout through the line builder: every line must carry
+        // exactly one source index per span, each index in bounds, and each
+        // (span, index) pair must point back at its own source item.
+        let mut items = Vec::new();
+        for row in 0..5 {
+            let y = 100.0 + row as f32 * 14.0;
+            items.push(item_at(&format!("left{row}"), 50.0, y, 200.0, 10.0));
+            items.push(item_at(&format!("right{row}"), 350.0, y, 200.0, 10.0));
+        }
+        let (lines, _region) = build_projected_lines(&items, 612.0, 792.0, &[]);
+        assert_eq!(lines.len(), 10);
+        for line in &lines {
+            assert_eq!(line.spans.len(), line.span_item_indices.len());
+            for (span, &idx) in line.spans.iter().zip(&line.span_item_indices) {
+                assert!(idx < items.len());
+                assert_eq!(items[idx].item.text, span.text);
+                assert_eq!(items[idx].item.x, span.x);
+            }
+        }
+    }
+
+    #[test]
+    fn span_item_indices_index_the_returned_text_items() {
+        // Full projection pipeline on a two-column page: the contract is that
+        // indices address the *returned* `ParsedPage.text_items` array
+        // (post-clean, line-order flattened) — not extraction order. Distinct
+        // texts make each span identify exactly one source item.
+        let mut text_items = Vec::new();
+        for row in 0..5 {
+            let y = 100.0 + row as f32 * 14.0;
+            text_items.push(TextItem {
+                text: format!("left{row}"),
+                x: 50.0,
+                y,
+                width: 200.0,
+                height: 10.0,
+                ..Default::default()
+            });
+            text_items.push(TextItem {
+                text: format!("right{row}"),
+                x: 350.0,
+                y,
+                width: 200.0,
+                height: 10.0,
+                ..Default::default()
+            });
+        }
+        let page = Page {
+            page_number: 1,
+            page_width: 612.0,
+            page_height: 792.0,
+            content_bounds: None,
+            graphics: Vec::new(),
+            vector_graphics: None,
+            text_items,
+            struct_nodes: Vec::new(),
+            image_refs: Vec::new(),
+            annotations: None,
+            form_fields: None,
+            structure_tree: None,
+        };
+        let pages = project_pages_to_grid(vec![page]);
+        let page = &pages[0];
+        assert!(!page.projected_lines.is_empty());
+        for line in &page.projected_lines {
+            assert_eq!(line.spans.len(), line.span_item_indices.len());
+            for (span, &idx) in line.spans.iter().zip(&line.span_item_indices) {
+                assert!(idx < page.text_items.len());
+                assert_eq!(page.text_items[idx].text, span.text);
+            }
+        }
+        // Every returned item survives this clean layout and is referenced by
+        // exactly one span across the page's lines.
+        let mut seen: Vec<usize> = page
+            .projected_lines
+            .iter()
+            .flat_map(|l| l.span_item_indices.iter().copied())
+            .collect();
+        seen.sort_unstable();
+        let expected: Vec<usize> = (0..page.text_items.len()).collect();
+        assert_eq!(seen, expected);
     }
 
     fn item_at(text: &str, x: f32, y: f32, w: f32, h: f32) -> ProjectedTextItem {

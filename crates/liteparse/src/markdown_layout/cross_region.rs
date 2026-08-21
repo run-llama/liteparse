@@ -12,7 +12,7 @@
 
 use super::blocks::{Block, Cell};
 use super::tables::{TableRun, detect_tables};
-use crate::types::{ProjectedLine, Rect};
+use crate::types::{ProjectedLine, Rect, TextItem};
 
 /// Union of the boxes of every line in `lines`, or `None` when empty.
 fn union_line_rects(lines: &[&ProjectedLine]) -> Option<Rect> {
@@ -264,6 +264,9 @@ fn fuse_cluster(cluster: &Cluster, path: &[u16]) -> ProjectedLine {
         fused.text.push_str(&" ".repeat(n_spaces));
         fused.text.push_str(&m.text);
         fused.spans.extend(m.spans.iter().cloned());
+        fused
+            .span_item_indices
+            .extend(m.span_item_indices.iter().copied());
         let x1 = (fused.bbox.x + fused.bbox.width).max(m.bbox.x + m.bbox.width);
         let y1 = (fused.bbox.y + fused.bbox.height).max(m.bbox.y + m.bbox.height);
         fused.bbox.x = fused.bbox.x.min(m.bbox.x);
@@ -276,7 +279,15 @@ fn fuse_cluster(cluster: &Cluster, path: &[u16]) -> ProjectedLine {
         fused.all_strike &= m.all_strike;
         fused.font_size_is_estimated |= m.font_size_is_estimated;
     }
-    fused.spans.sort_by(|a, b| a.x.total_cmp(&b.x));
+    // Sort spans by x together with their source indices — sorting the two
+    // vectors independently would silently break the positional alignment.
+    let mut zipped: Vec<(TextItem, usize)> = fused
+        .spans
+        .drain(..)
+        .zip(fused.span_item_indices.drain(..))
+        .collect();
+    zipped.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
+    (fused.spans, fused.span_item_indices) = zipped.into_iter().unzip();
     fused
 }
 
@@ -708,6 +719,53 @@ mod tests {
         assert!(m.merged[0].text.contains("MANILA"));
         assert!(m.merged[0].text.contains("2454"));
         assert!(m.merged[0].text.contains("6125"));
+    }
+
+    /// Fusion must keep `span_item_indices` positionally aligned with
+    /// `spans` — the fused spans are re-sorted by x, so sorting the two
+    /// vectors independently would scramble the pairing. Give every span a
+    /// globally distinct source index and check each fused span still sits
+    /// beside the index of its own source item.
+    #[test]
+    fn fused_lines_keep_span_item_indices_aligned() {
+        let mut lines = Vec::new();
+        let mut source_texts: Vec<String> = Vec::new();
+        // Left leaf: row labels (one span each).
+        for (i, label) in ["MANILA", "CEBU", "CAGAYAN DE ORO", "SUBIC"]
+            .iter()
+            .enumerate()
+        {
+            let y = 100.0 + i as f32 * 20.0;
+            let mut l = at_region(line_with_spans(&[(label, 50.0)], y, 10.0), &[0, 0]);
+            l.span_item_indices = vec![source_texts.len()];
+            source_texts.push((*label).into());
+            lines.push(l);
+        }
+        // Right leaf: two numeric columns per row (two spans each).
+        for (i, (a, b)) in [
+            ("2454", "6125"),
+            ("1138", "79500"),
+            ("958", "13196"),
+            ("313", "136"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let y = 100.0 + i as f32 * 20.0;
+            let mut l = at_region(line_with_spans(&[(a, 200.0), (b, 280.0)], y, 10.0), &[0, 1]);
+            l.span_item_indices = vec![source_texts.len(), source_texts.len() + 1];
+            source_texts.push((*a).into());
+            source_texts.push((*b).into());
+            lines.push(l);
+        }
+        let m = find_cross_region_table_merge(&lines).expect("should merge");
+        assert_eq!(m.merged.len(), 4);
+        for fused in &m.merged {
+            assert_eq!(fused.spans.len(), fused.span_item_indices.len());
+            for (span, &idx) in fused.spans.iter().zip(&fused.span_item_indices) {
+                assert_eq!(source_texts[idx], span.text);
+            }
+        }
     }
 
     /// Two side-by-side prose columns with coincidentally aligned baselines
