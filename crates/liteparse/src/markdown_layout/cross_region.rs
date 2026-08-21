@@ -470,6 +470,7 @@ fn try_two_col_direct(clusters: &[Cluster], merged_len: usize, tol: f32) -> Opti
         body_start: if header.is_some() { 1 } else { 0 },
         bbox,
         block: Block::Table { header, rows: body },
+        block_indices: Vec::new(),
     }])
 }
 

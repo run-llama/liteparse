@@ -234,7 +234,11 @@ pub fn classify_page_with_filters(
             .iter()
             .map(|&i| lines[i].bbox.y)
             .fold(f32::INFINITY, f32::min);
-        global_ruled_tables.push((top_y, PositionedBlock::new(run.block, run.bbox, Vec::new())));
+        let block_indices = run.block_item_indices();
+        global_ruled_tables.push((
+            top_y,
+            PositionedBlock::new(run.block, run.bbox, block_indices),
+        ));
         global_ruled_consumed.extend(consumed);
     }
     let global_ruled_owned: Option<Vec<ProjectedLine>> = if global_ruled_consumed.is_empty() {
@@ -570,7 +574,8 @@ fn classify_region(
             state.flush_code(&mut blocks);
             state.reset_list();
             let run = table_iter.next().unwrap();
-            blocks.push(PositionedBlock::new(run.block, run.bbox, Vec::new()));
+            let block_indices = run.block_item_indices();
+            blocks.push(PositionedBlock::new(run.block, run.bbox, block_indices));
             idx = run.end;
             continue;
         }

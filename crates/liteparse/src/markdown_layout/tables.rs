@@ -90,6 +90,13 @@ pub(super) struct SpanPiece<'a> {
     /// were verified to reconstruct `text` exactly. Empty otherwise, so a
     /// consumer can treat non-empty as "real geometry for every word here".
     pub(super) words: Vec<&'a crate::types::WordBox>,
+    /// Index of the run's source item in the page's *returned* `text_items`
+    /// array (the `ProjectedLine::span_item_indices` contract). Stamped by
+    /// `line_pieces` from the owning line; `None` when the piece was built
+    /// without line context (or the line's index vector was misaligned, in
+    /// which case the piece degrades to carrying no attribution rather than
+    /// dropping the span).
+    pub(super) source_index: Option<usize>,
 }
 
 /// A run's own word boxes, in reading order, but only when they reconstruct the
@@ -145,6 +152,7 @@ pub(super) fn split_span_at_gutters(span: &TextItem) -> Vec<SpanPiece<'_>> {
             text: collapse_whitespace(span.text.trim()),
             span,
             words: words.clone(),
+            source_index: None,
         }]
     };
     // Two words give exactly one gap, which is trivially "the largest": no
@@ -223,18 +231,27 @@ fn piece_from_words<'a>(words: &[&'a crate::types::WordBox], span: &'a TextItem)
         ),
         span,
         words: words.to_vec(),
+        source_index: None,
     }
 }
 
 /// All column pieces on a line, left to right. This is the tabular view of a
 /// row: what PDFium calls a run is not what the page calls a cell.
 pub(super) fn line_pieces(line: &ProjectedLine) -> Vec<SpanPiece<'_>> {
-    let mut pieces: Vec<SpanPiece<'_>> = line
-        .spans
-        .iter()
-        .filter(|s| !s.text.trim().is_empty())
-        .flat_map(split_span_at_gutters)
-        .collect();
+    let mut pieces: Vec<SpanPiece<'_>> = Vec::new();
+    for (i, s) in line.spans.iter().enumerate() {
+        if s.text.trim().is_empty() {
+            continue;
+        }
+        // Positional zip with the aligned index vector. `.get` so a length
+        // mismatch degrades to an unattributed piece instead of dropping the
+        // span (or panicking) — text fidelity outranks provenance.
+        let source_index = line.span_item_indices.get(i).copied();
+        for mut piece in split_span_at_gutters(s) {
+            piece.source_index = source_index;
+            pieces.push(piece);
+        }
+    }
     pieces.sort_by(|a, b| a.x.total_cmp(&b.x));
     pieces
 }
@@ -258,6 +275,12 @@ pub(super) struct TableCell {
     pub(super) end_x: f32,
     pub(super) text: String,
     pub(super) bold: bool,
+    /// Source-item indices of the spans/pieces aggregated into this cell, in
+    /// insertion (reading) order — the returned-text-items contract of
+    /// `ProjectedLine::span_item_indices`. A piece split across tracks
+    /// duplicates its index into each receiving cell; padding cells carry
+    /// none.
+    pub(super) text_item_indices: Vec<usize>,
 }
 
 /// A contiguous tabular run: line indices `[start, end)` plus the detected
@@ -277,6 +300,37 @@ pub(super) struct TableRun {
     /// consumed. `None` when the run was built without geometry (tests, and
     /// synthetic merges with nothing to measure).
     pub(super) bbox: Option<Rect>,
+    /// Block-level source-item indices for runs whose block does NOT carry
+    /// cells (`GridFallback`): the union of the consumed lines' indices.
+    /// Empty for `Table` runs — their block indices derive from the cells via
+    /// [`TableRun::block_item_indices`], so there is no second copy to fall
+    /// out of sync.
+    pub(super) block_indices: Vec<usize>,
+}
+
+impl TableRun {
+    /// Source-item indices the emitted block should carry: for `Table`, the
+    /// concatenation of every header/body cell's indices (dedup happens at
+    /// the public-DTO conversion); otherwise the run-carried union.
+    pub(super) fn block_item_indices(&self) -> Vec<usize> {
+        match &self.block {
+            Block::Table { header, rows } => {
+                let mut out: Vec<usize> = Vec::new();
+                if let Some(h) = header {
+                    for c in h {
+                        out.extend_from_slice(&c.text_item_indices);
+                    }
+                }
+                for row in rows {
+                    for c in row {
+                        out.extend_from_slice(&c.text_item_indices);
+                    }
+                }
+                out
+            }
+            _ => self.block_indices.clone(),
+        }
+    }
 }
 
 /// Union of the boxes of `lines[start..end]` — the region a table run covers
@@ -302,9 +356,14 @@ fn cell_rect(cell: &TableCell, line: &ProjectedLine) -> Rect {
     }
 }
 
-/// Build a located `Cell` from a `TableCell` and its owning line.
+/// Build a located `Cell` from a `TableCell` and its owning line, carrying
+/// the cell's source-item attribution.
 fn located_cell(cell: &TableCell, line: &ProjectedLine) -> Cell {
-    Cell::located(cell.text.clone(), cell_rect(cell, line))
+    Cell::located_with(
+        cell.text.clone(),
+        cell_rect(cell, line),
+        cell.text_item_indices.clone(),
+    )
 }
 
 /// Split a `ProjectedLine`'s spans into cells. A gap larger than
@@ -312,13 +371,18 @@ fn located_cell(cell: &TableCell, line: &ProjectedLine) -> Cell {
 /// a new cell; otherwise spans join into the same cell with a single space.
 pub(super) fn split_cells(line: &ProjectedLine) -> Vec<TableCell> {
     // Skip whitespace-only spans before computing gaps — leading/trailing
-    // empty items would otherwise add spurious cell boundaries.
-    let mut spans: Vec<&TextItem> = line
+    // empty items would otherwise add spurious cell boundaries. Each span is
+    // paired with its source-item index (positional zip, `.get` so a
+    // misaligned index vector degrades to unattributed spans, never dropped
+    // ones).
+    let mut spans: Vec<(&TextItem, Option<usize>)> = line
         .spans
         .iter()
-        .filter(|s| !s.text.trim().is_empty())
+        .enumerate()
+        .filter(|(_, s)| !s.text.trim().is_empty())
+        .map(|(i, s)| (s, line.span_item_indices.get(i).copied()))
         .collect();
-    spans.sort_by(|a, b| a.x.total_cmp(&b.x));
+    spans.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
     if spans.is_empty() {
         return Vec::new();
     }
@@ -331,12 +395,13 @@ pub(super) fn split_cells(line: &ProjectedLine) -> Vec<TableCell> {
 
     let mut cells: Vec<TableCell> = Vec::new();
     let mut current_text = String::new();
-    let mut current_start = spans[0].x;
+    let mut current_start = spans[0].0.x;
     let mut current_bold_chars: usize = 0;
     let mut current_total_chars: usize = 0;
-    let mut prev_right = spans[0].x;
+    let mut current_indices: Vec<usize> = Vec::new();
+    let mut prev_right = spans[0].0.x;
 
-    for (i, span) in spans.iter().enumerate() {
+    for (i, (span, source_index)) in spans.iter().enumerate() {
         let gap = span.x - prev_right;
         let break_cell = i > 0 && gap > gap_threshold;
         if break_cell {
@@ -346,6 +411,7 @@ pub(super) fn split_cells(line: &ProjectedLine) -> Vec<TableCell> {
                 end_x: prev_right,
                 text: collapse_whitespace(current_text.trim()),
                 bold,
+                text_item_indices: std::mem::take(&mut current_indices),
             });
             current_text.clear();
             current_start = span.x;
@@ -356,6 +422,9 @@ pub(super) fn split_cells(line: &ProjectedLine) -> Vec<TableCell> {
             current_text.push(' ');
         }
         current_text.push_str(&span.text);
+        if let Some(idx) = source_index {
+            current_indices.push(*idx);
+        }
         let n = span.text.chars().count();
         current_total_chars += n;
         if is_bold_item(span) {
@@ -370,6 +439,7 @@ pub(super) fn split_cells(line: &ProjectedLine) -> Vec<TableCell> {
             end_x: prev_right,
             text: collapse_whitespace(current_text.trim()),
             bold,
+            text_item_indices: current_indices,
         });
     }
     cells
@@ -441,6 +511,10 @@ fn recover_merged_cell(mut cells: Vec<TableCell>, tracks: &[f32]) -> Option<Vec<
                 end_x,
                 text: piece.clone(),
                 bold: cell.bold,
+                // The split position inside a merged span is an estimate, so
+                // each derived cell attributes to the full source set of the
+                // cell it was carved from.
+                text_item_indices: cell.text_item_indices.clone(),
             });
         }
         cells.remove(i);
@@ -677,6 +751,7 @@ fn cells_from_pieces(
             end_x: t,
             text: String::new(),
             bold: false,
+            text_item_indices: Vec::new(),
         })
         .collect();
     let push_text = |dst: &mut String, src: &str| {
@@ -716,6 +791,9 @@ fn cells_from_pieces(
                 let idx = covered[0];
                 push_text(&mut cells[idx].text, &span.text);
                 cells[idx].end_x = cells[idx].end_x.max(x1);
+                if let Some(si) = span.source_index {
+                    cells[idx].text_item_indices.push(si);
+                }
                 if is_bold_item(span.span) {
                     cells[idx].bold = true;
                 }
@@ -733,6 +811,12 @@ fn cells_from_pieces(
                         return None;
                     }
                     push_text(&mut cells[*idx].text, piece);
+                    // A piece split across tracks attributes its source item
+                    // to every receiving cell — word-anchored and
+                    // char-estimate splits alike.
+                    if let Some(si) = span.source_index {
+                        cells[*idx].text_item_indices.push(si);
+                    }
                     if bold {
                         cells[*idx].bold = true;
                     }
@@ -967,6 +1051,7 @@ fn finalize_table_run(
             header,
             rows: body_rows,
         },
+        block_indices: Vec::new(),
     })
 }
 
@@ -1324,6 +1409,7 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> 
                             end_x: tracks[i],
                             text: String::new(),
                             bold: false,
+                            text_item_indices: Vec::new(),
                         })
                         .collect();
                     for (c, &idx) in cells.iter().zip(&mapping) {
@@ -1343,6 +1429,9 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> 
                         prev_cells[idx].text.push(' ');
                     }
                     prev_cells[idx].text.push_str(&c.text);
+                    prev_cells[idx]
+                        .text_item_indices
+                        .extend(c.text_item_indices.iter().copied());
                 }
                 j += 1;
                 continue;
@@ -1413,12 +1502,19 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> 
             .iter()
             .map(|(_, line, _)| line.text.trim_end().to_string())
             .collect();
+        // Block-level provenance only: the fallback renders the raw line
+        // text, so it attributes to exactly the lines it displays.
+        let block_indices: Vec<usize> = rows
+            .iter()
+            .flat_map(|(_, line, _)| line.span_item_indices.iter().copied())
+            .collect();
         return Some(TableRun {
             start: start_idx,
             end,
             body_start: start_idx,
             bbox: lines_bbox(lines, start_idx, end),
             block: Block::GridFallback { lines: raw },
+            block_indices,
         });
     }
 
@@ -1532,6 +1628,7 @@ fn absorb_header_lines(
                 header[idx].text.push(' ');
             }
             header[idx].text.push_str(&c.text);
+            header[idx].add_indices(c.text_item_indices.iter().copied());
             Rect::extend(&mut header[idx].bbox, &cell_rect(c, &lines[*line_idx]));
         }
     }
@@ -2060,8 +2157,9 @@ fn try_detect_description_list(lines: &[ProjectedLine], start_idx: usize) -> Opt
                     tail.text.push_str(&cell.text);
                     // The wrapped continuation is part of the same logical
                     // cell, so it grows that cell's box rather than starting a
-                    // new one.
+                    // new one — and extends its provenance likewise.
                     Rect::extend(&mut tail.bbox, &cell_rect(cell, &lines[j]));
+                    tail.add_indices(cell.text_item_indices.iter().copied());
                     j += 1;
                     continue;
                 }
@@ -2075,8 +2173,13 @@ fn try_detect_description_list(lines: &[ProjectedLine], start_idx: usize) -> Opt
                 {
                     // Split position is a linear estimate inside one merged
                     // span, not an observed boundary — the halves carry text
-                    // only rather than a fabricated rect.
-                    rows.push((j, left.into(), right.into()));
+                    // only rather than a fabricated rect. BOTH halves
+                    // attribute to the single merged span's source items.
+                    let mut lcell: Cell = left.into();
+                    lcell.add_indices(cell.text_item_indices.iter().copied());
+                    let mut rcell: Cell = right.into();
+                    rcell.add_indices(cell.text_item_indices.iter().copied());
+                    rows.push((j, lcell, rcell));
                     j += 1;
                     continue;
                 }
@@ -2141,6 +2244,7 @@ fn try_detect_description_list(lines: &[ProjectedLine], start_idx: usize) -> Opt
             header: None,
             rows: body,
         },
+        block_indices: Vec::new(),
     })
 }
 
@@ -2708,6 +2812,7 @@ fn build_union_table(
         body_start: window_start,
         bbox: lines_bbox(lines, start, window_end),
         block: Block::Table { header, rows },
+        block_indices: Vec::new(),
     })
 }
 
@@ -2944,6 +3049,7 @@ fn try_merge_pair(a: &TableRun, b: &TableRun, lines: &[ProjectedLine]) -> Option
             // between them.
             bbox: lines_bbox(lines, a.start, b.end),
             block: Block::Table { header, rows },
+            block_indices: Vec::new(),
         });
     }
 
@@ -3011,6 +3117,7 @@ fn try_merge_pair(a: &TableRun, b: &TableRun, lines: &[ProjectedLine]) -> Option
                 header: Some(merged_header),
                 rows: merged_rows,
             },
+            block_indices: Vec::new(),
         });
     }
 
@@ -4535,6 +4642,7 @@ fn build_ruled_table_from(
                 header,
                 rows: body_rows,
             },
+            block_indices: Vec::new(),
         },
         consumed_indices,
         straddle_frac,
@@ -5001,10 +5109,12 @@ fn merge_continuation_rows(rows: &mut Vec<Vec<Cell>>) {
                     prev[i].text.push(' ');
                     prev[i].text.push_str(t);
                     // The wrapped line is part of the same logical cell, so it
-                    // grows that cell's box down to cover the continuation.
+                    // grows that cell's box down to cover the continuation —
+                    // and extends its provenance the same way.
                     if let Some(r) = &cell.bbox {
                         Rect::extend(&mut prev[i].bbox, r);
                     }
+                    prev[i].add_indices(cell.text_item_indices.iter().copied());
                 }
                 continue;
             }
@@ -5536,12 +5646,14 @@ mod tests {
                 end_x: 160.0,
                 text: "MEMORYBANK 5.00".into(),
                 bold: false,
+                text_item_indices: vec![],
             },
             TableCell {
                 start_x: 250.0,
                 end_x: 280.0,
                 text: "4.77".into(),
                 bold: false,
+                text_item_indices: vec![],
             },
         ];
         let tracks = vec![50.0, 150.0, 250.0];
@@ -5562,12 +5674,14 @@ mod tests {
                 end_x: 260.0,
                 text: "MEMORYBANK 13.18 10.03".into(),
                 bold: false,
+                text_item_indices: vec![],
             },
             TableCell {
                 start_x: 350.0,
                 end_x: 380.0,
                 text: "7.61".into(),
                 bold: false,
+                text_item_indices: vec![],
             },
         ];
         let tracks = vec![50.0, 150.0, 250.0, 350.0];
@@ -5588,6 +5702,7 @@ mod tests {
             end_x: 200.0,
             text: "ABC-DEF-GHI".into(),
             bold: false,
+                text_item_indices: vec![],
         }];
         let tracks = vec![50.0, 150.0];
         assert!(recover_merged_cell(row, &tracks).is_none());
@@ -5821,6 +5936,110 @@ mod tests {
     }
 
     #[test]
+    fn borderless_table_cells_carry_source_item_indices() {
+        // Same shape as the span-extents test, but every span carries a
+        // globally distinct source-item index: cell (r, c) must attribute to
+        // exactly index r*3 + c.
+        let mut lines = vec![
+            line_with_spans(
+                &[("Name", 50.0), ("Qty", 150.0), ("Cost", 250.0)],
+                100.0,
+                10.0,
+            ),
+            line_with_spans(
+                &[("Bolt", 50.0), ("12", 150.0), ("3.50", 250.0)],
+                115.0,
+                10.0,
+            ),
+            line_with_spans(
+                &[("Nut", 50.0), ("40", 150.0), ("1.25", 250.0)],
+                130.0,
+                10.0,
+            ),
+        ];
+        for (r, l) in lines.iter_mut().enumerate() {
+            l.span_item_indices = (r * 3..r * 3 + 3).collect();
+        }
+        let runs = detect_tables(&lines);
+        assert_eq!(runs.len(), 1, "expected 1 borderless table, got {runs:?}");
+        let Block::Table { header, rows } = &runs[0].block else {
+            panic!("expected Block::Table");
+        };
+        assert!(header.is_none());
+        for (r, row) in rows.iter().enumerate() {
+            for (c, cell) in row.iter().enumerate() {
+                assert_eq!(
+                    cell.text_item_indices,
+                    vec![r * 3 + c],
+                    "cell ({r},{c}) '{}' mis-attributed",
+                    cell.text
+                );
+            }
+        }
+        // The run's block-level indices are the union of the cells'.
+        let mut block = runs[0].block_item_indices();
+        block.sort_unstable();
+        assert_eq!(block, (0..9).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn merged_span_split_duplicates_source_index_into_each_cell() {
+        // One span whose x-extent covers two tracks: the char-estimate split
+        // carves it into two cells, and BOTH cells attribute to the single
+        // source span.
+        let l = line_with_spans(&[("aaaaaaaaaa bbbbbbbbbb", 50.0)], 100.0, 10.0);
+        let pieces = line_pieces(&l);
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(pieces[0].source_index, Some(0));
+        let cells =
+            cells_from_pieces(&pieces, &[50.0, 150.0], true).expect("split should succeed");
+        assert_eq!(cells.len(), 2);
+        assert_eq!(cells[0].text, "aaaaaaaaaa");
+        assert_eq!(cells[1].text, "bbbbbbbbbb");
+        assert_eq!(cells[0].text_item_indices, vec![0]);
+        assert_eq!(cells[1].text_item_indices, vec![0]);
+    }
+
+    #[test]
+    fn track_cells_without_content_carry_no_indices() {
+        // Three tracks, two pieces: the unpopulated track's cell stays empty
+        // of both text and attribution.
+        let l = line_with_spans(&[("alpha", 50.0), ("beta", 150.0)], 100.0, 10.0);
+        let pieces = line_pieces(&l);
+        let cells =
+            cells_from_pieces(&pieces, &[50.0, 150.0, 250.0], false).expect("bin should succeed");
+        assert_eq!(cells.len(), 3);
+        assert_eq!(cells[0].text_item_indices, vec![0]);
+        assert_eq!(cells[1].text_item_indices, vec![1]);
+        assert!(cells[2].text.is_empty());
+        assert!(cells[2].text_item_indices.is_empty());
+    }
+
+    #[test]
+    fn split_cells_groups_indices_with_their_cells() {
+        // Spans 0+1 sit close (one cell); span 2 is across a wide gap.
+        let l = line_with_spans(&[("a", 50.0), ("b", 58.0), ("c", 250.0)], 100.0, 10.0);
+        let cells = split_cells(&l);
+        assert_eq!(cells.len(), 2);
+        assert_eq!(cells[0].text_item_indices, vec![0, 1]);
+        assert_eq!(cells[1].text_item_indices, vec![2]);
+    }
+
+    #[test]
+    fn continuation_row_merge_folds_indices() {
+        let mut r = rows(&[
+            &["Knowledge", "To understand the meaning of reducing"],
+            &["", "and how they connect"],
+        ]);
+        r[0][0].text_item_indices = vec![0];
+        r[0][1].text_item_indices = vec![1];
+        r[1][1].text_item_indices = vec![2];
+        merge_continuation_rows(&mut r);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0][1].text_item_indices, vec![1, 2]);
+    }
+
+    #[test]
     fn ruled_table_rect_borders_detected() {
         // Same 2×2 table but drawn as 4 individual cell rects (each cell is a
         // stroked rectangle). Each rect contributes 4 strokes via
@@ -5910,6 +6129,7 @@ mod tests {
             start: 5,
             end: 10,
             body_start: 5,
+            block_indices: vec![],
             bbox: None,
             block: Block::Table {
                 header: None,
@@ -5920,6 +6140,7 @@ mod tests {
             start: 6,
             end: 11,
             body_start: 6,
+            block_indices: vec![],
             bbox: None,
             block: Block::GridFallback {
                 lines: vec!["bl".into()],
@@ -5972,6 +6193,7 @@ mod tests {
             start: 0,
             end: 2,
             body_start: 0,
+            block_indices: vec![],
             bbox: None,
             block: Block::Table {
                 header: Some(vec!["A".into(), "B".into(), "C".into()]),
@@ -5982,6 +6204,7 @@ mod tests {
             start: 2,
             end: 5,
             body_start: 2,
+            block_indices: vec![],
             bbox: None,
             block: Block::Table {
                 header: None,
@@ -6022,6 +6245,7 @@ mod tests {
             start: 0,
             end: 2,
             body_start: 0,
+            block_indices: vec![],
             bbox: None,
             block: Block::Table {
                 header: None,
@@ -6035,6 +6259,7 @@ mod tests {
             start: 2,
             end: 5,
             body_start: 2,
+            block_indices: vec![],
             bbox: None,
             block: Block::Table {
                 header: None,
@@ -6076,6 +6301,7 @@ mod tests {
             start: 0,
             end: 2,
             body_start: 0,
+            block_indices: vec![],
             bbox: None,
             block: Block::Table {
                 header: Some(vec!["A".into(), "B".into(), "C".into()]),
@@ -6086,6 +6312,7 @@ mod tests {
             start: 2,
             end: 4,
             body_start: 2,
+            block_indices: vec![],
             bbox: None,
             block: Block::Table {
                 header: None,
@@ -6111,6 +6338,7 @@ mod tests {
             start: 0,
             end: 10,
             body_start: 0,
+            block_indices: vec![],
             bbox: None,
             block: Block::Table {
                 header: None,
@@ -6123,6 +6351,7 @@ mod tests {
             start: 10,
             end: 13,
             body_start: 10,
+            block_indices: vec![],
             bbox: None,
             block: Block::Table {
                 header: None,
@@ -6169,6 +6398,7 @@ mod tests {
             start: 0,
             end: 2,
             body_start: 0,
+            block_indices: vec![],
             bbox: None,
             block: Block::Table {
                 header: None,
@@ -6182,6 +6412,7 @@ mod tests {
             start: 2,
             end: 4,
             body_start: 2,
+            block_indices: vec![],
             bbox: None,
             block: Block::Table {
                 header: None,
@@ -6206,6 +6437,7 @@ mod tests {
             start: 0,
             end: 2,
             body_start: 0,
+            block_indices: vec![],
             bbox: None,
             block: Block::Table {
                 header: None,
@@ -6219,6 +6451,7 @@ mod tests {
             start: 2,
             end: 3,
             body_start: 2,
+            block_indices: vec![],
             bbox: None,
             block: Block::GridFallback {
                 lines: vec!["fallback".into()],
@@ -6252,6 +6485,7 @@ mod tests {
             start: 0,
             end: 2,
             body_start: 0,
+            block_indices: vec![],
             bbox: None,
             block: Block::Table {
                 header: Some(vec!["A".into(), "B".into(), "C".into()]),
@@ -6262,6 +6496,7 @@ mod tests {
             start: 3,
             end: 5,
             body_start: 3,
+            block_indices: vec![],
             bbox: None,
             block: Block::Table {
                 header: None,
@@ -6292,6 +6527,7 @@ mod tests {
             start: 0,
             end: 2,
             body_start: 0,
+            block_indices: vec![],
             bbox: None,
             block: Block::Table {
                 header: None,
@@ -6305,6 +6541,7 @@ mod tests {
             start: 3,
             end: 6,
             body_start: 3,
+            block_indices: vec![],
             bbox: None,
             block: Block::Table {
                 header: None,
