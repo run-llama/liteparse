@@ -419,6 +419,59 @@ async fn test_extract_blocks_carries_geometry_without_changing_markdown() {
     }
 }
 
+/// `extract_blocks` needs real word geometry for table detection (word-anchored
+/// straddle splits), so it forces word-box extraction internally — under any
+/// output format, exactly like markdown output always has. The forcing is a
+/// detection input only: the parser's reported config still says what the
+/// caller asked for, and with `extract_blocks` off nothing changes.
+#[tokio::test]
+#[serial]
+async fn test_extract_blocks_forces_word_geometry_json_output() {
+    let base = LiteParseConfig {
+        ocr_enabled: false,
+        output_format: OutputFormat::Json,
+        ..LiteParseConfig::default()
+    };
+
+    // Control: JSON output without extract_blocks populates no word boxes.
+    let without = LiteParse::new(base.clone());
+    let parsed = without
+        .parse("../../integration_tests_data/sample.pdf")
+        .await
+        .expect("Should be able to parse");
+    assert!(
+        parsed
+            .pages
+            .iter()
+            .flat_map(|p| &p.text_items)
+            .all(|i| i.words.is_empty()),
+        "no word boxes should be extracted when neither the caller nor a \
+         feature asks for them"
+    );
+
+    let with = LiteParse::new(LiteParseConfig {
+        extract_blocks: true,
+        ..base
+    });
+    let parsed = with
+        .parse("../../integration_tests_data/sample.pdf")
+        .await
+        .expect("Should be able to parse");
+    assert!(
+        parsed
+            .pages
+            .iter()
+            .flat_map(|p| &p.text_items)
+            .any(|i| !i.words.is_empty()),
+        "extract_blocks should force word-box extraction as a table-detection \
+         input even under JSON output"
+    );
+    // The forcing is internal: the resolved config still reports the caller's
+    // own request, which is what binding layers echo and gate `words`
+    // serialization on.
+    assert!(!with.config().emit_word_boxes);
+}
+
 #[tokio::test]
 #[serial]
 async fn test_parse_bytes_pdf_integration() {

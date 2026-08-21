@@ -685,11 +685,20 @@ impl LiteParse {
                     continue_on_page_error: self.config.continue_on_page_error,
                     extract_content_bounds: self.config.extract_content_bounds,
                     extract_images: self.config.effective_extract_images(),
-                    // The markdown table detector splits PDFium's merged
-                    // multi-cell runs on real word geometry, so it needs word
-                    // boxes even when the caller didn't ask for them.
+                    // The table detector splits PDFium's merged multi-cell
+                    // runs on real word geometry, so it needs word boxes even
+                    // when the caller didn't ask for them. Markdown output
+                    // always runs it; `extract_blocks` runs the same
+                    // classifier under any output format, so without the
+                    // forcing a JSON caller would get blocks classified by a
+                    // materially weaker (char-estimate) table splitter than
+                    // the markdown they can see. Detection-only: `self.config`
+                    // is left untouched, so `config()` still reports what the
+                    // caller asked for, and bindings that expose
+                    // `TextItem::words` gate serialization on that request.
                     emit_word_boxes: self.config.emit_word_boxes
-                        || self.config.output_format == crate::config::OutputFormat::Markdown,
+                        || self.config.output_format == crate::config::OutputFormat::Markdown
+                        || self.config.extract_blocks,
                     extract_text_metadata: self.config.extract_text_metadata,
                     extract_vector_graphics: self.config.extract_vector_graphics,
                     extract_annotations: self.config.extract_annotations,
