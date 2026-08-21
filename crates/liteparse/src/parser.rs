@@ -258,14 +258,42 @@ fn apply_layout(
             // A page with no structural decomposition reports an empty list,
             // not `None` — extraction *was* enabled, there was just nothing to
             // decompose.
-            page.blocks = Some(
-                blocks
-                    .as_deref()
-                    .unwrap_or_default()
-                    .iter()
-                    .map(crate::layout::LayoutBlock::from)
-                    .collect(),
-            );
+            let mut layout_blocks: Vec<crate::layout::LayoutBlock> = blocks
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(crate::layout::LayoutBlock::from)
+                .collect();
+            // Bounds safety at the public boundary: every provenance index
+            // must address this page's returned text_items. Should never
+            // fire (indices are recorded against the same vector the page
+            // returns); in release an out-of-range index is dropped rather
+            // than shipped.
+            let n_items = page.text_items.len();
+            for block in &mut layout_blocks {
+                debug_assert!(
+                    block.text_item_indices.iter().all(|&i| i < n_items),
+                    "block provenance index out of range (page {}: {} items)",
+                    page.page_number,
+                    n_items
+                );
+                block.text_item_indices.retain(|&i| i < n_items);
+                for cell in block
+                    .header
+                    .iter_mut()
+                    .flatten()
+                    .chain(block.rows.iter_mut().flatten().flatten())
+                {
+                    debug_assert!(
+                        cell.text_item_indices.iter().all(|&i| i < n_items),
+                        "cell provenance index out of range (page {}: {} items)",
+                        page.page_number,
+                        n_items
+                    );
+                    cell.text_item_indices.retain(|&i| i < n_items);
+                }
+            }
+            page.blocks = Some(layout_blocks);
         }
     }
     if !wants_markdown {
