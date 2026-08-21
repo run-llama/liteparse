@@ -386,6 +386,7 @@ fn try_two_col_direct(clusters: &[Cluster], merged_len: usize, tol: f32) -> Opti
                     Cell {
                         text,
                         bbox: left_rect,
+                        text_item_indices: Vec::new(),
                     },
                     Cell::default(),
                     bold,

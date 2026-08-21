@@ -234,7 +234,7 @@ pub fn classify_page_with_filters(
             .iter()
             .map(|&i| lines[i].bbox.y)
             .fold(f32::INFINITY, f32::min);
-        global_ruled_tables.push((top_y, PositionedBlock::new(run.block, run.bbox)));
+        global_ruled_tables.push((top_y, PositionedBlock::new(run.block, run.bbox, Vec::new())));
         global_ruled_consumed.extend(consumed);
     }
     let global_ruled_owned: Option<Vec<ProjectedLine>> = if global_ruled_consumed.is_empty() {
@@ -405,13 +405,14 @@ pub fn classify_page_with_filters(
 /// stay identical.
 fn positioned_interruption(kind: Interruption) -> PositionedBlock {
     match kind {
-        Interruption::Hr(rect) => PositionedBlock::new(Block::HorizontalRule, Some(rect)),
+        Interruption::Hr(rect) => PositionedBlock::new(Block::HorizontalRule, Some(rect), Vec::new()),
         Interruption::Figure(r) => PositionedBlock::new(
             Block::Figure {
                 id: r.id,
                 format: r.format,
             },
             Some(r.bbox),
+            Vec::new(),
         ),
         Interruption::Table(b) => b,
     }
@@ -446,7 +447,7 @@ impl FlowState {
             && !acc.raw.trim().is_empty()
         {
             let bbox = acc.bbox.clone();
-            blocks.push(PositionedBlock::new(paragraph_from_accum(acc), bbox));
+            blocks.push(PositionedBlock::new(paragraph_from_accum(acc), bbox, Vec::new()));
         }
     }
 
@@ -456,7 +457,7 @@ impl FlowState {
             && !lines.is_empty()
         {
             let lang = detect_code_language(&lines);
-            blocks.push(PositionedBlock::new(Block::CodeBlock { lines, lang }, bbox));
+            blocks.push(PositionedBlock::new(Block::CodeBlock { lines, lang }, bbox, Vec::new()));
         }
     }
 
@@ -568,7 +569,7 @@ fn classify_region(
             state.flush_code(&mut blocks);
             state.reset_list();
             let run = table_iter.next().unwrap();
-            blocks.push(PositionedBlock::new(run.block, run.bbox));
+            blocks.push(PositionedBlock::new(run.block, run.bbox, Vec::new()));
             idx = run.end;
             continue;
         }
@@ -625,6 +626,7 @@ fn classify_region(
                 blocks.push(PositionedBlock::new(
                     Block::HorizontalRule,
                     Some(line.bbox.clone()),
+                    Vec::new(),
                 ));
             }
             if debug {
@@ -854,6 +856,7 @@ fn classify_region(
                         text: collapse_whitespace(text),
                     },
                     Some(line.bbox.clone()),
+                    Vec::new(),
                 ));
                 heading_run = Some((level, line_idx));
                 continue;
@@ -902,6 +905,7 @@ fn classify_region(
                         text: collapse_whitespace(text),
                     },
                     Some(line.bbox.clone()),
+                    Vec::new(),
                 ));
                 continue;
             }
@@ -928,6 +932,7 @@ fn classify_region(
                     italic: false,
                 },
                 Some(line.bbox.clone()),
+                Vec::new(),
             ));
             continue;
         }
@@ -987,6 +992,7 @@ fn classify_region(
                     text: collapse_whitespace(text),
                 },
                 Some(line.bbox.clone()),
+                Vec::new(),
             ));
             // Arm the heading_run so a wrapped continuation on the next line
             // merges into this heading instead of emitting as a second one.

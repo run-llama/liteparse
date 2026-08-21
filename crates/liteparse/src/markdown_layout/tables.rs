@@ -2571,6 +2571,7 @@ fn union_header_from_above(
             Cell {
                 text: parts.join(" "),
                 bbox,
+                text_item_indices: Vec::new(),
             }
         })
         .collect();
@@ -2987,6 +2988,7 @@ fn try_merge_pair(a: &TableRun, b: &TableRun, lines: &[ProjectedLine]) -> Option
                 Cell {
                     text: parts.join(" "),
                     bbox,
+                    text_item_indices: Vec::new(),
                 }
             })
             .collect();
@@ -3389,6 +3391,7 @@ impl CellGrid {
                             width: xs[c + 1] - xs[c],
                             height: ys[r + 1] - ys[r],
                         }),
+                        text_item_indices: Vec::new(),
                     })
                     .collect()
             })
@@ -3798,6 +3801,7 @@ fn flatten_header_band(
                     Cell {
                         text: parts.join(" "),
                         bbox,
+                        text_item_indices: Vec::new(),
                     }
                 })
                 .collect();
