@@ -271,6 +271,11 @@ export interface LayoutCell {
    * a ragged grid, or halves of a merged run split at an estimated position.
    */
   bbox?: Rect;
+  /**
+   * Indices into the page's returned `textItems`, in reading order, never
+   * repeating within one cell; empty for padding cells.
+   */
+  textItemIndices: number[];
 }
 
 /** A classified block of page content, discriminated by `kind`. */
@@ -284,6 +289,12 @@ export interface LayoutBlock {
     | "grid_fallback"
     | "rule"
     | "figure";
+  /**
+   * Indices into the page's returned `textItems`, sorted and deduped; empty
+   * for text-less blocks. For a `table` block, the union of its cells'
+   * indices.
+   */
+  textItemIndices: number[];
   /** Rendered text for `heading`, `paragraph`, and `list_item`. */
   text?: string;
   /** Heading level (1-6), or list nesting depth for `list_item`. */

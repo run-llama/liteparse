@@ -149,10 +149,12 @@ export interface NativeParsedPage {
 export interface NativeLayoutCell {
   text: string;
   bbox?: NativeRect;
+  textItemIndices: number[];
 }
 
 export interface NativeLayoutBlock {
   kind: string;
+  textItemIndices: number[];
   text?: string;
   level?: number;
   bold?: boolean;
