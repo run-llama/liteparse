@@ -69,6 +69,9 @@ class LayoutCell:
     """
     text: str
     bbox: Optional[AnnotationRect] = None
+    #: Indices into the page's returned ``text_items``, in reading order,
+    #: never repeating within one cell; empty for padding cells.
+    text_item_indices: List[int] = field(default_factory=list)
 
 
 @dataclass
@@ -80,6 +83,10 @@ class LayoutBlock:
     apply to a block's kind are ``None``.
     """
     kind: str
+    #: Indices into the page's returned ``text_items``, sorted and deduped;
+    #: empty for text-less blocks. For a ``table`` block, the union of its
+    #: cells' indices.
+    text_item_indices: List[int] = field(default_factory=list)
     #: Rendered text for ``heading``, ``paragraph`` and ``list_item``.
     text: Optional[str] = None
     #: Heading level (1-6), or list nesting depth for ``list_item``.
