@@ -511,6 +511,12 @@ pub struct LayoutCell {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bbox: Option<AnnotationRect>,
+    /// Indices into the page's `textItems` array (the order the caller
+    /// receives it), in reading order. Always present; `[]` for padding
+    /// cells inserted to square off a ragged grid. An index never repeats
+    /// within one cell but may appear in several cells (a merged span split
+    /// across column tracks attributes each fragment to the whole span).
+    pub text_item_indices: Vec<u32>,
 }
 
 /// A classified block plus where it sits on the page.
@@ -525,6 +531,11 @@ pub struct LayoutBlock {
     /// One of `heading`, `paragraph`, `list_item`, `code`, `table`,
     /// `grid_fallback`, `rule`, `figure`.
     pub kind: String,
+    /// Indices into the page's `textItems` array (the order the caller
+    /// receives it), sorted and deduped. Always present; `[]` for text-less
+    /// blocks (vector `rule`s, `figure`s). For a `table` block this is the
+    /// union of all cell indices.
+    pub text_item_indices: Vec<u32>,
     /// Rendered text for the text-bearing kinds (`heading`, `paragraph`,
     /// `list_item`). Table text lives in `header`/`rows`; code and grid text
     /// in `lines`.
@@ -579,11 +590,19 @@ fn to_annotation_rect(rect: &liteparse::types::Rect) -> AnnotationRect {
     }
 }
 
+/// Narrow core `usize` provenance indices to the `u32` the JS DTO carries.
+/// Lossless in practice: indices address a page's `textItems` array, which
+/// never approaches `u32::MAX` entries.
+fn to_js_indices(indices: &[usize]) -> Vec<u32> {
+    indices.iter().map(|&i| i as u32).collect()
+}
+
 impl LayoutCell {
     fn from_rust(cell: &liteparse::layout::LayoutCell) -> Self {
         Self {
             text: cell.text.clone(),
             bbox: cell.bbox.as_ref().map(to_annotation_rect),
+            text_item_indices: to_js_indices(&cell.text_item_indices),
         }
     }
 }
@@ -595,6 +614,7 @@ impl LayoutBlock {
         };
         Self {
             kind: block.kind.to_string(),
+            text_item_indices: to_js_indices(&block.text_item_indices),
             text: block.text.clone(),
             level: block.level,
             bold: block.bold,
