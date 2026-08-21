@@ -2671,11 +2671,16 @@ fn union_header_from_above(
                 if let Some(r) = &layer[col].bbox {
                     Rect::extend(&mut bbox, r);
                 }
-                if s.is_empty() || parts.last() == Some(&s) {
+                if s.is_empty() {
+                    continue;
+                }
+                // Like the bbox union above: a layer whose text de-duplicates
+                // away still contributed real source items — attribute them.
+                indices.extend(layer[col].text_item_indices.iter().copied());
+                if parts.last() == Some(&s) {
                     continue;
                 }
                 parts.push(s);
-                indices.extend(layer[col].text_item_indices.iter().copied());
             }
             dedup_preserving_order(&mut indices);
             Cell {
@@ -3103,11 +3108,16 @@ fn try_merge_pair(a: &TableRun, b: &TableRun, lines: &[ProjectedLine]) -> Option
                         Rect::extend(&mut bbox, r);
                     }
                     let s = cell.as_str();
-                    if s.is_empty() || parts.last().map(|p| p.as_str()) == Some(s) {
+                    if s.is_empty() {
+                        continue;
+                    }
+                    // Same policy as the bbox union: attribute a layer's
+                    // source items even when its text de-duplicates away.
+                    indices.extend(cell.text_item_indices.iter().copied());
+                    if parts.last().map(|p| p.as_str()) == Some(s) {
                         continue;
                     }
                     parts.push(s.to_string());
-                    indices.extend(cell.text_item_indices.iter().copied());
                 }
                 dedup_preserving_order(&mut indices);
                 Cell {
@@ -3946,11 +3956,18 @@ fn flatten_header_band(
                         .zip(cells_repl_indices.iter())
                     {
                         let s = row[c].as_str();
-                        if s.is_empty() || parts.last() == Some(&s) {
+                        if s.is_empty() {
+                            continue;
+                        }
+                        // A band row whose text de-duplicates away still
+                        // contributed real source items (two stacked rows can
+                        // repeat a group label from *different* items) —
+                        // attribute them even when the text is skipped.
+                        indices.extend(row_idx[c].iter().copied());
+                        if parts.last() == Some(&s) {
                             continue;
                         }
                         parts.push(s);
-                        indices.extend(row_idx[c].iter().copied());
                     }
                     // A spanning header replicated across band rows can repeat
                     // a source item; a cell never lists one twice.
@@ -6035,6 +6052,28 @@ mod tests {
         assert_eq!(header[0].text_item_indices, vec![7]);
         assert_eq!(header[1].text_item_indices, vec![8]);
         assert_eq!(header[2].text_item_indices, vec![8]);
+    }
+
+    #[test]
+    fn union_header_fold_attributes_duplicate_text_layers() {
+        // Two stacked header layers repeat the same text in column 0 from
+        // DIFFERENT source items ("Rated" printed on both band rows). The
+        // fold de-duplicates the text but must still attribute both items —
+        // otherwise the second row's item belongs to no block.
+        let mut top = line_with_spans(&[("Rated", 50.0), ("Voltage", 150.0)], 100.0, 10.0);
+        top.span_item_indices = vec![1, 2];
+        let mut bottom = line_with_spans(&[("Rated", 50.0), ("(VDC)", 150.0)], 115.0, 10.0);
+        bottom.span_item_indices = vec![3, 4];
+        let mut body = line_with_spans(&[("x", 50.0), ("1", 150.0)], 130.0, 10.0);
+        body.span_item_indices = vec![5, 6];
+        let lines = vec![top, bottom, body];
+        let (start, header) = union_header_from_above(&lines, 2, 0, &[50.0, 150.0])
+            .expect("header should absorb");
+        assert_eq!(start, 0);
+        assert_eq!(header[0].text, "Rated");
+        assert_eq!(header[0].text_item_indices, vec![1, 3]);
+        assert_eq!(header[1].text, "Voltage (VDC)");
+        assert_eq!(header[1].text_item_indices, vec![2, 4]);
     }
 
     #[test]
