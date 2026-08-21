@@ -102,7 +102,9 @@ pub struct JsLiteParseConfig {
     pub ocr_hedge_delays_ms: Option<Vec<u32>>,
     /// Emit per-word sub-boxes on each text item (`TextItem.words`). Default
     /// false. Word boxes roughly double the text-item payload, so enable only
-    /// for word-level bbox attribution.
+    /// for word-level bbox attribution. With `extractBlocks` on, word geometry
+    /// is always computed internally as a table-detection input, but `words`
+    /// is only returned when this is set.
     pub emit_word_boxes: Option<bool>,
     /// Include rich PDF text metadata on returned text items. Default false.
     pub extract_text_metadata: Option<bool>,
@@ -444,9 +446,24 @@ impl JsTextItem {
     /// `from_rust` with the rich-metadata fields taken from the core-gated
     /// [`liteparse::types::TextMetadata`] view, so the "what counts as text
     /// metadata" list lives in one place instead of per binding.
-    fn from_rust_for_output(item: &TextItem, extract_text_metadata: bool) -> Self {
+    ///
+    /// `serialize_words` is whether `TextItem::words` goes out to JS: core
+    /// forces word-box extraction when `extract_blocks` is on (a
+    /// table-detection input), but those unrequested boxes roughly double the
+    /// text-item payload, so they are only returned when the caller asked —
+    /// see [`JsParseResult::from_rust`].
+    fn from_rust_for_output(
+        item: &TextItem,
+        extract_text_metadata: bool,
+        serialize_words: bool,
+    ) -> Self {
         let meta = item.text_metadata(extract_text_metadata);
         Self {
+            words: if serialize_words {
+                item.words.iter().map(JsWordBox::from_rust).collect()
+            } else {
+                Vec::new()
+            },
             font_height: meta.font_height.map(|v| v as f64),
             font_ascent: meta.font_ascent.map(|v| v as f64),
             font_descent: meta.font_descent.map(|v| v as f64),
@@ -952,7 +969,7 @@ impl JsLayoutBlock {
 }
 
 impl JsParsedPage {
-    pub fn from_rust(page: &ParsedPage, extract_text_metadata: bool) -> Self {
+    pub fn from_rust(page: &ParsedPage, extract_text_metadata: bool, serialize_words: bool) -> Self {
         Self {
             page_num: page.page_number as u32,
             width: page.page_width as f64,
@@ -968,7 +985,9 @@ impl JsParsedPage {
             text_items: page
                 .text_items
                 .iter()
-                .map(|item| JsTextItem::from_rust_for_output(item, extract_text_metadata))
+                .map(|item| {
+                    JsTextItem::from_rust_for_output(item, extract_text_metadata, serialize_words)
+                })
                 .collect(),
             complexity: page
                 .complexity
@@ -1286,12 +1305,22 @@ impl JsPageComplexityStats {
 
 impl JsParseResult {
     pub fn from_rust(result: &ParseResult, config: &LiteParseConfig) -> Self {
+        // Whether `TextItem::words` goes out to JS: always when the caller
+        // asked for word boxes; with `extract_blocks` off, whatever core
+        // populated (stock behavior); with `extract_blocks` on and no
+        // request, never — core forces word-box extraction as a
+        // table-detection input, and shipping those unrequested boxes is
+        // pure payload. `config` is the caller's requested config (core's
+        // forcing never mutates it), so this reads the caller's own value.
+        let serialize_words = config.emit_word_boxes || !config.extract_blocks;
         Self {
             total_pages: result.total_pages,
             pages: result
                 .pages
                 .iter()
-                .map(|page| JsParsedPage::from_rust(page, config.extract_text_metadata))
+                .map(|page| {
+                    JsParsedPage::from_rust(page, config.extract_text_metadata, serialize_words)
+                })
                 .collect(),
             page_errors: result
                 .page_errors
@@ -1369,7 +1398,7 @@ mod tests {
         assert_eq!(js.trailing_space_generated, Some(true));
         assert_eq!(js.fill_color.as_deref(), Some("ff112233"));
 
-        let lightweight = JsTextItem::from_rust_for_output(&item, false);
+        let lightweight = JsTextItem::from_rust_for_output(&item, false, true);
         assert_eq!(lightweight.font_height, None);
         assert_eq!(lightweight.font_is_buggy, None);
         assert_eq!(lightweight.char_codes, None);
@@ -1386,6 +1415,66 @@ mod tests {
         assert_eq!(round_trip.stroke_color.as_deref(), Some("ff445566"));
         assert_eq!(round_trip.char_codes, vec![65, 32]);
         assert!(round_trip.trailing_space_generated);
+    }
+
+    /// Core forces word-box extraction when `extract_blocks` is on (a
+    /// table-detection input), so the DTO layer must strip the unrequested
+    /// boxes: `words` goes out only when the caller asked, or when
+    /// `extract_blocks` is off (stock behavior — core then populates words
+    /// only on request or for markdown output, and whatever it populated is
+    /// passed through).
+    #[test]
+    fn words_serialized_only_when_requested_under_extract_blocks() {
+        let item = TextItem {
+            text: "two words".into(),
+            words: vec![
+                liteparse::types::WordBox {
+                    text: "two".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    width: 10.0,
+                    height: 5.0,
+                },
+                liteparse::types::WordBox {
+                    text: "words".into(),
+                    x: 12.0,
+                    y: 0.0,
+                    width: 16.0,
+                    height: 5.0,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let stripped = JsTextItem::from_rust_for_output(&item, false, false);
+        assert!(
+            stripped.words.is_empty(),
+            "forced word boxes must not ship when the caller didn't ask"
+        );
+
+        let kept = JsTextItem::from_rust_for_output(&item, false, true);
+        assert_eq!(kept.words.len(), 2);
+        assert_eq!(kept.words[0].text, "two");
+        assert_eq!(kept.words[1].text, "words");
+    }
+
+    /// The requested-vs-forced resolution: `words` is serialized unless
+    /// `extract_blocks` forced them on an unwilling caller.
+    #[test]
+    fn serialize_words_resolution_matches_wasm_binding() {
+        let case = |emit_word_boxes: bool, extract_blocks: bool| {
+            let config = LiteParseConfig {
+                emit_word_boxes,
+                extract_blocks,
+                ..Default::default()
+            };
+            // The same expression `JsParseResult::from_rust` computes.
+            config.emit_word_boxes || !config.extract_blocks
+        };
+        assert!(case(false, false), "stock path: pass through core output");
+        assert!(case(true, false), "explicit request honored");
+        assert!(case(true, true), "explicit request honored under blocks");
+        assert!(!case(false, true), "forced-only word boxes are stripped");
     }
 
     #[test]
