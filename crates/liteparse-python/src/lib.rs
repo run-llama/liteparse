@@ -275,6 +275,10 @@ struct PyLayoutCell {
     text: String,
     #[pyo3(get)]
     bbox: Option<PyAnnotationRect>,
+    /// Indices into the page's returned `text_items`, in reading order,
+    /// never repeating within one cell; empty for padding cells.
+    #[pyo3(get)]
+    text_item_indices: Vec<usize>,
 }
 
 impl PyLayoutCell {
@@ -282,6 +286,7 @@ impl PyLayoutCell {
         Self {
             text: cell.text,
             bbox: cell.bbox.map(PyAnnotationRect::from_rust),
+            text_item_indices: cell.text_item_indices,
         }
     }
 }
@@ -298,6 +303,11 @@ struct PyLayoutBlock {
     /// `grid_fallback`, `rule`, `figure`.
     #[pyo3(get)]
     kind: String,
+    /// Indices into the page's returned `text_items`, sorted and deduped;
+    /// empty for text-less blocks. For a `table` block, the union of its
+    /// cells' indices.
+    #[pyo3(get)]
+    text_item_indices: Vec<usize>,
     /// Rendered text for the text-bearing kinds (`heading`, `paragraph`,
     /// `list_item`). Table text lives in `header`/`rows`; code and grid text in
     /// `lines`.
@@ -347,6 +357,7 @@ impl PyLayoutBlock {
     fn from_rust(block: liteparse::layout::LayoutBlock) -> Self {
         Self {
             kind: block.kind.to_string(),
+            text_item_indices: block.text_item_indices,
             text: block.text,
             level: block.level,
             bold: block.bold,

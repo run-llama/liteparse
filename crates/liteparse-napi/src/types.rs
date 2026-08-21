@@ -866,6 +866,9 @@ impl JsDocumentAnnotation {
 pub struct JsLayoutCell {
     pub text: String,
     pub bbox: Option<JsAnnotationRect>,
+    /// Indices into the page's returned `textItems`, in reading order, never
+    /// repeating within one cell; empty for padding cells.
+    pub text_item_indices: Vec<u32>,
 }
 
 /// A classified block plus where it sits on the page. Flat by design — `kind`
@@ -877,6 +880,10 @@ pub struct JsLayoutBlock {
     /// One of `heading`, `paragraph`, `list_item`, `code`, `table`,
     /// `grid_fallback`, `rule`, `figure`.
     pub kind: String,
+    /// Indices into the page's returned `textItems`, sorted and deduped;
+    /// empty for text-less blocks. For a `table` block, the union of its
+    /// cells' indices.
+    pub text_item_indices: Vec<u32>,
     /// Rendered text for the text-bearing kinds (`heading`, `paragraph`,
     /// `list_item`). Table text lives in `header`/`rows`; code and grid text in
     /// `lines`.
@@ -913,6 +920,7 @@ impl JsLayoutCell {
         Self {
             text: cell.text.clone(),
             bbox: cell.bbox.as_ref().map(JsAnnotationRect::from_rust),
+            text_item_indices: cell.text_item_indices.iter().map(|&i| i as u32).collect(),
         }
     }
 }
@@ -922,6 +930,7 @@ impl JsLayoutBlock {
         let cells = |row: &Vec<LayoutCell>| row.iter().map(JsLayoutCell::from_rust).collect();
         Self {
             kind: block.kind.to_string(),
+            text_item_indices: block.text_item_indices.iter().map(|&i| i as u32).collect(),
             text: block.text.clone(),
             level: block.level,
             bold: block.bold,
