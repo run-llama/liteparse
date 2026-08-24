@@ -792,10 +792,10 @@ pub(crate) fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>
 }
 
 /// Walk image objects on a page and return a stable per-page `ImageRef` for
-/// each one. `obj_index` is the index among image-typed page objects (not all
-/// page objects), so a later embed pass can pull pixel bytes via
-/// `Page::render_image_object`. IDs are scoped to the page number so they
-/// remain stable across runs.
+/// each one. `obj_index` is the depth-first index among image placements,
+/// including images inside Form XObjects, so a later embed pass can pull pixel
+/// bytes via `Page::render_image_object`. IDs are scoped to the page number so
+/// they remain stable across runs.
 struct ExtractedImageRefs {
     refs: Vec<ImageRef>,
     error_count: u32,
