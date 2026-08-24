@@ -464,9 +464,9 @@ pub struct ParsedPage {
 
 /// One embedded raster image on a page. `id` is a stable, page-scoped slug
 /// used as the markdown link target (e.g. `img_p1_1.png`). `obj_index` is
-/// the image's depth-first position among image placements (including Form
-/// XObjects), so a later embed pass can re-open the document and pull pixel
-/// bytes with `render_image_object`.
+/// the image's stable position: top-level images retain page-object order and
+/// nested Form images follow in depth-first order. A later embed pass uses it
+/// to pull pixel bytes with `render_image_object`.
 #[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct ImageRef {

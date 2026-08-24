@@ -111,8 +111,8 @@ mod image_tests {
 }
 
 /// Metadata for an embedded image placement retained by the extraction
-/// filters. `object_index` is its depth-first index among all image objects on
-/// the page, including images nested inside Form XObjects.
+/// filters. Top-level images keep their existing page-object order; images
+/// nested inside Form XObjects follow in depth-first order.
 #[derive(Debug, Clone)]
 pub struct ImageObjectInfo {
     pub object_index: usize,
@@ -147,19 +147,26 @@ struct NestedImageObject {
     object_index: usize,
 }
 
-/// Collect image placements in depth-first page-paint order, descending into
-/// Form XObjects. PDF producers commonly wrap an entire page in a form, so a
-/// top-level-only `FPDFPage_CountObjects` walk misses every image on the page.
+struct PageImageObjects {
+    images: Vec<NestedImageObject>,
+    error_count: u32,
+}
+
+/// Collect image placements depth-first within a Form XObject. PDF producers
+/// commonly wrap an entire page in a form, so a top-level-only
+/// `FPDFPage_CountObjects` walk misses every image on the page.
 fn collect_image_objects(
     object: pdfium_sys::FPDF_PAGEOBJECT,
     parent_matrix: &pdfium_sys::FS_MATRIX,
     depth: usize,
     next_image_index: &mut usize,
     out: &mut Vec<NestedImageObject>,
+    error_count: &mut u32,
 ) {
     let object_type = unsafe { ffi!(FPDFPageObj_GetType(object)) };
     if object_type == pdfium_sys::FPDF_PAGEOBJ_FORM as i32 {
         if depth >= MAX_IMAGE_FORM_DEPTH {
+            *error_count = error_count.saturating_add(1);
             return;
         }
         let mut form_matrix = FS_IDENTITY;
@@ -174,7 +181,14 @@ fn collect_image_objects(
                 ))
             };
             if !child.is_null() {
-                collect_image_objects(child, &combined, depth + 1, next_image_index, out);
+                collect_image_objects(
+                    child,
+                    &combined,
+                    depth + 1,
+                    next_image_index,
+                    out,
+                    error_count,
+                );
             }
         }
         return;
@@ -190,17 +204,49 @@ fn collect_image_objects(
     }
 }
 
-fn page_image_objects(page: pdfium_sys::FPDF_PAGE) -> Vec<NestedImageObject> {
+fn page_image_objects(page: pdfium_sys::FPDF_PAGE) -> PageImageObjects {
     let object_count = unsafe { ffi!(FPDFPage_CountObjects(page)) };
     let mut next_image_index = 0;
     let mut images = Vec::new();
+    let mut forms = Vec::new();
+    let mut error_count = 0;
+
+    // Preserve the historical object indices of top-level images. Nested
+    // placements are appended in a second pass, so discovering a form does not
+    // renumber a later top-level image that callers may already reference.
     for index in 0..object_count {
         let object = unsafe { ffi!(FPDFPage_GetObject(page, index)) };
-        if !object.is_null() {
-            collect_image_objects(object, &FS_IDENTITY, 0, &mut next_image_index, &mut images);
+        if object.is_null() {
+            continue;
+        }
+        match unsafe { ffi!(FPDFPageObj_GetType(object)) } as u32 {
+            pdfium_sys::FPDF_PAGEOBJ_IMAGE => {
+                images.push(NestedImageObject {
+                    object,
+                    parent_matrix: FS_IDENTITY,
+                    object_index: next_image_index,
+                });
+                next_image_index += 1;
+            }
+            pdfium_sys::FPDF_PAGEOBJ_FORM => forms.push(object),
+            _ => {}
         }
     }
-    images
+
+    for form in forms {
+        collect_image_objects(
+            form,
+            &FS_IDENTITY,
+            0,
+            &mut next_image_index,
+            &mut images,
+            &mut error_count,
+        );
+    }
+    PageImageObjects {
+        images,
+        error_count,
+    }
 }
 
 /// `FPDFPageObj_GetBounds` includes the object's own matrix but not ancestor
@@ -600,9 +646,10 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
             right: page_width,
             bottom: 0.0,
         });
+        let page_images = page_image_objects(self.handle);
         let mut results = Vec::new();
-        let mut error_count = 0;
-        for nested in page_image_objects(self.handle) {
+        let mut error_count = page_images.error_count;
+        for nested in page_images.images {
             let obj = nested.object;
             let Some(page_bounds) = nested_object_bounds(obj, &nested.parent_matrix) else {
                 error_count += 1;
@@ -740,10 +787,10 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
     }
 
     /// Get the rendered bitmap of a specific embedded image object by index.
-    /// The index corresponds to the depth-first order of image placements,
-    /// including images nested inside Form XObjects.
+    /// Top-level images keep their page-object order. Images nested inside Form
+    /// XObjects follow in depth-first order.
     pub fn render_image_object(&self, image_obj_index: usize) -> Result<Bitmap<'lib>, PdfiumError> {
-        for image in page_image_objects(self.handle) {
+        for image in page_image_objects(self.handle).images {
             if image.object_index == image_obj_index {
                 let bmp_handle = unsafe {
                     ffi!(FPDFImageObj_GetRenderedBitmap(
@@ -2083,13 +2130,16 @@ mod tests {
 
     fn nested_form_image_pdf() -> Vec<u8> {
         let form_stream = b"q 100 0 0 80 20 30 cm /Im0 Do Q";
-        let page_stream = b"q /Fm0 Do Q";
+        // Paint the form before a direct image. Discovery must still preserve
+        // the historical index (0) of the top-level image and append the
+        // newly visible nested placement after it.
+        let page_stream = b"q /Fm0 Do Q q 30 0 0 30 150 150 cm /Im1 Do Q";
         let objects = vec![
             b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
             b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
             format!(
                 "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] \
-                 /Resources << /XObject << /Fm0 4 0 R >> >> /Contents 5 0 R >>"
+                 /Resources << /XObject << /Fm0 4 0 R /Im1 6 0 R >> >> /Contents 5 0 R >>"
             )
             .into_bytes(),
             [
@@ -2151,8 +2201,16 @@ mod tests {
         let images = page.image_objects(25.0, 0.9, false);
 
         assert_eq!(images.error_count, 0);
-        assert_eq!(images.images.len(), 1);
-        let bounds = images.images[0].bounds;
+        assert_eq!(images.images.len(), 2);
+        assert_eq!(images.images[0].object_index, 0);
+        let direct_bounds = images.images[0].bounds;
+        assert!((direct_bounds.x - 150.0).abs() < 0.1);
+        assert!((direct_bounds.y - 20.0).abs() < 0.1);
+        assert!((direct_bounds.width - 30.0).abs() < 0.1);
+        assert!((direct_bounds.height - 30.0).abs() < 0.1);
+
+        assert_eq!(images.images[1].object_index, 1);
+        let bounds = images.images[1].bounds;
         assert!((bounds.x - 30.0).abs() < 0.1, "x={}", bounds.x);
         assert!((bounds.y - 70.0).abs() < 0.1, "y={}", bounds.y);
         assert!((bounds.width - 100.0).abs() < 0.1, "width={}", bounds.width);
@@ -2163,11 +2221,11 @@ mod tests {
         );
 
         let with_data = page.image_objects(25.0, 0.9, true);
-        assert_eq!(with_data.images.len(), 1);
-        assert_eq!(with_data.images[0].pixel_width, 1);
-        assert_eq!(with_data.images[0].pixel_height, 1);
+        assert_eq!(with_data.images.len(), 2);
+        assert_eq!(with_data.images[1].pixel_width, 1);
+        assert_eq!(with_data.images[1].pixel_height, 1);
         let bitmap = page
-            .render_image_object(with_data.images[0].object_index)
+            .render_image_object(with_data.images[1].object_index)
             .expect("nested image placement should remain renderable by index");
         assert!(bitmap.width() > 0);
         assert!(bitmap.height() > 0);
