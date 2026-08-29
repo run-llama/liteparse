@@ -387,6 +387,89 @@ async fn test_extract_blocks_carries_geometry_without_changing_markdown() {
         ys.windows(2).all(|w| w[0] <= w[1]),
         "blocks should be in reading order, got {ys:?}"
     );
+
+    // Provenance (fork): every block attributes to the page's returned
+    // text_items — indices in bounds, sorted+deduped, non-empty for
+    // text-bearing kinds, and never shared between two different blocks.
+    let n_items = with.pages[0].text_items.len();
+    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for b in blocks {
+        assert!(
+            b.text_item_indices.iter().all(|&i| i < n_items),
+            "index out of bounds in {:?}",
+            b.kind
+        );
+        assert!(
+            b.text_item_indices.windows(2).all(|w| w[0] < w[1]),
+            "block indices must be strictly ascending (sorted+deduped)"
+        );
+        if !matches!(b.kind, "rule" | "figure") {
+            assert!(
+                !b.text_item_indices.is_empty(),
+                "text-bearing block {:?} carries no provenance",
+                b.kind
+            );
+        }
+        for &i in &b.text_item_indices {
+            assert!(
+                seen.insert(i),
+                "item {i} attributed to two different blocks"
+            );
+        }
+    }
+}
+
+/// `extract_blocks` needs real word geometry for table detection (word-anchored
+/// straddle splits), so it forces word-box extraction internally — under any
+/// output format, exactly like markdown output always has. The forcing is a
+/// detection input only: the parser's reported config still says what the
+/// caller asked for, and with `extract_blocks` off nothing changes.
+#[tokio::test]
+#[serial]
+async fn test_extract_blocks_forces_word_geometry_json_output() {
+    let base = LiteParseConfig {
+        ocr_enabled: false,
+        output_format: OutputFormat::Json,
+        ..LiteParseConfig::default()
+    };
+
+    // Control: JSON output without extract_blocks populates no word boxes.
+    let without = LiteParse::new(base.clone());
+    let parsed = without
+        .parse("../../integration_tests_data/sample.pdf")
+        .await
+        .expect("Should be able to parse");
+    assert!(
+        parsed
+            .pages
+            .iter()
+            .flat_map(|p| &p.text_items)
+            .all(|i| i.words.is_empty()),
+        "no word boxes should be extracted when neither the caller nor a \
+         feature asks for them"
+    );
+
+    let with = LiteParse::new(LiteParseConfig {
+        extract_blocks: true,
+        ..base
+    });
+    let parsed = with
+        .parse("../../integration_tests_data/sample.pdf")
+        .await
+        .expect("Should be able to parse");
+    assert!(
+        parsed
+            .pages
+            .iter()
+            .flat_map(|p| &p.text_items)
+            .any(|i| !i.words.is_empty()),
+        "extract_blocks should force word-box extraction as a table-detection \
+         input even under JSON output"
+    );
+    // The forcing is internal: the resolved config still reports the caller's
+    // own request, which is what binding layers echo and gate `words`
+    // serialization on.
+    assert!(!with.config().emit_word_boxes);
 }
 
 #[tokio::test]

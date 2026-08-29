@@ -162,7 +162,22 @@ fn dedupe_rules(blocks: &mut Vec<crate::markdown_layout::PositionedBlock>) {
     while matches!(blocks.last().map(|b| &b.block), Some(HorizontalRule)) {
         blocks.pop();
     }
-    blocks.dedup_by(|a, b| matches!((&a.block, &b.block), (HorizontalRule, HorizontalRule)));
+    blocks.dedup_by(|a, b| {
+        if !matches!((&a.block, &b.block), (HorizontalRule, HorizontalRule)) {
+            return false;
+        }
+        // The surviving rule stands for the whole collapsed run: union the
+        // removed rule's provenance and geometry into it, so a text-derived
+        // flourish line stays attributed (documented guarantee) even when a
+        // vector-derived rule with no items is the one kept. Markdown output
+        // is unaffected — only the structured blocks view sees these fields.
+        b.text_item_indices
+            .extend(a.text_item_indices.iter().copied());
+        if let Some(r) = &a.bbox {
+            crate::types::Rect::extend(&mut b.bbox, r);
+        }
+        true
+    });
 }
 
 #[cfg(test)]
@@ -191,6 +206,7 @@ mod tests {
             all_mono: false,
             all_strike: false,
             spans: vec![TextItem::default()],
+            span_item_indices: vec![0],
             region_path: Vec::new(),
             mcid: None,
             in_figure: false,
@@ -252,6 +268,51 @@ mod tests {
             .collect();
         // Leading + trailing rules gone; the doubled interior run collapsed to one.
         assert_eq!(kinds, vec![false, true, false]);
+    }
+
+    #[test]
+    fn dedupe_rules_unions_provenance_into_the_surviving_rule() {
+        use crate::markdown_layout::Block::{HorizontalRule, Paragraph};
+        use crate::markdown_layout::PositionedBlock;
+        let p = |t: &str| {
+            PositionedBlock::unlocated(Paragraph {
+                text: t.into(),
+                bold: false,
+                italic: false,
+            })
+        };
+        // A vector-derived rule (no items) followed by a text-derived
+        // flourish rule (items [4, 7]); the flourish's attribution must
+        // survive the collapse onto the first rule.
+        let vector_rule = PositionedBlock::new(
+            HorizontalRule,
+            Some(Rect {
+                x: 10.0,
+                y: 50.0,
+                width: 100.0,
+                height: 1.0,
+            }),
+            vec![],
+        );
+        let text_rule = PositionedBlock::new(
+            HorizontalRule,
+            Some(Rect {
+                x: 10.0,
+                y: 55.0,
+                width: 120.0,
+                height: 8.0,
+            }),
+            vec![4, 7],
+        );
+        let mut blocks = vec![p("a"), vector_rule, text_rule, p("b")];
+        dedupe_rules(&mut blocks);
+        assert_eq!(blocks.len(), 3);
+        let rule = &blocks[1];
+        assert!(matches!(rule.block, HorizontalRule));
+        assert_eq!(rule.text_item_indices, vec![4, 7]);
+        let bbox = rule.bbox.as_ref().expect("unioned bbox");
+        assert_eq!((bbox.x, bbox.y), (10.0, 50.0));
+        assert_eq!((bbox.width, bbox.height), (120.0, 13.0));
     }
 
     #[test]

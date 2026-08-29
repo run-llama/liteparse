@@ -46,7 +46,8 @@ class TextItem:
     confidence: Optional[float] = None
     rotation: float = 0.0
     #: Per-word sub-boxes. Empty unless the parser was configured with
-    #: ``emit_word_boxes=True``.
+    #: ``emit_word_boxes=True`` (``extract_blocks`` computes word geometry
+    #: internally for table detection, but never returns it unrequested).
     words: List[WordBox] = field(default_factory=list)
 
 
@@ -69,6 +70,9 @@ class LayoutCell:
     """
     text: str
     bbox: Optional[AnnotationRect] = None
+    #: Indices into the page's returned ``text_items``, in reading order,
+    #: never repeating within one cell; empty for padding cells.
+    text_item_indices: List[int] = field(default_factory=list)
 
 
 @dataclass
@@ -80,6 +84,10 @@ class LayoutBlock:
     apply to a block's kind are ``None``.
     """
     kind: str
+    #: Indices into the page's returned ``text_items``, sorted and deduped;
+    #: empty for text-less blocks. For a ``table`` block, the union of its
+    #: cells' indices.
+    text_item_indices: List[int] = field(default_factory=list)
     #: Rendered text for ``heading``, ``paragraph`` and ``list_item``.
     text: Optional[str] = None
     #: Heading level (1-6), or list nesting depth for ``list_item``.

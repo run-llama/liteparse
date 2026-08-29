@@ -676,6 +676,18 @@ pub struct ProjectedLine {
     pub all_mono: bool,
     pub all_strike: bool,
     pub spans: Vec<TextItem>,
+    /// For each entry in `spans`, the index of its source item in the page's
+    /// *returned* `text_items` vector (post-projection, after
+    /// `clean_projected_items`, line-order flattened — not PDF paint order).
+    /// Positionally aligned with `spans`; any code that reorders or extends
+    /// `spans` must transform this vector in lockstep, preferably by zipping
+    /// the two before sorting. Lets the markdown classifier attribute blocks
+    /// and table cells back to their source items without string matching.
+    ///
+    /// Note this stays aligned with the x-ascending `spans` order even when
+    /// `rtl` is set: RTL reverses only how the line's *text* is rebuilt,
+    /// never the span order itself.
+    pub span_item_indices: Vec<usize>,
     /// True when the line's base direction is right-to-left (strong RTL
     /// characters outnumber strong LTR ones). `spans` is always in x-ascending
     /// order; consumers that rebuild the line's *text* must walk it in reverse

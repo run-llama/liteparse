@@ -45,12 +45,17 @@ def _convert_rect(rect: Any) -> Optional[AnnotationRect]:
 
 
 def _convert_cell(cell: Any) -> LayoutCell:
-    return LayoutCell(text=cell.text, bbox=_convert_rect(cell.bbox))
+    return LayoutCell(
+        text=cell.text,
+        bbox=_convert_rect(cell.bbox),
+        text_item_indices=list(cell.text_item_indices),
+    )
 
 
 def _convert_block(block: Any) -> LayoutBlock:
     return LayoutBlock(
         kind=block.kind,
+        text_item_indices=list(block.text_item_indices),
         text=block.text,
         level=block.level,
         bold=block.bold,
@@ -550,7 +555,9 @@ class LiteParse:
             emit_word_boxes: Emit per-word sub-boxes on each text item
                 (``TextItem.words``). Default False. Word boxes roughly double
                 the text-item payload, so enable only for word-level bbox
-                attribution.
+                attribution. With ``extract_blocks=True``, word geometry is
+                always computed internally as a table-detection input, but
+                ``words`` is only returned when this is set.
             extract_text_metadata: Include rich PDF text metadata on returned
                 text items (MCID, glyph width, font metrics/weight/buggy state,
                 colors, raw character codes, and ``trailing_space_generated``). Default False.

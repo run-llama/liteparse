@@ -11,6 +11,24 @@
 //! Every field that doesn't apply to a block's `kind` is `None` and is skipped
 //! during serialization, so a heading serializes as `{kind, text, level, bbox}`
 //! rather than a wall of nulls.
+//!
+//! # Provenance (fork)
+//!
+//! Every block and every table cell additionally carries
+//! `text_item_indices`: indices into the page's RETURNED `text_items` array
+//! (post-projection order — the order the caller receives, not PDF paint
+//! order). The field is always serialized, `[]` when empty. Contract:
+//!
+//! - block indices are sorted and deduped; for a `table` block they equal the
+//!   union of its cells' indices;
+//! - cell indices are in insertion order (reading order: line order,
+//!   x-ascending within a line) and never repeat within one cell — but one
+//!   index may appear in several cells (a merged span split across column
+//!   tracks attributes each fragment to the whole source span);
+//! - `rule` blocks from vector strokes and `figure` blocks (no text behind
+//!   them) carry `[]`, as do padding cells inserted to square off a ragged
+//!   grid; a `rule` detected from a decorative text flourish (`* * *`)
+//!   carries the flourish line's items.
 
 use serde::Serialize;
 
@@ -27,13 +45,24 @@ pub struct LayoutCell {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bbox: Option<Rect>,
+    /// Indices into the page's returned `text_items`, in reading order,
+    /// never repeating within the cell (see the module docs). Always
+    /// serialized; `[]` for padding cells.
+    pub text_item_indices: Vec<usize>,
 }
 
 impl From<&Cell> for LayoutCell {
     fn from(c: &Cell) -> Self {
+        // Insertion order preserved; belt-and-suspenders dedup upholds the
+        // "never twice within one cell" contract even if an accumulation
+        // path double-pushed.
+        let mut indices = c.text_item_indices.clone();
+        let mut seen = std::collections::HashSet::new();
+        indices.retain(|i| seen.insert(*i));
         LayoutCell {
             text: c.text.clone(),
             bbox: c.bbox.clone(),
+            text_item_indices: indices,
         }
     }
 }
@@ -48,6 +77,9 @@ pub struct LayoutBlock {
     /// One of `heading`, `paragraph`, `list_item`, `code`, `table`,
     /// `grid_fallback`, `rule`, `figure`.
     pub kind: &'static str,
+    /// Indices into the page's returned `text_items`, sorted and deduped
+    /// (see the module docs). Always serialized; `[]` for text-less blocks.
+    pub text_item_indices: Vec<usize>,
     /// Rendered text for the text-bearing kinds (`heading`, `paragraph`,
     /// `list_item`). Table text lives in `header`/`rows`; code and grid text in
     /// `lines`.
@@ -99,6 +131,7 @@ impl LayoutBlock {
     fn of(kind: &'static str, bbox: Option<Rect>) -> Self {
         LayoutBlock {
             kind,
+            text_item_indices: Vec::new(),
             text: None,
             level: None,
             bold: false,
@@ -123,7 +156,29 @@ fn cells(row: &[Cell]) -> Vec<LayoutCell> {
 impl From<&PositionedBlock> for LayoutBlock {
     fn from(pb: &PositionedBlock) -> Self {
         let bbox = pb.bbox.clone();
-        match &pb.block {
+        // Block-level indices are sorted + deduped at this public boundary;
+        // insertion order (a classifier-internal detail) is not part of the
+        // block-level contract.
+        let mut text_item_indices = pb.text_item_indices.clone();
+        text_item_indices.sort_unstable();
+        text_item_indices.dedup();
+        // A table block's indices must be exactly the union of its cells'.
+        #[cfg(debug_assertions)]
+        if let Block::Table { header, rows } = &pb.block {
+            let mut cell_union: Vec<usize> = header
+                .iter()
+                .flatten()
+                .chain(rows.iter().flatten())
+                .flat_map(|c| c.text_item_indices.iter().copied())
+                .collect();
+            cell_union.sort_unstable();
+            cell_union.dedup();
+            debug_assert_eq!(
+                text_item_indices, cell_union,
+                "table block indices must equal the union of its cell indices"
+            );
+        }
+        let mut out = match &pb.block {
             Block::Heading { level, text } => LayoutBlock {
                 text: Some(text.clone()),
                 level: Some(*level),
@@ -171,6 +226,37 @@ impl From<&PositionedBlock> for LayoutBlock {
                 format: Some(format.clone()),
                 ..LayoutBlock::of("figure", bbox)
             },
-        }
+        };
+        out.text_item_indices = text_item_indices;
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_indices_are_sorted_and_deduped_at_the_boundary() {
+        let pb = PositionedBlock::new(
+            Block::Paragraph {
+                text: "x".into(),
+                bold: false,
+                italic: false,
+            },
+            None,
+            vec![5, 2, 5, 9, 2],
+        );
+        let lb = LayoutBlock::from(&pb);
+        assert_eq!(lb.text_item_indices, vec![2, 5, 9]);
+    }
+
+    #[test]
+    fn cell_indices_keep_reading_order() {
+        let mut c = Cell::from("a b");
+        c.add_indices([9, 3, 9, 7]);
+        let lc = LayoutCell::from(&c);
+        // Insertion order preserved, repeats dropped — never re-sorted.
+        assert_eq!(lc.text_item_indices, vec![9, 3, 7]);
     }
 }

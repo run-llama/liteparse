@@ -12,15 +12,46 @@ use crate::types::Rect;
 pub struct Cell {
     pub text: String,
     pub bbox: Option<Rect>,
+    /// Indices of the source items this cell's text was read from, into the
+    /// page's *returned* `text_items` array (see
+    /// `ProjectedLine::span_item_indices` for the index contract). Insertion
+    /// order is reading order (line order, x-ascending within a line) and is
+    /// preserved as-is — never sorted or deduped at cell level, because
+    /// consumers use it as the cell's canonical word order. One index may
+    /// legitimately appear in several cells (a merged span split across
+    /// column tracks attributes to each), but never twice within one cell.
+    /// Empty for padding cells and cells synthesized without page content.
+    pub text_item_indices: Vec<usize>,
 }
 
 impl Cell {
-    /// Cell carrying text and the region it was read from.
+    /// Cell carrying text and the region it was read from, with no
+    /// source-item attribution (tests and legacy paths).
     pub fn located(text: impl Into<String>, bbox: Rect) -> Self {
         Cell {
             text: text.into(),
             bbox: Some(bbox),
+            text_item_indices: Vec::new(),
         }
+    }
+
+    /// Cell carrying text, the region it was read from, and the returned
+    /// text-item indices that produced it.
+    pub fn located_with(
+        text: impl Into<String>,
+        bbox: Rect,
+        text_item_indices: Vec<usize>,
+    ) -> Self {
+        Cell {
+            text: text.into(),
+            bbox: Some(bbox),
+            text_item_indices,
+        }
+    }
+
+    /// Append more contributing source-item indices, keeping insertion order.
+    pub fn add_indices(&mut self, indices: impl IntoIterator<Item = usize>) {
+        self.text_item_indices.extend(indices);
     }
 
     /// Borrow the cell's text. Lets call sites that only care about content
@@ -36,13 +67,18 @@ impl From<&str> for Cell {
         Cell {
             text: text.to_string(),
             bbox: None,
+            text_item_indices: Vec::new(),
         }
     }
 }
 
 impl From<String> for Cell {
     fn from(text: String) -> Self {
-        Cell { text, bbox: None }
+        Cell {
+            text,
+            bbox: None,
+            text_item_indices: Vec::new(),
+        }
     }
 }
 
@@ -181,16 +217,31 @@ fn wrap_emphasis(text: &str, bold: bool, italic: bool) -> String {
 pub struct PositionedBlock {
     pub block: Block,
     pub bbox: Option<Rect>,
+    /// Indices of the source items this block's content was read from, into
+    /// the page's *returned* `text_items` array (see
+    /// `ProjectedLine::span_item_indices` for the index contract).
+    /// Accumulated in insertion order here; the public `LayoutBlock`
+    /// conversion sorts + dedups. Empty for blocks with no text behind them
+    /// (rules, figures) and for paths not yet attributing provenance.
+    pub text_item_indices: Vec<usize>,
 }
 
 impl PositionedBlock {
-    pub fn new(block: Block, bbox: Option<Rect>) -> Self {
-        PositionedBlock { block, bbox }
+    pub fn new(block: Block, bbox: Option<Rect>, text_item_indices: Vec<usize>) -> Self {
+        PositionedBlock {
+            block,
+            bbox,
+            text_item_indices,
+        }
     }
 
-    /// A block with no known geometry.
+    /// A block with no known geometry (and no source-item attribution).
     pub fn unlocated(block: Block) -> Self {
-        PositionedBlock { block, bbox: None }
+        PositionedBlock {
+            block,
+            bbox: None,
+            text_item_indices: Vec::new(),
+        }
     }
 
     /// Grow this block's box to also cover `other`.
@@ -198,6 +249,12 @@ impl PositionedBlock {
         if let Some(r) = other {
             Rect::extend(&mut self.bbox, r);
         }
+    }
+
+    /// Union another block's source-item indices into this one (used when a
+    /// pass fuses two blocks into one — the survivor covers both sources).
+    fn absorb_indices(&mut self, other: &[usize]) {
+        self.text_item_indices.extend_from_slice(other);
     }
 }
 
@@ -242,6 +299,7 @@ pub fn splice_soft_hyphens(blocks: Vec<PositionedBlock>) -> Vec<PositionedBlock>
                 text.push_str(&tail);
             }
             prev.absorb(&pb.bbox);
+            prev.absorb_indices(&pb.text_item_indices);
             continue;
         }
         out.push(pb);
@@ -543,12 +601,14 @@ mod tests {
             height: 12.0,
         };
         let joined = splice_soft_hyphens(vec![
-            PositionedBlock::new(p("they dis-"), Some(r(50.0))),
-            PositionedBlock::new(p("lodged the part"), Some(r(70.0))),
+            PositionedBlock::new(p("they dis-"), Some(r(50.0)), vec![0, 1]),
+            PositionedBlock::new(p("lodged the part"), Some(r(70.0)), vec![2, 3]),
         ]);
         assert_eq!(joined.len(), 1);
         let bbox = joined[0].bbox.clone().expect("merged block keeps geometry");
         assert_eq!((bbox.y, bbox.height), (50.0, 32.0));
+        // The survivor also absorbs the spliced block's source items.
+        assert_eq!(joined[0].text_item_indices, vec![0, 1, 2, 3]);
     }
 
     #[test]

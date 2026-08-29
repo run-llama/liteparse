@@ -23,6 +23,7 @@ pub(crate) fn line(text: &str, x: f32, y: f32, h: f32, size: f32) -> ProjectedLi
         all_mono: false,
         all_strike: false,
         spans: vec![TextItem::default()],
+        span_item_indices: vec![0],
         region_path: Vec::new(),
         mcid: None,
         in_figure: false,
@@ -80,6 +81,7 @@ pub(crate) fn line_with_spans(cells: &[(&str, f32)], y: f32, size: f32) -> Proje
         .iter()
         .map(|s| s.x + s.width)
         .fold(f32::NEG_INFINITY, f32::max);
+    let span_item_indices = (0..spans.len()).collect();
     ProjectedLine {
         text: cells
             .iter()
@@ -104,6 +106,7 @@ pub(crate) fn line_with_spans(cells: &[(&str, f32)], y: f32, size: f32) -> Proje
         all_mono: false,
         all_strike: false,
         spans,
+        span_item_indices,
         region_path: Vec::new(),
         mcid: None,
         in_figure: false,
@@ -136,6 +139,7 @@ pub(crate) fn styled_line(spans: &[(&str, f32, Option<&str>)], y: f32, size: f32
         .iter()
         .map(|s| s.x + s.width)
         .fold(f32::NEG_INFINITY, f32::max);
+    let span_item_indices = (0..items.len()).collect();
     ProjectedLine {
         rtl: crate::bidi::is_rtl_text(&joined),
         text: joined,
@@ -156,6 +160,7 @@ pub(crate) fn styled_line(spans: &[(&str, f32, Option<&str>)], y: f32, size: f32
         all_mono: false,
         all_strike: false,
         spans: items,
+        span_item_indices,
         region_path: Vec::new(),
         mcid: None,
         in_figure: false,

@@ -112,6 +112,8 @@ export interface LiteParseConfig {
    * Emit per-word sub-boxes on each text item ({@link TextItem.words}).
    * Default false. Word boxes roughly double the text-item payload (size + napi
    * marshalling), so enable only when doing word-level bbox attribution.
+   * With `extractBlocks` on, word geometry is always computed internally as a
+   * table-detection input, but `words` is only returned when this is set.
    */
   emitWordBoxes: boolean;
   /** Include rich PDF text metadata on returned text items. Default false. */
@@ -291,6 +293,11 @@ export interface LayoutCell {
    * a ragged grid, or halves of a merged run split at an estimated position.
    */
   bbox?: Rect;
+  /**
+   * Indices into the page's returned `textItems`, in reading order, never
+   * repeating within one cell; empty for padding cells.
+   */
+  textItemIndices: number[];
 }
 
 /** A classified block of page content, discriminated by `kind`. */
@@ -304,6 +311,12 @@ export interface LayoutBlock {
     | "grid_fallback"
     | "rule"
     | "figure";
+  /**
+   * Indices into the page's returned `textItems`, sorted and deduped; empty
+   * for text-less blocks. For a `table` block, the union of its cells'
+   * indices.
+   */
+  textItemIndices: number[];
   /** Rendered text for `heading`, `paragraph`, and `list_item`. */
   text?: string;
   /** Heading level (1-6), or list nesting depth for `list_item`. */

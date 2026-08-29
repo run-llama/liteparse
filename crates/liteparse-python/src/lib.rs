@@ -99,7 +99,9 @@ struct PyTextItem {
     #[pyo3(get)]
     rotation: f64,
     /// Per-word sub-boxes for attribution. Empty unless the parse was
-    /// configured with `emit_word_boxes=True`.
+    /// configured with `emit_word_boxes=True`. With `extract_blocks=True`,
+    /// word geometry is always computed internally as a table-detection
+    /// input, but it is only returned here when `emit_word_boxes` asked.
     #[pyo3(get)]
     words: Vec<PyWordBox>,
 }
@@ -275,6 +277,10 @@ struct PyLayoutCell {
     text: String,
     #[pyo3(get)]
     bbox: Option<PyAnnotationRect>,
+    /// Indices into the page's returned `text_items`, in reading order,
+    /// never repeating within one cell; empty for padding cells.
+    #[pyo3(get)]
+    text_item_indices: Vec<usize>,
 }
 
 impl PyLayoutCell {
@@ -282,6 +288,7 @@ impl PyLayoutCell {
         Self {
             text: cell.text,
             bbox: cell.bbox.map(PyAnnotationRect::from_rust),
+            text_item_indices: cell.text_item_indices,
         }
     }
 }
@@ -298,6 +305,11 @@ struct PyLayoutBlock {
     /// `grid_fallback`, `rule`, `figure`.
     #[pyo3(get)]
     kind: String,
+    /// Indices into the page's returned `text_items`, sorted and deduped;
+    /// empty for text-less blocks. For a `table` block, the union of its
+    /// cells' indices.
+    #[pyo3(get)]
+    text_item_indices: Vec<usize>,
     /// Rendered text for the text-bearing kinds (`heading`, `paragraph`,
     /// `list_item`). Table text lives in `header`/`rows`; code and grid text in
     /// `lines`.
@@ -347,6 +359,7 @@ impl PyLayoutBlock {
     fn from_rust(block: liteparse::layout::LayoutBlock) -> Self {
         Self {
             kind: block.kind.to_string(),
+            text_item_indices: block.text_item_indices,
             text: block.text,
             level: block.level,
             bold: block.bold,
@@ -489,7 +502,20 @@ impl PyTextItem {
     /// `from_rust` with the rich-metadata fields taken from the core-gated
     /// [`liteparse::types::TextMetadata`] view, so the "what counts as text
     /// metadata" list lives in one place instead of per binding.
-    fn from_rust_for_output(item: liteparse::types::TextItem, extract_text_metadata: bool) -> Self {
+    ///
+    /// `serialize_words` is whether `TextItem::words` goes out to Python:
+    /// core forces word-box extraction when `extract_blocks` is on (a
+    /// table-detection input), but those unrequested boxes roughly double
+    /// the text-item payload, so they are only returned when the caller
+    /// asked — see [`PyParseResult::from_rust`].
+    fn from_rust_for_output(
+        mut item: liteparse::types::TextItem,
+        extract_text_metadata: bool,
+        serialize_words: bool,
+    ) -> Self {
+        if !serialize_words {
+            item.words = Vec::new();
+        }
         let meta = item.text_metadata(extract_text_metadata);
         let (fill_color, stroke_color, char_codes) = (
             meta.fill_color.map(str::to_owned),
@@ -659,7 +685,11 @@ impl PyParsedPage {
 }
 
 impl PyParsedPage {
-    fn from_rust(page: liteparse::types::ParsedPage, extract_text_metadata: bool) -> Self {
+    fn from_rust(
+        page: liteparse::types::ParsedPage,
+        extract_text_metadata: bool,
+        serialize_words: bool,
+    ) -> Self {
         Self {
             page_num: page.page_number as u32,
             width: page.page_width as f64,
@@ -675,7 +705,9 @@ impl PyParsedPage {
             text_items: page
                 .text_items
                 .into_iter()
-                .map(|item| PyTextItem::from_rust_for_output(item, extract_text_metadata))
+                .map(|item| {
+                    PyTextItem::from_rust_for_output(item, extract_text_metadata, serialize_words)
+                })
                 .collect(),
             complexity: page
                 .complexity
@@ -843,13 +875,25 @@ impl PyParseResult {
 }
 
 impl PyParseResult {
-    fn from_rust(result: liteparse::parser::ParseResult, extract_text_metadata: bool) -> Self {
+    /// `serialize_words` is whether `TextItem::words` goes out to Python:
+    /// always when the caller asked for word boxes; with `extract_blocks`
+    /// off, whatever core populated (stock behavior); with `extract_blocks`
+    /// on and no request, never — core forces word-box extraction as a
+    /// table-detection input, and shipping those unrequested boxes is pure
+    /// payload. Callers compute it as `emit_word_boxes || !extract_blocks`
+    /// from the requested config (core's forcing never mutates it) — see
+    /// [`LiteParse::serialize_words`].
+    fn from_rust(
+        result: liteparse::parser::ParseResult,
+        extract_text_metadata: bool,
+        serialize_words: bool,
+    ) -> Self {
         Self {
             total_pages: result.total_pages,
             pages: result
                 .pages
                 .into_iter()
-                .map(|page| PyParsedPage::from_rust(page, extract_text_metadata))
+                .map(|page| PyParsedPage::from_rust(page, extract_text_metadata, serialize_words))
                 .collect(),
             text: result.text,
             images: result
@@ -1373,6 +1417,8 @@ struct PyParseSession {
     inner: liteparse::ParseSession,
     runtime: std::sync::Arc<tokio::runtime::Runtime>,
     extract_text_metadata: bool,
+    /// See [`LiteParse::serialize_words`] — resolved once at session open.
+    serialize_words: bool,
 }
 
 #[pymethods]
@@ -1395,7 +1441,11 @@ impl PyParseSession {
         Ok(batch.map(|batch| PyParseBatch {
             start_page: batch.start_page,
             end_page: batch.end_page,
-            result: PyParseResult::from_rust(batch.result, self.extract_text_metadata),
+            result: PyParseResult::from_rust(
+                batch.result,
+                self.extract_text_metadata,
+                self.serialize_words,
+            ),
         }))
     }
 
@@ -1650,6 +1700,7 @@ impl LiteParse {
         Ok(PyParseResult::from_rust(
             result,
             self.config.extract_text_metadata,
+            self.serialize_words(),
         ))
     }
 
@@ -1691,6 +1742,7 @@ impl LiteParse {
         Ok(PyParseResult::from_rust(
             result,
             self.config.extract_text_metadata,
+            self.serialize_words(),
         ))
     }
 
@@ -1795,7 +1847,18 @@ impl LiteParse {
             inner: session,
             runtime: self.runtime.clone(),
             extract_text_metadata: self.config.extract_text_metadata,
+            serialize_words: self.serialize_words(),
         })
+    }
+
+    /// Whether `TextItem::words` goes out to Python: always when the caller
+    /// asked for word boxes; with `extract_blocks` off, whatever core
+    /// populated (stock behavior); with `extract_blocks` on and no request,
+    /// never — core forces word-box extraction as a table-detection input
+    /// without mutating the config, so `self.config` reads the caller's own
+    /// request.
+    fn serialize_words(&self) -> bool {
+        self.config.emit_word_boxes || !self.config.extract_blocks
     }
 }
 
@@ -1940,6 +2003,66 @@ mod tests {
         assert_eq!(round_trip.stroke_color.as_deref(), Some("ff445566"));
         assert_eq!(round_trip.char_codes, vec![65, 32]);
         assert!(round_trip.trailing_space_generated);
+    }
+
+    /// Core forces word-box extraction when `extract_blocks` is on (a
+    /// table-detection input), so the DTO layer must strip the unrequested
+    /// boxes: `words` goes out only when the caller asked, or when
+    /// `extract_blocks` is off (stock behavior — core then populates words
+    /// only on request or for markdown output, and whatever it populated is
+    /// passed through).
+    #[test]
+    fn words_serialized_only_when_requested_under_extract_blocks() {
+        let item = || liteparse::types::TextItem {
+            text: "two words".into(),
+            words: vec![
+                liteparse::types::WordBox {
+                    text: "two".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    width: 10.0,
+                    height: 5.0,
+                },
+                liteparse::types::WordBox {
+                    text: "words".into(),
+                    x: 12.0,
+                    y: 0.0,
+                    width: 16.0,
+                    height: 5.0,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let stripped = PyTextItem::from_rust_for_output(item(), false, false);
+        assert!(
+            stripped.words.is_empty(),
+            "forced word boxes must not ship when the caller didn't ask"
+        );
+
+        let kept = PyTextItem::from_rust_for_output(item(), false, true);
+        assert_eq!(kept.words.len(), 2);
+        assert_eq!(kept.words[0].text, "two");
+        assert_eq!(kept.words[1].text, "words");
+    }
+
+    /// The requested-vs-forced resolution: `words` is serialized unless
+    /// `extract_blocks` forced them on an unwilling caller.
+    #[test]
+    fn serialize_words_resolution_matches_wasm_binding() {
+        let case = |emit_word_boxes: bool, extract_blocks: bool| {
+            let config = LiteParseConfig {
+                emit_word_boxes,
+                extract_blocks,
+                ..Default::default()
+            };
+            // The same expression `LiteParse::serialize_words` computes.
+            config.emit_word_boxes || !config.extract_blocks
+        };
+        assert!(case(false, false), "stock path: pass through core output");
+        assert!(case(true, false), "explicit request honored");
+        assert!(case(true, true), "explicit request honored under blocks");
+        assert!(!case(false, true), "forced-only word boxes are stripped");
     }
 
     #[test]
