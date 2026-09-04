@@ -110,8 +110,9 @@ mod image_tests {
     }
 }
 
-/// Metadata for an embedded image page object retained by the extraction
-/// filters. `object_index` is its index among all image objects on the page.
+/// Metadata for an embedded image placement retained by the extraction
+/// filters. Top-level images keep their existing page-object order; images
+/// nested inside Form XObjects follow in depth-first order.
 #[derive(Debug, Clone)]
 pub struct ImageObjectInfo {
     pub object_index: usize,
@@ -135,6 +136,161 @@ pub struct ImageObjectInfo {
 pub struct ImageObjects {
     pub images: Vec<ImageObjectInfo>,
     pub error_count: u32,
+}
+
+const MAX_IMAGE_FORM_DEPTH: usize = 8;
+
+#[derive(Clone, Copy)]
+struct NestedImageObject {
+    object: pdfium_sys::FPDF_PAGEOBJECT,
+    parent_matrix: pdfium_sys::FS_MATRIX,
+    object_index: usize,
+}
+
+struct PageImageObjects {
+    images: Vec<NestedImageObject>,
+    error_count: u32,
+}
+
+/// Collect image placements depth-first within a Form XObject. PDF producers
+/// commonly wrap an entire page in a form, so a top-level-only
+/// `FPDFPage_CountObjects` walk misses every image on the page.
+fn collect_image_objects(
+    object: pdfium_sys::FPDF_PAGEOBJECT,
+    parent_matrix: &pdfium_sys::FS_MATRIX,
+    depth: usize,
+    next_image_index: &mut usize,
+    out: &mut Vec<NestedImageObject>,
+    error_count: &mut u32,
+) {
+    let object_type = unsafe { ffi!(FPDFPageObj_GetType(object)) };
+    if object_type == pdfium_sys::FPDF_PAGEOBJ_FORM as i32 {
+        if depth >= MAX_IMAGE_FORM_DEPTH {
+            *error_count = error_count.saturating_add(1);
+            return;
+        }
+        let mut form_matrix = FS_IDENTITY;
+        unsafe { ffi!(FPDFPageObj_GetMatrix(object, &mut form_matrix)) };
+        let combined = compose_matrix(parent_matrix, &form_matrix);
+        let child_count = unsafe { ffi!(FPDFFormObj_CountObjects(object)) };
+        for index in 0..child_count {
+            let child = unsafe {
+                ffi!(FPDFFormObj_GetObject(
+                    object,
+                    index as std::os::raw::c_ulong
+                ))
+            };
+            if !child.is_null() {
+                collect_image_objects(
+                    child,
+                    &combined,
+                    depth + 1,
+                    next_image_index,
+                    out,
+                    error_count,
+                );
+            }
+        }
+        return;
+    }
+
+    if object_type == pdfium_sys::FPDF_PAGEOBJ_IMAGE as i32 {
+        out.push(NestedImageObject {
+            object,
+            parent_matrix: *parent_matrix,
+            object_index: *next_image_index,
+        });
+        *next_image_index += 1;
+    }
+}
+
+fn page_image_objects(page: pdfium_sys::FPDF_PAGE) -> PageImageObjects {
+    let object_count = unsafe { ffi!(FPDFPage_CountObjects(page)) };
+    let mut next_image_index = 0;
+    let mut images = Vec::new();
+    let mut forms = Vec::new();
+    let mut error_count = 0;
+
+    // Preserve the historical object indices of top-level images. Nested
+    // placements are appended in a second pass, so discovering a form does not
+    // renumber a later top-level image that callers may already reference.
+    for index in 0..object_count {
+        let object = unsafe { ffi!(FPDFPage_GetObject(page, index)) };
+        if object.is_null() {
+            continue;
+        }
+        match unsafe { ffi!(FPDFPageObj_GetType(object)) } as u32 {
+            pdfium_sys::FPDF_PAGEOBJ_IMAGE => {
+                images.push(NestedImageObject {
+                    object,
+                    parent_matrix: FS_IDENTITY,
+                    object_index: next_image_index,
+                });
+                next_image_index += 1;
+            }
+            pdfium_sys::FPDF_PAGEOBJ_FORM => forms.push(object),
+            _ => {}
+        }
+    }
+
+    for form in forms {
+        collect_image_objects(
+            form,
+            &FS_IDENTITY,
+            0,
+            &mut next_image_index,
+            &mut images,
+            &mut error_count,
+        );
+    }
+    PageImageObjects {
+        images,
+        error_count,
+    }
+}
+
+/// `FPDFPageObj_GetBounds` includes the object's own matrix but not ancestor
+/// Form matrices. Transform all four corners by the accumulated parent matrix
+/// so rotated or mirrored forms still produce a correct page-space AABB.
+fn nested_object_bounds(
+    object: pdfium_sys::FPDF_PAGEOBJECT,
+    parent: &pdfium_sys::FS_MATRIX,
+) -> Option<RectF> {
+    let mut left = 0.0;
+    let mut bottom = 0.0;
+    let mut right = 0.0;
+    let mut top = 0.0;
+    let ok = unsafe {
+        ffi!(FPDFPageObj_GetBounds(
+            object,
+            &mut left,
+            &mut bottom,
+            &mut right,
+            &mut top
+        ))
+    };
+    if ok == 0 {
+        return None;
+    }
+
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for (x, y) in [(left, bottom), (left, top), (right, bottom), (right, top)] {
+        let transformed_x = parent.a * x + parent.c * y + parent.e;
+        let transformed_y = parent.b * x + parent.d * y + parent.f;
+        min_x = min_x.min(transformed_x);
+        min_y = min_y.min(transformed_y);
+        max_x = max_x.max(transformed_x);
+        max_y = max_y.max(transformed_y);
+    }
+    Some(RectF {
+        left: min_x,
+        top: max_y,
+        right: max_x,
+        bottom: min_y,
+    })
 }
 
 /// One segment of a vector path. Coordinates are in viewport space
@@ -517,44 +673,18 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
             right: page_width,
             bottom: 0.0,
         });
-        let obj_count = unsafe { ffi!(FPDFPage_CountObjects(self.handle)) };
+        let page_images = page_image_objects(self.handle);
         let mut results = Vec::new();
-        let mut error_count = 0;
-        let mut image_index = 0usize;
-
-        for i in 0..obj_count {
-            let obj = unsafe { ffi!(FPDFPage_GetObject(self.handle, i)) };
-            if obj.is_null() {
-                continue;
-            }
-
-            let obj_type = unsafe { ffi!(FPDFPageObj_GetType(obj)) };
-            if obj_type != pdfium_sys::FPDF_PAGEOBJ_IMAGE as i32 {
-                continue;
-            }
-            let object_index = image_index;
-            image_index += 1;
-
-            let mut left: f32 = 0.0;
-            let mut bottom: f32 = 0.0;
-            let mut right: f32 = 0.0;
-            let mut top: f32 = 0.0;
-            let ok = unsafe {
-                ffi!(FPDFPageObj_GetBounds(
-                    obj,
-                    &mut left,
-                    &mut bottom,
-                    &mut right,
-                    &mut top
-                ))
-            };
-            if ok == 0 {
+        let mut error_count = page_images.error_count;
+        for nested in page_images.images {
+            let obj = nested.object;
+            let Some(page_bounds) = nested_object_bounds(obj, &nested.parent_matrix) else {
                 error_count += 1;
                 continue;
-            }
+            };
 
-            let w = right - left;
-            let h = top - bottom;
+            let w = page_bounds.right - page_bounds.left;
+            let h = page_bounds.top - page_bounds.bottom;
 
             if w < min_size_pt || h < min_size_pt {
                 continue;
@@ -563,15 +693,7 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
                 continue;
             }
 
-            let viewport = self.bounds_to_viewport(
-                &view_box,
-                &RectF {
-                    left,
-                    top,
-                    right,
-                    bottom,
-                },
-            );
+            let viewport = self.bounds_to_viewport(&view_box, &page_bounds);
 
             let mut metadata = pdfium_sys::FPDF_IMAGEOBJ_METADATA::default();
             let (pixel_width, pixel_height, rotation) = if include_data {
@@ -607,7 +729,12 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
                 };
                 let matrix_ok = unsafe { ffi!(FPDFPageObj_GetMatrix(obj, &mut matrix)) };
                 let rotation = if matrix_ok != 0 {
-                    matrix.b.atan2(matrix.a).to_degrees().rem_euclid(360.0)
+                    let page_matrix = compose_matrix(&nested.parent_matrix, &matrix);
+                    page_matrix
+                        .b
+                        .atan2(page_matrix.a)
+                        .to_degrees()
+                        .rem_euclid(360.0)
                 } else {
                     0.0
                 };
@@ -630,7 +757,7 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
             };
 
             results.push(ImageObjectInfo {
-                object_index,
+                object_index: nested.object_index,
                 bounds: ImageBounds {
                     x: viewport.left,
                     y: viewport.top,
@@ -687,27 +814,16 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
     }
 
     /// Get the rendered bitmap of a specific embedded image object by index.
-    /// The index corresponds to the order from iterating page objects (image objects only).
+    /// Top-level images keep their page-object order. Images nested inside Form
+    /// XObjects follow in depth-first order.
     pub fn render_image_object(&self, image_obj_index: usize) -> Result<Bitmap<'lib>, PdfiumError> {
-        let obj_count = unsafe { ffi!(FPDFPage_CountObjects(self.handle)) };
-        let mut image_idx = 0usize;
-
-        for i in 0..obj_count {
-            let obj = unsafe { ffi!(FPDFPage_GetObject(self.handle, i)) };
-            if obj.is_null() {
-                continue;
-            }
-            let obj_type = unsafe { ffi!(FPDFPageObj_GetType(obj)) };
-            if obj_type != pdfium_sys::FPDF_PAGEOBJ_IMAGE as i32 {
-                continue;
-            }
-
-            if image_idx == image_obj_index {
+        for image in page_image_objects(self.handle).images {
+            if image.object_index == image_obj_index {
                 let bmp_handle = unsafe {
                     ffi!(FPDFImageObj_GetRenderedBitmap(
                         self.doc_handle,
                         self.handle,
-                        obj
+                        image.object
                     ))
                 };
                 if bmp_handle.is_null() {
@@ -716,7 +832,6 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
                 // Wrap in our Bitmap (which will call Destroy on drop)
                 return Ok(unsafe { Bitmap::from_handle(bmp_handle) });
             }
-            image_idx += 1;
         }
 
         Err(PdfiumError::OperationFailed)
@@ -2038,6 +2153,109 @@ mod tests {
             .as_bytes(),
         );
         pdf
+    }
+
+    fn nested_form_image_pdf() -> Vec<u8> {
+        let form_stream = b"q 100 0 0 80 20 30 cm /Im0 Do Q";
+        // Paint the form before a direct image. Discovery must still preserve
+        // the historical index (0) of the top-level image and append the
+        // newly visible nested placement after it.
+        let page_stream = b"q /Fm0 Do Q q 30 0 0 30 150 150 cm /Im1 Do Q";
+        let objects = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] \
+                 /Resources << /XObject << /Fm0 4 0 R /Im1 6 0 R >> >> /Contents 5 0 R >>"
+            )
+            .into_bytes(),
+            [
+                format!(
+                    "<< /Type /XObject /Subtype /Form /BBox [0 0 200 200] \
+                     /Matrix [1 0 0 1 10 20] \
+                     /Resources << /XObject << /Im0 6 0 R >> >> \
+                     /Length {} >>\nstream\n",
+                    form_stream.len()
+                )
+                .into_bytes(),
+                form_stream.to_vec(),
+                b"\nendstream".to_vec(),
+            ]
+            .concat(),
+            [
+                format!("<< /Length {} >>\nstream\n", page_stream.len()).into_bytes(),
+                page_stream.to_vec(),
+                b"\nendstream".to_vec(),
+            ]
+            .concat(),
+            b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 \
+              /ColorSpace /DeviceRGB /BitsPerComponent 8 \
+              /Filter /ASCIIHexDecode /Length 7 >>\nstream\nFF0000>\nendstream"
+                .to_vec(),
+        ];
+
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::with_capacity(objects.len());
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+            pdf.extend_from_slice(object);
+            pdf.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    #[test]
+    fn image_objects_descend_into_form_xobjects() {
+        let bytes = nested_form_image_pdf();
+        let library = Library::init();
+        let document = library.load_document_from_bytes(&bytes, None).unwrap();
+        let page = document.page(0).unwrap();
+
+        let images = page.image_objects(25.0, 0.9, false);
+
+        assert_eq!(images.error_count, 0);
+        assert_eq!(images.images.len(), 2);
+        assert_eq!(images.images[0].object_index, 0);
+        let direct_bounds = images.images[0].bounds;
+        assert!((direct_bounds.x - 150.0).abs() < 0.1);
+        assert!((direct_bounds.y - 20.0).abs() < 0.1);
+        assert!((direct_bounds.width - 30.0).abs() < 0.1);
+        assert!((direct_bounds.height - 30.0).abs() < 0.1);
+
+        assert_eq!(images.images[1].object_index, 1);
+        let bounds = images.images[1].bounds;
+        assert!((bounds.x - 30.0).abs() < 0.1, "x={}", bounds.x);
+        assert!((bounds.y - 70.0).abs() < 0.1, "y={}", bounds.y);
+        assert!((bounds.width - 100.0).abs() < 0.1, "width={}", bounds.width);
+        assert!(
+            (bounds.height - 80.0).abs() < 0.1,
+            "height={}",
+            bounds.height
+        );
+
+        let with_data = page.image_objects(25.0, 0.9, true);
+        assert_eq!(with_data.images.len(), 2);
+        assert_eq!(with_data.images[1].pixel_width, 1);
+        assert_eq!(with_data.images[1].pixel_height, 1);
+        let bitmap = page
+            .render_image_object(with_data.images[1].object_index)
+            .expect("nested image placement should remain renderable by index");
+        assert!(bitmap.width() > 0);
+        assert!(bitmap.height() > 0);
     }
 
     #[test]
