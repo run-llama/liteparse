@@ -8,6 +8,17 @@ use liteparse::types::PdfInput;
 
 mod cli;
 
+fn parse_output_format(value: &str) -> PyResult<OutputFormat> {
+    match value {
+        "json" => Ok(OutputFormat::Json),
+        "text" => Ok(OutputFormat::Text),
+        "markdown" | "md" => Ok(OutputFormat::Markdown),
+        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "invalid output_format: {value} (expected 'json', 'text', or 'markdown')"
+        ))),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Python type wrappers
 // ---------------------------------------------------------------------------
@@ -1534,11 +1545,7 @@ impl LiteParse {
             cfg.dpi = v;
         }
         if let Some(v) = output_format {
-            cfg.output_format = match v.as_str() {
-                "text" => OutputFormat::Text,
-                "markdown" | "md" => OutputFormat::Markdown,
-                _ => OutputFormat::Json,
-            };
+            cfg.output_format = parse_output_format(&v)?;
         }
         if let Some(v) = preserve_very_small_text {
             cfg.preserve_very_small_text = v;
@@ -1953,6 +1960,20 @@ mod tests {
         };
         let py = PyLiteParseConfig::from_rust(&config);
         assert!(py.extract_text_metadata);
+    }
+
+    #[test]
+    fn output_format_rejects_invalid_values() {
+        assert_eq!(parse_output_format("json").unwrap(), OutputFormat::Json);
+        assert_eq!(parse_output_format("text").unwrap(), OutputFormat::Text);
+        assert_eq!(
+            parse_output_format("markdown").unwrap(),
+            OutputFormat::Markdown
+        );
+        assert_eq!(parse_output_format("md").unwrap(), OutputFormat::Markdown);
+
+        let error = parse_output_format("yaml").unwrap_err();
+        assert!(error.to_string().contains("invalid output_format: yaml"));
     }
 
     #[test]
