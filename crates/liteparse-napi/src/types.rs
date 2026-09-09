@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use napi::bindgen_prelude::{Error, Result};
 use napi_derive::napi;
 
 use liteparse::config::{CropBox, ImageMode, LiteParseConfig, OutputFormat};
@@ -133,7 +134,7 @@ pub struct JsCropBox {
 }
 
 impl JsLiteParseConfig {
-    pub fn into_rust(self) -> LiteParseConfig {
+    pub fn into_rust(self) -> Result<LiteParseConfig> {
         let mut cfg = LiteParseConfig::default();
         if let Some(v) = self.ocr_language {
             cfg.ocr_language = v;
@@ -166,11 +167,7 @@ impl JsLiteParseConfig {
             cfg.dpi = v as f32;
         }
         if let Some(v) = self.output_format {
-            cfg.output_format = match v.as_str() {
-                "text" => OutputFormat::Text,
-                "markdown" | "md" => OutputFormat::Markdown,
-                _ => OutputFormat::Json,
-            };
+            cfg.output_format = parse_output_format(&v)?;
         }
         if let Some(v) = self.preserve_very_small_text {
             cfg.preserve_very_small_text = v;
@@ -259,7 +256,7 @@ impl JsLiteParseConfig {
         if let Some(v) = self.extract_vector_graphics {
             cfg.extract_vector_graphics = v;
         }
-        cfg
+        Ok(cfg)
     }
 
     pub fn from_rust(cfg: &LiteParseConfig) -> Self {
@@ -324,6 +321,17 @@ impl JsLiteParseConfig {
             include_complexity: Some(cfg.include_complexity),
             extract_vector_graphics: Some(cfg.extract_vector_graphics),
         }
+    }
+}
+
+fn parse_output_format(value: &str) -> Result<OutputFormat> {
+    match value {
+        "json" => Ok(OutputFormat::Json),
+        "text" => Ok(OutputFormat::Text),
+        "markdown" | "md" => Ok(OutputFormat::Markdown),
+        _ => Err(Error::from_reason(format!(
+            "invalid outputFormat: {value} (expected 'json', 'text', or 'markdown')"
+        ))),
     }
 }
 
@@ -1384,7 +1392,23 @@ mod tests {
         let mut js = JsLiteParseConfig::from_rust(&LiteParseConfig::default());
         assert_eq!(js.extract_text_metadata, Some(false));
         js.extract_text_metadata = Some(true);
-        assert!(js.into_rust().extract_text_metadata);
+        assert!(js.into_rust().unwrap().extract_text_metadata);
+    }
+
+    #[test]
+    fn output_format_rejects_invalid_values() {
+        assert_eq!(parse_output_format("json").unwrap(), OutputFormat::Json);
+        assert_eq!(parse_output_format("text").unwrap(), OutputFormat::Text);
+        assert_eq!(
+            parse_output_format("markdown").unwrap(),
+            OutputFormat::Markdown
+        );
+        assert_eq!(parse_output_format("md").unwrap(), OutputFormat::Markdown);
+
+        let mut config = JsLiteParseConfig::from_rust(&LiteParseConfig::default());
+        config.output_format = Some("yaml".to_string());
+        let error = config.into_rust().unwrap_err();
+        assert!(error.reason.contains("invalid outputFormat: yaml"));
     }
 
     #[test]

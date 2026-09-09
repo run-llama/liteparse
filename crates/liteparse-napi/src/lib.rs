@@ -20,13 +20,16 @@ impl LiteParse {
     /// Create a new LiteParse instance with optional configuration.
     /// Any fields not provided will use defaults.
     #[napi(constructor)]
-    pub fn new(config: Option<JsLiteParseConfig>) -> Self {
-        let rust_config = config.map(|c| c.into_rust()).unwrap_or_default();
+    pub fn new(config: Option<JsLiteParseConfig>) -> Result<Self> {
+        let rust_config = config
+            .map(|c| c.into_rust())
+            .transpose()?
+            .unwrap_or_default();
         let inner = liteparse::parser::LiteParse::new(rust_config.clone());
-        Self {
+        Ok(Self {
             inner,
             config: rust_config,
-        }
+        })
     }
 
     /// Parse a document. Accepts a file path (string) or raw PDF bytes (Buffer).
