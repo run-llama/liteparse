@@ -3289,23 +3289,44 @@ fn extract_h_v_segments(graphics: &[GraphicPrimitive]) -> (Vec<HSeg>, Vec<VSeg>)
     (hs, vs)
 }
 
-/// Cluster H segments sharing a y-coordinate (within `TABLE_GRID_CLUSTER_PT`)
-/// into a single wider grid line whose x-extent is the union of the inputs.
+fn ranges_overlap_or_nearly_touch(a_min: f32, a_max: f32, b_min: f32, b_max: f32) -> bool {
+    a_min <= b_max + TABLE_CROSS_TOLERANCE_PT && b_min <= a_max + TABLE_CROSS_TOLERANCE_PT
+}
+
+/// Cluster connected H segments sharing a y-coordinate (within
+/// `TABLE_GRID_CLUSTER_PT`) into a single wider grid line whose x-extent is
+/// the union of the inputs. Collinear segments separated by whitespace stay
+/// distinct so unrelated side-by-side tables do not become one component.
 fn cluster_h_segments(mut segs: Vec<HSeg>) -> Vec<HSeg> {
     if segs.is_empty() {
         return segs;
     }
     segs.sort_by(|a, b| a.y.total_cmp(&b.y));
     let mut out: Vec<HSeg> = Vec::with_capacity(segs.len());
-    for seg in segs {
-        if let Some(last) = out.last_mut()
-            && (last.y - seg.y).abs() <= TABLE_GRID_CLUSTER_PT
-        {
-            last.x_min = last.x_min.min(seg.x_min);
-            last.x_max = last.x_max.max(seg.x_max);
-            continue;
+    let mut band_start = 0;
+    while band_start < segs.len() {
+        let band_y = segs[band_start].y;
+        let mut band_end = band_start + 1;
+        while band_end < segs.len() && (segs[band_end].y - band_y).abs() <= TABLE_GRID_CLUSTER_PT {
+            band_end += 1;
         }
-        out.push(seg);
+
+        let band = &mut segs[band_start..band_end];
+        band.sort_by(|a, b| a.x_min.total_cmp(&b.x_min));
+        let mut current = band[0];
+        current.y = band_y;
+        for seg in &band[1..] {
+            if ranges_overlap_or_nearly_touch(current.x_min, current.x_max, seg.x_min, seg.x_max) {
+                current.x_min = current.x_min.min(seg.x_min);
+                current.x_max = current.x_max.max(seg.x_max);
+            } else {
+                out.push(current);
+                current = *seg;
+                current.y = band_y;
+            }
+        }
+        out.push(current);
+        band_start = band_end;
     }
     out
 }
@@ -5972,6 +5993,34 @@ mod tests {
         ];
         let runs = detect_ruled_tables(&lines, &extract_rule_segments(&graphics), 612.0, 792.0);
         assert_eq!(runs.len(), 1);
+    }
+
+    #[test]
+    fn ruled_grids_with_shared_rows_remain_separate_components() {
+        // Two side-by-side 2x2 grids intentionally reuse the same y
+        // coordinates. Their horizontal borders must not be extended through
+        // the whitespace between the grids.
+        let mut graphics = Vec::new();
+        for left in [50.0_f32, 350.0] {
+            for y in [100.0_f32, 140.0, 180.0] {
+                graphics.push(stroke(left, y, left + 200.0, y, 0.5));
+            }
+            for x in [left, left + 100.0, left + 200.0] {
+                graphics.push(stroke(x, 100.0, x, 180.0, 0.5));
+            }
+        }
+
+        let (hs, vs) = extract_h_v_segments(&graphics);
+        let hs = cluster_h_segments(hs);
+        let vs = cluster_v_segments(vs);
+        let components = find_grid_components(&hs, &vs);
+
+        assert_eq!(components.len(), 2, "expected two separate grid components");
+        assert!(
+            components
+                .iter()
+                .all(|(h_indices, v_indices)| h_indices.len() == 3 && v_indices.len() == 3)
+        );
     }
 
     #[test]
