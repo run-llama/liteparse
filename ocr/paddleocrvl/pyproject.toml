@@ -1,0 +1,29 @@
+[project]
+name = "paddleocrvl-liteparse"
+version = "0.1.0"
+description = "PaddleOCR-VL 1.6 server conforming to the LiteParse OCR API"
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "paddleocr[doc-parser]>=3.6.0",
+    "paddlepaddle>=3.2.0",
+    "fastapi>=0.131.0",
+    "uvicorn>=0.41.0",
+    "pillow>=10.2.0",
+    "python-multipart>=0.0.22",
+]
+
+[project.optional-dependencies]
+# Runs the 0.9B VL recognition model through PyTorch instead of PaddlePaddle.
+# The practical GPU path on Windows, where vLLM/SGLang cannot run natively.
+transformers = [
+    "transformers>=5.0.0",
+    "torch>=2.8.0",
+    "torchvision>=0.23.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27.0,<0.28",
+    "pytest>=9.0.2",
+]

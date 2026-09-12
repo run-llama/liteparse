@@ -46,3 +46,23 @@ jobs:
       - name: Run Tests on Main Package
         run: uv run pytest test_server.py
         working-directory: ocr/easyocr/
+
+  testing_paddleocrvl:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - name: Run Tests on Main Package
+        run: uv run pytest test_server.py
+        working-directory: ocr/paddleocrvl/

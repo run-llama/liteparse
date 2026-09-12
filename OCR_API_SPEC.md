@@ -148,6 +148,7 @@ See the `/ocr` directory for reference implementations:
 - `ocr/easyocr/` - Wrapper for EasyOCR
 - `ocr/paddleocr/` - Wrapper for PaddleOCR
 - `ocr/suryaocr/` - Wrapper for Surya OCR 2 (multilingual)
+- `ocr/paddleocrvl/` - Wrapper for PaddleOCR-VL 1.6 (layout-aware document parsing VLM)
 
 ## Testing Your Server
 
