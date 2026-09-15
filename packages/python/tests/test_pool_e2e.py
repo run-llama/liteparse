@@ -96,7 +96,11 @@ def test_timeout_kills_worker_and_pool_recovers(sample_pdf):
 def test_timeout_names_the_file(tmp_path):
     slow_path = tmp_path / "rogue.pdf"
     slow_path.write_bytes(_grid_pdf(64000))
-    with LiteParse(**CFG, pool_size=1, parse_timeout=0.5) as pooled:
+    # The doc parses in ~0.35s, so a 0.5s budget only ever tripped because
+    # worker spawn + `import liteparse` were charged to it. Pick a timeout the
+    # parse itself blows through, so the assertion does not depend on how slow
+    # process startup happens to be on the machine running the suite.
+    with LiteParse(**CFG, pool_size=1, parse_timeout=0.1) as pooled:
         with pytest.raises(ParseTimeoutError) as excinfo:
             pooled.parse(slow_path)
     assert excinfo.value.source == str(slow_path.absolute())

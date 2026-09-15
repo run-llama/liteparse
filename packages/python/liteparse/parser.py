@@ -1,9 +1,19 @@
 """LiteParse Python wrapper - native Rust bindings via PyO3."""
 
-import asyncio
-from concurrent.futures import Executor
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import (
+    Any,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+    Union,
+    TYPE_CHECKING,
+)
+
+if TYPE_CHECKING:
+    from concurrent.futures import Executor
 
 from liteparse._liteparse import LiteParse as _NativeLiteParse
 from liteparse._liteparse import search_items as _native_search_items
@@ -745,7 +755,7 @@ class LiteParse:
         self,
         file_data: Union[str, Path, bytes],
         *,
-        executor: Optional[Executor] = None,
+        executor: Optional["Executor"] = None,
     ) -> ParseResult:
         """
         Parse a document without blocking the running event loop.
@@ -762,6 +772,9 @@ class LiteParse:
             The same exceptions as :meth:`parse`, re-raised on the awaiting
             side.
         """
+        # Imported here, not at module scope: `asyncio` costs ~10ms
+        import asyncio
+
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(executor, self.parse, file_data)
 
