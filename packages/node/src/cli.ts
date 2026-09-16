@@ -3,6 +3,7 @@
 import { program } from "commander";
 import { LiteParse, type LiteParseConfig } from "./lib.js";
 import { parseResultToCliJson } from "./cli-json.js";
+import { formatText } from "./cli-text.js";
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join, relative, parse as parsePath } from "node:path";
 
@@ -187,7 +188,9 @@ program
               null,
               2,
             )
-          : result.text;
+          : config.outputFormat === "text"
+            ? formatText(result.pages)
+            : result.text;
 
 
       if (opts.output) {
@@ -461,7 +464,9 @@ program
                     null,
                     2,
                   )
-                : result.text;
+                : format === "text"
+                  ? formatText(result.pages)
+                  : result.text;
             writeFileSync(outPath, output, "utf-8");
             success++;
             if (!opts.quiet) {
