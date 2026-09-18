@@ -106,6 +106,10 @@ class TestParsedPageStructure:
 class TestParseOptions:
     """Test that CLI options are correctly forwarded."""
 
+    def test_invalid_output_format(self):
+        with pytest.raises(ValueError, match="invalid output_format: yaml"):
+            LiteParse(output_format="yaml")
+
     def test_target_pages(self, parser: LiteParse, invoice_pdf: Path):
         # invoice.pdf has 2 pages — parse only page 1
         result = parser.parse(invoice_pdf, ocr_enabled=False, target_pages="1")

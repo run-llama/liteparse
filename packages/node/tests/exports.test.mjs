@@ -83,6 +83,15 @@ test("CJS: require by package name loads the native module and parses", async ()
   assert.ok(result.text.length > 0, "expected non-empty extracted text");
 });
 
+test("rejects an invalid outputFormat", async () => {
+  const { LiteParse } = await import(PACKAGE_NAME);
+
+  assert.throws(
+    () => new LiteParse({ outputFormat: "yaml" }),
+    /invalid outputFormat: yaml/,
+  );
+});
+
 // The native .node binary is located relative to the built file's own path.
 // Loading from a working directory outside the package, via an entry script
 // that cannot resolve the package by name, is the case that catches a loader
