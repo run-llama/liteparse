@@ -798,10 +798,9 @@ impl LiteParse {
         let t1 = web_time::Instant::now();
 
         if let Some(engine) = ocr_engine {
-            let round_rasters = self.config.num_workers.max(1);
             // Extraction may have flattened SOME pages' form widgets into
-            // page content in its (now dropped) document instance; re-apply
-            // per round on exactly those pages so the rasters match what
+            // page content in its (now dropped) document instance; re-apply on
+            // exactly those pages so the rasters match what
             // extraction saw. With `render_form_fields` the form environment
             // paints the widgets instead, so no re-flatten is needed.
             let reflatten_pages: std::collections::HashSet<u32> =
@@ -811,16 +810,67 @@ impl LiteParse {
                     std::collections::HashSet::new()
                 };
             let ocr_input = repaired_input.as_ref().unwrap_or(validated_input);
-            let mut round_start = 0usize;
-            while round_start < pages.len() {
+            let mut scan_start = 0usize;
+
+            #[cfg(not(target_arch = "wasm32"))]
+            let mut ocr_tasks = ocr_merge::OcrTaskPool::new(
+                engine.clone(),
+                &self.config.ocr_language,
+                self.config.num_workers,
+            );
+            #[cfg(not(target_arch = "wasm32"))]
+            loop {
+                // Reap completions before deciding whether to render so every
+                // available worker can be refilled immediately.
+                ocr_tasks.complete_ready();
+
+                if scan_start >= pages.len() {
+                    break;
+                }
+
+                let render_capacity = ocr_tasks.available_capacity();
+                if render_capacity == 0 {
+                    ocr_tasks.complete_one().await;
+                    continue;
+                }
+
                 let (rendered, next_start) = {
                     let lib = Library::init();
                     let document = self.open_document(&lib, ocr_input, password)?;
                     ocr_merge::render_pages_for_ocr(
                         &document,
                         &pages,
-                        round_start,
-                        round_rasters,
+                        scan_start,
+                        render_capacity,
+                        self.config.dpi,
+                        ocr_grayscale,
+                        self.config.render_form_fields,
+                        self.config.continue_on_page_error,
+                        &reflatten_pages,
+                    )?
+                    // `lib` drops here, releasing the PDFium lock before the
+                    // next await.
+                };
+                scan_start = next_start;
+
+                for page in rendered {
+                    let page_number = pages[page.idx].page_number;
+                    ocr_tasks.submit(page, page_number);
+                }
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            while scan_start < pages.len() {
+                let render_capacity = self.config.num_workers.max(1);
+
+                let (rendered, next_start) = {
+                    let lib = Library::init();
+                    let document = self.open_document(&lib, ocr_input, password)?;
+                    ocr_merge::render_pages_for_ocr(
+                        &document,
+                        &pages,
+                        scan_start,
+                        render_capacity,
                         self.config.dpi,
                         ocr_grayscale,
                         self.config.render_form_fields,
@@ -830,14 +880,14 @@ impl LiteParse {
                     // `lib` drops here, releasing the PDFium lock before the
                     // engine's async recognition below.
                 };
-                round_start = next_start;
+                scan_start = next_start;
                 if rendered.is_empty() {
                     // The scan reached the end without finding another page
                     // that needs OCR.
                     continue;
                 }
-                // `RenderedPage::idx` is absolute, so the whole slice is
-                // passed regardless of where this round started.
+
+                // Browser callbacks run serially on the JavaScript event loop.
                 ocr_merge::ocr_and_merge_rendered(
                     &mut pages,
                     rendered,
@@ -848,6 +898,11 @@ impl LiteParse {
                 )
                 .await?;
             }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            ocr_tasks
+                .finish_and_merge(&mut pages, self.config.ocr_failure_fatal)
+                .await?;
         }
         let t_ocr = web_time::Instant::now();
         log(&format!(
