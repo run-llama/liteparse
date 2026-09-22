@@ -6,19 +6,20 @@ These servers allow you to use alternative OCR engines instead of the built-in T
 
 ## Why Use an External OCR Server?
 
-| Feature | Tesseract.js (built-in) | EasyOCR | PaddleOCR | Surya |
-|---------|-------------------------|---------|-----------|-------|
-| Setup | Zero (included) | uv | uv | uv |
-| Speed | Moderate | Moderate | Fast (2-3x) | Moderate (GPU recommended) |
-| Accuracy (Latin) | Good | Good | Good | Excellent |
-| Accuracy (CJK) | Fair | Good | Excellent | Excellent |
-| Languages | 100+ | 80+ | 80+ | 91 |
-| Memory | In-process | Separate | Separate | Separate |
+| Feature | Tesseract.js (built-in) | EasyOCR | PaddleOCR | Surya | PaddleOCR-VL |
+|---------|-------------------------|---------|-----------|-------|--------------|
+| Setup | Zero (included) | uv | uv | uv | uv |
+| Speed | Moderate | Moderate | Fast (2-3x) | Moderate (GPU recommended) | Slow (VLM; GPU recommended) |
+| Accuracy (Latin) | Good | Good | Good | Excellent | Excellent |
+| Accuracy (CJK) | Fair | Good | Excellent | Excellent | Excellent |
+| Languages | 100+ | 80+ | 80+ | 91 | 109 |
+| Memory | In-process | Separate | Separate | Separate | Separate |
 
 **Recommendations:**
 - **Quick start**: Use built-in Tesseract (no setup)
 - **Asian languages**: Use PaddleOCR (best CJK support)
 - **Multilingual / broad scripts**: Use Surya (strong multilingual accuracy)
+- **Complex layouts (tables, formulas, charts)**: Use PaddleOCR-VL (layout-aware document parsing VLM)
 - **General use**: EasyOCR (good balance)
 
 ## Available Servers
@@ -41,6 +42,12 @@ FastAPI server wrapping Surya OCR 2.
 - Multilingual foundation model (90+ languages)
 - Block-level output; GPU recommended
 
+### [paddleocrvl/](./paddleocrvl/)
+FastAPI server wrapping PaddleOCR-VL 1.6 (0.9B document parsing VLM).
+- Port: **8831**
+- Layout-aware extraction for tables, formulas, and charts (109 languages)
+- Block-level output; GPU recommended
+
 ## Quick Start
 
 ```bash
@@ -54,6 +61,10 @@ uv run server.py
 
 # OR start Surya OCR server
 cd ocr/suryaocr
+uv run server.py
+
+# OR start PaddleOCR-VL server
+cd ocr/paddleocrvl
 uv run server.py
 ```
 
