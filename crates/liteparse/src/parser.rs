@@ -793,25 +793,77 @@ impl LiteParse {
         let t1 = web_time::Instant::now();
 
         if let Some(engine) = ocr_engine {
+            // `ocr_render_options` already carries the re-flatten set and a
+            // `max_rasters` cap of `num_workers`. Native parses override that
+            // cap with the number of free workers so a finished request
+            // refills the window without waiting out the rest of a batch.
+            #[cfg(not(target_arch = "wasm32"))]
+            let mut render_options = ocr_render_options;
+            #[cfg(target_arch = "wasm32")]
             let render_options = ocr_render_options;
             let ocr_input = repaired_input.as_ref().unwrap_or(validated_input);
-            let mut round_start = 0usize;
-            while round_start < pages.len() {
+            let mut scan_start = 0usize;
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let mut ocr_tasks = stages::OcrWindow::new(
+                    engine.clone(),
+                    &self.config.ocr_language,
+                    self.config.num_workers,
+                );
+                loop {
+                    // Reap completions before deciding whether to render so every
+                    // available worker can be refilled immediately.
+                    ocr_tasks.complete_ready();
+
+                    if scan_start >= pages.len() {
+                        break;
+                    }
+
+                    let render_capacity = ocr_tasks.available_capacity();
+                    if render_capacity == 0 {
+                        ocr_tasks.complete_one().await;
+                        continue;
+                    }
+
+                    render_options.max_rasters = render_capacity;
+                    let (rendered, next_start) = {
+                        let lib = Library::init();
+                        let document = self.open_document(&lib, ocr_input, password)?;
+                        stages::render_for_ocr(&document, &pages, scan_start, &render_options)?
+                        // `lib` drops here, releasing the PDFium lock before the
+                        // next await.
+                    };
+                    scan_start = next_start;
+
+                    for raster in rendered {
+                        ocr_tasks.submit(raster);
+                    }
+                }
+
+                ocr_tasks
+                    .finish_and_merge(&mut pages, self.config.ocr_failure_fatal)
+                    .await?;
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            while scan_start < pages.len() {
                 let (rendered, next_start) = {
                     let lib = Library::init();
                     let document = self.open_document(&lib, ocr_input, password)?;
-                    stages::render_for_ocr(&document, &pages, round_start, &render_options)?
+                    stages::render_for_ocr(&document, &pages, scan_start, &render_options)?
                     // `lib` drops here, releasing the PDFium lock before the
                     // engine's async recognition below.
                 };
-                round_start = next_start;
+                scan_start = next_start;
                 if rendered.is_empty() {
                     // The scan reached the end without finding another page
                     // that needs OCR.
                     continue;
                 }
-                // `OcrRaster::page_idx` is absolute, so the whole slice is
-                // passed regardless of where this round started.
+                // Browser callbacks run serially on the JavaScript event loop.
+                // `OcrRaster::page_number` identifies the source page, so the
+                // whole slice is passed regardless of where this round started.
                 let outcomes = stages::recognize(
                     rendered,
                     engine.clone(),

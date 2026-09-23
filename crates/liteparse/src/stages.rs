@@ -240,6 +240,61 @@ pub async fn recognize(
     ocr_merge::recognize_rasters(rasters, engine, language, num_workers).await
 }
 
+/// In-flight OCR recognitions for a sliding render window.
+///
+/// [`recognize`] waits for every raster in the batch it was given.
+/// [`LiteParse::parse`](crate::LiteParse::parse) instead keeps at most
+/// `num_workers` recognitions running and renders the next page as soon as
+/// one finishes, so a slow page does not idle the other workers. Raster
+/// memory stays bounded by `num_workers`: pass
+/// [`OcrWindow::available_capacity`] as [`OcrRenderOptions::max_rasters`].
+///
+/// Browser WASM has no blocking thread pool, so `parse` uses [`recognize`]
+/// there. This type exists only on native targets.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct OcrWindow {
+    inner: ocr_merge::OcrTaskPool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl OcrWindow {
+    /// Start a window that will run at most `num_workers` recognitions at once.
+    pub fn new(engine: Arc<dyn OcrEngine>, language: &str, num_workers: usize) -> Self {
+        Self {
+            inner: ocr_merge::OcrTaskPool::new(engine, language, num_workers),
+        }
+    }
+
+    /// How many more rasters can be submitted without exceeding `num_workers`.
+    pub fn available_capacity(&self) -> usize {
+        self.inner.available_capacity()
+    }
+
+    /// Record recognitions that have already finished, without waiting.
+    pub fn complete_ready(&mut self) {
+        self.inner.complete_ready()
+    }
+
+    /// Wait until one in-flight recognition finishes and record it.
+    pub async fn complete_one(&mut self) {
+        self.inner.complete_one().await
+    }
+
+    /// Start recognition for one raster. Panics if the window is already full.
+    pub fn submit(&mut self, raster: OcrRaster) {
+        self.inner.submit(raster)
+    }
+
+    /// Wait for the remaining recognitions and merge them into `pages`.
+    pub async fn finish_and_merge(
+        self,
+        pages: &mut [Page],
+        ocr_failure_fatal: bool,
+    ) -> Result<(), LiteParseError> {
+        self.inner.finish_and_merge(pages, ocr_failure_fatal).await
+    }
+}
+
 /// Merge recognition outcomes into `pages` in place: drop unusable native
 /// text, filter engine artifacts, append the surviving results as `OCR`
 /// text items in viewport points. Errors only when every outcome failed and

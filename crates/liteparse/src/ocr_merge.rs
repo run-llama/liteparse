@@ -126,6 +126,157 @@ mod base64_bytes {
     }
 }
 
+type OcrTaskResult = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>;
+/// `(page_number, dpi, has_native_text, image_rects)` carried alongside a
+/// running recognition so a completion can become a [`PageOcrOutcome`]
+/// without the raster.
+type OcrTaskMetadata = (usize, f32, bool, Vec<Rect>);
+type OcrTaskOutput = (usize, f32, bool, Vec<Rect>, OcrTaskResult);
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct OcrTaskPool {
+    max_workers: usize,
+    engine: Arc<dyn OcrEngine>,
+    language: String,
+    tasks: tokio::task::JoinSet<OcrTaskOutput>,
+    task_metadata: HashMap<tokio::task::Id, OcrTaskMetadata>,
+    completed: Vec<OcrTaskOutput>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl OcrTaskPool {
+    pub(crate) fn new(engine: Arc<dyn OcrEngine>, language: &str, num_workers: usize) -> Self {
+        Self {
+            max_workers: num_workers.max(1),
+            engine,
+            language: language.to_string(),
+            tasks: tokio::task::JoinSet::new(),
+            task_metadata: HashMap::new(),
+            completed: Vec::new(),
+        }
+    }
+
+    pub(crate) fn available_capacity(&self) -> usize {
+        self.max_workers - self.tasks.len()
+    }
+
+    pub(crate) fn submit(&mut self, rendered: OcrRaster) {
+        assert!(
+            self.tasks.len() < self.max_workers,
+            "OCR task pool is at capacity"
+        );
+
+        let engine = self.engine.clone();
+        let language = self.language.clone();
+        let metadata = (
+            rendered.page_number,
+            rendered.dpi,
+            rendered.has_native_text,
+            rendered.image_rects.clone(),
+        );
+        let task_metadata = metadata.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let task = self.tasks.spawn(async move {
+            let options = OcrOptions {
+                language,
+                dpi: rendered.dpi,
+            };
+            let result = match tokio::task::spawn_blocking(move || {
+                runtime.block_on(engine.recognize(
+                    &rendered.pixels,
+                    rendered.width,
+                    rendered.height,
+                    &options,
+                ))
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(join_err) => {
+                    Err(Box::new(join_err) as Box<dyn std::error::Error + Send + Sync>)
+                }
+            };
+            (
+                task_metadata.0,
+                task_metadata.1,
+                task_metadata.2,
+                task_metadata.3,
+                result,
+            )
+        });
+        self.task_metadata.insert(task.id(), metadata);
+    }
+
+    pub(crate) async fn complete_one(&mut self) {
+        let joined = self
+            .tasks
+            .join_next_with_id()
+            .await
+            .expect("OCR task pool is empty");
+        self.record_completion(joined);
+    }
+
+    pub(crate) fn complete_ready(&mut self) {
+        while let Some(joined) = self.tasks.try_join_next_with_id() {
+            self.record_completion(joined);
+        }
+    }
+
+    fn record_completion(
+        &mut self,
+        joined: Result<(tokio::task::Id, OcrTaskOutput), tokio::task::JoinError>,
+    ) {
+        match joined {
+            Ok((id, output)) => {
+                self.task_metadata.remove(&id);
+                self.completed.push(output);
+            }
+            Err(join_err) => {
+                let metadata = self
+                    .task_metadata
+                    .remove(&join_err.id())
+                    .expect("OCR task metadata is missing");
+                self.completed.push((
+                    metadata.0,
+                    metadata.1,
+                    metadata.2,
+                    metadata.3,
+                    Err(Box::new(join_err)),
+                ));
+            }
+        }
+    }
+
+    pub(crate) async fn finish_and_merge(
+        mut self,
+        pages: &mut [Page],
+        ocr_failure_fatal: bool,
+    ) -> Result<(), LiteParseError> {
+        while !self.tasks.is_empty() {
+            self.complete_one().await;
+        }
+        let outcomes = self
+            .completed
+            .into_iter()
+            .map(|(page_number, dpi, has_native_text, image_rects, result)| {
+                let (results, error) = match result {
+                    Ok(results) => (results, None),
+                    Err(error) => (Vec::new(), Some(error.to_string())),
+                };
+                PageOcrOutcome {
+                    page_number,
+                    dpi,
+                    has_native_text,
+                    image_rects,
+                    results,
+                    error,
+                }
+            })
+            .collect();
+        merge_ocr_results(pages, outcomes, ocr_failure_fatal)
+    }
+}
+
 /// Why a page was flagged as needing more than the cheap text-only path.
 /// Multiple reasons can apply to one page (e.g. a sparse page whose little
 /// text is also garbled). Empty exactly when `needs_ocr` is false.

@@ -741,14 +741,106 @@ impl liteparse::ocr::OcrEngine for ProbeEngine {
     }
 }
 
-/// OCR runs in render→recognize rounds of `num_workers` pages. Whatever the
-/// round size, every page must be recognized exactly once and each page's OCR
-/// text must land on the page whose raster produced it — distinct page sizes
-/// make a misroute visible, which is the failure mode the per-round document
-/// reopen and form-widget re-flatten could introduce. `num_workers: 1` forces
-/// one page per round (four rounds over four pages) and must also serialize
-/// recognition; `num_workers: 4` covers the whole document in a single round
-/// with overlapping recognition. Both must agree page-for-page.
+struct RefillProbeEngine {
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    peak_in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    first_in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    refilled_while_first_in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl liteparse::ocr::OcrEngine for RefillProbeEngine {
+    fn name(&self) -> &str {
+        "refill-probe"
+    }
+
+    fn recognize<'a, 'b: 'a, 'c: 'a>(
+        &'a self,
+        _image_data: &'c [u8],
+        _width: u32,
+        _height: u32,
+        _options: &'b liteparse::ocr::OcrOptions,
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Vec<liteparse::ocr::OcrResult>,
+                        Box<dyn std::error::Error + Send + Sync>,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        use std::sync::atomic::Ordering;
+
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let active = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak_in_flight.fetch_max(active, Ordering::SeqCst);
+        if call == 0 {
+            self.first_in_flight.store(true, Ordering::SeqCst);
+        } else if call >= 2 && self.first_in_flight.load(Ordering::SeqCst) {
+            self.refilled_while_first_in_flight
+                .store(true, Ordering::SeqCst);
+        }
+
+        let first_in_flight = self.first_in_flight.clone();
+        let in_flight = self.in_flight.clone();
+        Box::pin(async move {
+            if call == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                first_in_flight.store(false, Ordering::SeqCst);
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        })
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_ocr_worker_is_refilled_before_slowest_request_finishes() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let refilled = Arc::new(AtomicBool::new(false));
+    let parser = LiteParse::new(LiteParseConfig {
+        ocr_enabled: true,
+        num_workers: 2,
+        dpi: 72.0,
+        quiet: true,
+        ..Default::default()
+    })
+    .with_ocr_engine(Arc::new(RefillProbeEngine {
+        calls: calls.clone(),
+        in_flight: Arc::new(AtomicUsize::new(0)),
+        peak_in_flight: peak.clone(),
+        first_in_flight: Arc::new(AtomicBool::new(false)),
+        refilled_while_first_in_flight: refilled.clone(),
+    }));
+
+    parser
+        .parse_input(PdfInput::Bytes(blank_pdf(&[(200, 200); 4])))
+        .await
+        .expect("OCR parse should succeed");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert_eq!(peak.load(Ordering::SeqCst), 2);
+    assert!(
+        refilled.load(Ordering::SeqCst),
+        "a free OCR worker should start the next page without waiting for the slowest request"
+    );
+}
+
+/// OCR keeps a bounded window of `num_workers` rendered pages. Every page must
+/// be recognized exactly once and each page's OCR text must land on the page
+/// whose raster produced it — distinct page sizes make a misroute visible when
+/// the document is reopened to refill the window. `num_workers: 1` serializes
+/// recognition; `num_workers: 4` overlaps the whole four-page document. Both
+/// must agree page-for-page.
 #[tokio::test]
 #[serial]
 async fn test_ocr_rounds_cover_every_page_once() {
@@ -804,7 +896,7 @@ async fn test_ocr_rounds_cover_every_page_once() {
         }
     };
 
-    // One page per round: four rounds, recognition fully serialized.
+    // A one-page window keeps recognition fully serialized.
     let (parser, calls, peak) = run(1);
     let serialized = parser
         .parse_input(PdfInput::Bytes(blank_pdf(&page_sizes)))
@@ -822,8 +914,8 @@ async fn test_ocr_rounds_cover_every_page_once() {
         "num_workers=1 must serialize recognition"
     );
 
-    // Round wide enough for the whole document: one round, overlapping
-    // recognition, identical routing.
+    // A window wide enough for the document overlaps recognition while
+    // preserving identical routing.
     let (parser, calls, peak) = run(4);
     let overlapped = parser
         .parse_input(PdfInput::Bytes(blank_pdf(&page_sizes)))
@@ -837,9 +929,9 @@ async fn test_ocr_rounds_cover_every_page_once() {
     );
 }
 
-/// A round is bounded by rasters rendered, not by page span, so OCR-needing
-/// pages that are sparsely scattered through a mostly-native-text document
-/// still fill a round and recognize concurrently.
+/// The initial window is bounded by rasters rendered, not by page span, so
+/// OCR-needing pages sparsely scattered through a mostly-native-text document
+/// still fill the worker pool and recognize concurrently.
 ///
 /// This guards a real regression: bounding the round by page span instead
 /// made each round contain only the OCR-needing pages that happened to fall
@@ -883,13 +975,13 @@ async fn test_ocr_rounds_fill_across_sparse_pages() {
          among its {} pages",
         result.pages.len()
     );
-    // The scan-ahead must gather a full round even though the OCR-needing
+    // The scan-ahead must fill the worker pool even though the OCR-needing
     // pages are interleaved with native-text pages it skips.
     assert_eq!(
         peak.load(Ordering::SeqCst),
         8,
-        "rounds must fill to num_workers across skipped pages; a lower peak means \
-         rounds are being cut short by page span"
+        "the OCR window must fill to num_workers across skipped pages; a lower peak means \
+         the window is being cut short by page span"
     );
 }
 
