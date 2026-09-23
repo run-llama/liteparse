@@ -12,7 +12,7 @@
 //! during serialization, so a heading serializes as `{kind, text, level, bbox}`
 //! rather than a wall of nulls.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::markdown_layout::{Block, Cell, PositionedBlock, SpanCell};
 use crate::types::{ParsedPage, Rect};
@@ -22,7 +22,7 @@ use crate::types::{ParsedPage, Rect};
 /// `bbox` is `None` for cells with no ink behind them — padding inserted to
 /// square off a ragged grid, or halves of a merged run split at an estimated
 /// position rather than an observed boundary.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayoutCell {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -63,11 +63,11 @@ impl From<&SpanCell> for LayoutCell {
 /// `kind` discriminates the block; see each field for which kinds populate it.
 /// Blocks appear in reading order, matching the order the markdown renderer
 /// emits them, so the Nth block here is the Nth block of that page's markdown.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayoutBlock {
     /// One of `heading`, `paragraph`, `list_item`, `code`, `table`,
     /// `merged_table`, `grid_fallback`, `rule`, `figure`.
-    pub kind: &'static str,
+    pub kind: String,
     /// Rendered text for the text-bearing kinds (`heading`, `paragraph`,
     /// `list_item`). Table text lives in `header`/`rows`; code and grid text in
     /// `lines`.
@@ -78,9 +78,9 @@ pub struct LayoutBlock {
     pub level: Option<u8>,
     /// Whether the block's text is uniformly bold / italic. `paragraph` and
     /// `list_item` only; omitted when false.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bold: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub italic: bool,
     /// `list_item`: whether the list is ordered, and the original marker as it
     /// appeared on the page (`138.`, `iii)`, `•`).
@@ -123,7 +123,7 @@ impl LayoutBlock {
     /// Base value with every variant-specific field cleared.
     fn of(kind: &'static str, bbox: Option<Rect>) -> Self {
         LayoutBlock {
-            kind,
+            kind: kind.to_string(),
             text: None,
             level: None,
             bold: false,
@@ -236,7 +236,7 @@ pub(crate) fn blocks_for_page(page: &ParsedPage, blocks: &[PositionedBlock]) -> 
 /// map it through).
 fn remap_to_page_frame(blocks: &mut [LayoutBlock], frames: &[(Rect, Rect)]) {
     for block in blocks.iter_mut() {
-        if matches!(block.kind, "figure" | "rule") {
+        if matches!(block.kind.as_str(), "figure" | "rule") {
             continue;
         }
         remap_opt(&mut block.bbox, frames);

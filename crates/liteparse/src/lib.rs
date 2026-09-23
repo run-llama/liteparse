@@ -3,6 +3,10 @@
 //! This crate is the core Rust library. Language bindings for Node.js, Python,
 //! and WebAssembly re-export the same types with language-idiomatic wrappers.
 //!
+//! [`LiteParse::parse`] runs a fixed pipeline; the [`stages`] module exposes
+//! each step of it as a public function for callers that want to sequence
+//! the pipeline themselves.
+//!
 
 // ── Public API re-exports ──────────────────────────────────────────────
 pub use config::{DEFAULT_PAGE_BATCH_SIZE, LiteParseConfig, OutputFormat};
@@ -23,6 +27,7 @@ pub mod layout;
 pub mod parser;
 pub mod raw_text;
 pub mod search;
+pub mod stages;
 pub mod types;
 
 // ── Internal modules (available for binding crates, hidden from docs) ──

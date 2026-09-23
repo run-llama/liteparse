@@ -12,6 +12,7 @@ use pdfium::{
     Document, Font, FontType, FormEnvironment, Library, Page, PathObject, PdfLink, RectF,
     SegmentKind, TextPage,
 };
+use serde::{Deserialize, Serialize};
 
 /// Dedup spatial-grid cell size bounds (pt). The cell tracks the typical item
 /// footprint so a cell holds O(1) non-overlapping items.
@@ -105,6 +106,11 @@ pub(crate) fn extract_pages_from_document(
 }
 
 /// Output of [`extract_pages_and_images`].
+///
+/// Serializable so the whole result can cross a stage boundary (see
+/// `stages`); image payloads (`ExtractedImage::bytes`) are the one thing
+/// that does not, and travel separately keyed by image id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractedPages {
     pub pages: Vec<LitePage>,
     pub page_errors: Vec<PageError>,

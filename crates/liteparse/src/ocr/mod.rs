@@ -1,5 +1,7 @@
 use std::pin::Pin;
 
+use serde::{Deserialize, Serialize};
+
 #[cfg(not(target_arch = "wasm32"))]
 pub mod http_simple;
 #[cfg(all(feature = "oar-ocr", not(target_arch = "wasm32")))]
@@ -8,7 +10,7 @@ pub mod oar;
 pub mod tesseract;
 
 /// A single word-level OCR result with bounding box and confidence.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OcrResult {
     pub text: String,
     /// Bounding box in pixel coordinates: [x1, y1, x2, y2] (left, top, right, bottom).

@@ -1,6 +1,5 @@
-use crate::config::PageOrientationCorrection;
 use crate::error::LiteParseError;
-use crate::extract::{apply_page_orientation_corrections, encode_png, load_document_from_input};
+use crate::extract::{encode_png, load_document_from_input};
 use crate::types::{PdfInput, ScreenshotRect};
 use pdfium::Library;
 use serde::Serialize;
@@ -25,39 +24,6 @@ pub struct RenderedPage {
     /// Empty unless rect detection was requested; also empty for
     /// solid-fill pages, where detection is skipped.
     pub rects: Vec<ScreenshotRect>,
-}
-
-/// Render selected pages from a PDF input to PNG bytes.
-///
-/// With `render_form_fields`, form-field appearances (filled values, checkbox
-/// states) are drawn on top of the page raster; this runs the document's
-/// open/JS actions, so it is opt-in. With `detect_rects`, each page's raster
-/// is also scanned for solid rectangles and lines.
-///
-/// Acquires the process-global PDFium lock for the entire render. The lock
-/// is held until this function returns — PNG encoding happens inside the
-/// critical section, which is fine because it is pure CPU work with no
-/// `.await` points.
-pub fn render_pages_to_png(
-    input: &PdfInput,
-    page_numbers: Option<&[u32]>,
-    dpi: f32,
-    password: Option<&str>,
-    detect_rects: bool,
-    render_form_fields: bool,
-    page_orientation_corrections: &[PageOrientationCorrection],
-) -> Result<Vec<RenderedPage>, LiteParseError> {
-    let lib = Library::init();
-    let document = load_document_from_input(&lib, input, password)?;
-    apply_page_orientation_corrections(&document, page_orientation_corrections)?;
-    render_document_pages(
-        &document,
-        page_numbers,
-        dpi,
-        detect_rects,
-        render_form_fields,
-        false,
-    )
 }
 
 pub(crate) fn render_document_pages(
@@ -272,31 +238,6 @@ pub(crate) fn find_solid_rects_rgba(
     out
 }
 
-/// Render a single page to a PNG file.
-pub fn screenshot(
-    pdf_path: &str,
-    page_num: u32,
-    dpi: f32,
-    output_path: &str,
-    password: Option<&str>,
-) -> Result<(), LiteParseError> {
-    let input = PdfInput::Path(pdf_path.to_string());
-    let pages = render_pages_to_png(&input, Some(&[page_num]), dpi, password, false, false, &[])?;
-    let page = pages
-        .into_iter()
-        .next()
-        .ok_or_else(|| LiteParseError::Other("no page rendered".into()))?;
-
-    std::fs::write(output_path, &page.png_bytes)?;
-
-    eprintln!(
-        "[rust-bin] rendered page {} at {dpi} DPI → {output_path} ({}×{})",
-        page_num, page.width, page.height
-    );
-
-    Ok(())
-}
-
 #[derive(Debug, Serialize)]
 struct ImageBoundsOutput {
     x: f32,
@@ -356,18 +297,6 @@ mod tests {
         let s = serde_json::to_string(&b).unwrap();
         assert!(s.contains("\"x\":1"));
         assert!(s.contains("\"width\":3"));
-    }
-
-    #[test]
-    fn test_screenshot_missing_file_errors() {
-        let r = screenshot(
-            "/nonexistent/path/does_not_exist.pdf",
-            1,
-            72.0,
-            "/tmp/out.png",
-            None,
-        );
-        assert!(r.is_err());
     }
 
     #[test]

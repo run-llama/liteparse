@@ -1,6 +1,6 @@
 [package]
 name = "liteparse"
-version = "2.14.6"
+version = "2.14.7"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -27,6 +27,7 @@ oar-ocr-openvino = ["oar-ocr", "oar-ocr/openvino"]
 tesseract = ["dep:tesseract-rs"]
 
 [dependencies]
+base64 = "0.22"
 blake3 = "1"
 clap = { version = "4.5.55", features = ["derive"] }
 file-format = { version = "0.29.0", features = ["reader"] }

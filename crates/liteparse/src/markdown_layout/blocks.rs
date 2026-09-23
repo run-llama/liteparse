@@ -2,13 +2,14 @@ use super::inline::escape_inline;
 use super::paragraphs::{ParaAccum, is_soft_hyphen_break};
 use super::tables::escape_table_cell;
 use crate::types::Rect;
+use serde::{Deserialize, Serialize};
 
 /// One table cell: rendered text plus, when the cell came from real page
 /// content, the region it occupied. `bbox` is `None` for cells that exist only
 /// to square off a ragged grid (padding inserted when rows disagree on column
 /// count) — those occupy no ink on the page, and reporting a rect for them
 /// would invent geometry the classifier never saw.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Cell {
     pub text: String,
     pub bbox: Option<Rect>,
@@ -84,7 +85,7 @@ impl PartialEq<String> for Cell {
 /// merge structure a producer *declared* — but both carry the region the cell
 /// occupies when the producer knows it, so merged tables ground exactly like
 /// plain ones.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpanCell {
     pub text: String,
     pub colspan: u16,
@@ -142,7 +143,7 @@ impl Eq for SpanCell {}
 
 /// Coarse block representation: the output of page classification, consumed by
 /// `render_blocks` to produce the final markdown string.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Block {
     Heading {
         level: u8,
@@ -250,7 +251,7 @@ fn wrap_emphasis(text: &str, bold: bool, italic: bool) -> String {
 /// a wrapped heading or a multi-line paragraph reports the whole band it
 /// occupies. It is `None` only for blocks with no page geometry behind them —
 /// synthesized content, or sources that never carried coordinates.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionedBlock {
     pub block: Block,
     pub bbox: Option<Rect>,

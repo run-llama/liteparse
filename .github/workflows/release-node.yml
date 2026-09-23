@@ -327,8 +327,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           registry-url: https://registry.npmjs.org
+
+      # npm trusted publishing (OIDC) requires npm >= 11.5.1
+      - name: Update npm
+        run: npm install -g npm@latest
 
       - name: Install dependencies
         working-directory: packages/node
@@ -423,7 +427,6 @@ jobs:
         if: ${{ !inputs.dry-run }}
         working-directory: packages/node
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TAG: ${{ inputs.beta && 'beta' || 'latest' }}
         run: |
           for dir in npm/*/; do
@@ -439,7 +442,6 @@ jobs:
         if: ${{ !inputs.dry-run }}
         working-directory: packages/node
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TAG: ${{ inputs.beta && 'beta' || 'latest' }}
         run: npm publish --access public --provenance --tag "$NPM_TAG"
 

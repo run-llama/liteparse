@@ -275,7 +275,7 @@ impl Default for LiteParseConfig {
             target_pages: None,
             extract_screenshots: false,
             continue_on_page_error: false,
-            dpi: 150.0,
+            dpi: DEFAULT_DPI,
             output_format: OutputFormat::Json,
             preserve_very_small_text: false,
             password: None,
@@ -329,6 +329,10 @@ const MAX_TARGET_PAGES: u64 = 100_000;
 /// large enough that the per-batch document reopen stays modest (it costs
 /// roughly 13% at this size on a 457-page document, ~4% at 50).
 pub const DEFAULT_PAGE_BATCH_SIZE: usize = 25;
+
+/// Default render resolution for OCR rasters and screenshots
+/// (`LiteParseConfig::dpi`).
+pub const DEFAULT_DPI: f32 = 150.0;
 
 #[doc(hidden)]
 pub fn parse_target_pages(s: &str) -> Result<Vec<u32>, String> {
@@ -426,7 +430,7 @@ mod tests {
         assert_eq!(c.max_pages, 1000);
         assert!(!c.extract_screenshots);
         assert!(!c.continue_on_page_error);
-        assert_eq!(c.dpi, 150.0);
+        assert_eq!(c.dpi, DEFAULT_DPI);
         assert_eq!(c.output_format, OutputFormat::Json);
         assert!(!c.preserve_very_small_text);
         assert!(!c.quiet);
