@@ -1618,6 +1618,14 @@ fn clean_ocr_table_artifacts(text: &str) -> String {
         || without_artifacts == "-";
 
     if is_numeric_ish {
+        // Parentheses directly around a number mark it negative, e.g. "(78,939)",
+        // so keep that pair; only what lies outside it is a border misread.
+        if let Some((before, after)) = trimmed.split_once(without_artifacts)
+            && before.ends_with('(')
+            && after.starts_with(')')
+        {
+            return format!("({without_artifacts})");
+        }
         without_artifacts.to_string()
     } else {
         trimmed.to_string()
@@ -1934,6 +1942,19 @@ mod tests {
         assert_eq!(clean_ocr_table_artifacts("N/A"), "N/A");
         assert_eq!(clean_ocr_table_artifacts(""), "");
         assert_eq!(clean_ocr_table_artifacts("|||"), "|||");
+    }
+
+    #[test]
+    fn test_clean_ocr_keeps_accounting_negatives() {
+        // Parentheses around a number mark it negative (issue #468).
+        assert_eq!(clean_ocr_table_artifacts("(78,939)"), "(78,939)");
+        assert_eq!(clean_ocr_table_artifacts("(12.5%)"), "(12.5%)");
+        // Border misreads next to them are still removed.
+        assert_eq!(clean_ocr_table_artifacts("(78,939)|"), "(78,939)");
+        assert_eq!(clean_ocr_table_artifacts("|(78,939)]"), "(78,939)");
+        // A lone parenthesis is still treated as a border misread.
+        assert_eq!(clean_ocr_table_artifacts("78,939)"), "78,939");
+        assert_eq!(clean_ocr_table_artifacts("(78,939"), "78,939");
     }
 
     fn make_item(x: f32, y: f32, w: f32, h: f32) -> TextItem {
