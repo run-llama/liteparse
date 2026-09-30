@@ -119,6 +119,78 @@ fn canonical_rotation(rotation: f32) -> i32 {
     }
 }
 
+/// Rotated text inside a drawn table grid is table content — a vertical
+/// column header, a rotated row-group label — not a margin sidebar or
+/// watermark, so it must reach the ordinary cell-binning path with a normal
+/// upright box instead of being dropped by `is_rotated_line`.
+///
+/// The transform is geometric: swap width and height around the item's own
+/// centre, then snap the resulting vertical extent to the row band it falls
+/// in (using the row list `detect_table_grids` already computes). The swap
+/// alone is sufficient for `assign_cells` to bin each text span into its
+/// cell by the span's own x/y independently of any other span or line, and
+/// for `CellGrid::push_text` to join whatever lands in one cell with a space
+/// (the same generic mechanism that already joins a horizontally wrapped
+/// cell's lines, e.g. "Includes" / "contractors"); the row-snap on top of it
+/// only closes a false whitespace gap the swap alone can leave between two
+/// rotated words in the same physical row (see the row-snap comment below).
+/// No clustering, no joining across items — those were each tried and each
+/// broke some other case (see experiments/ for the attempts and why they
+/// were reverted).
+fn keep_rotated_table_text_in_place(
+    items: &mut [ProjectedTextItem],
+    tables: &[(Rect, Vec<f32>)],
+    page_number: usize,
+) -> usize {
+    let debug = std::env::var("LITEPARSE_DEBUG_MD").is_ok();
+    let mut kept = 0;
+    for it in items.iter_mut() {
+        let rot = canonical_rotation(it.item.rotation);
+        if rot != 90 && rot != 270 {
+            continue;
+        }
+        let (w, h) = (it.item.width, it.item.height);
+        let (cx, cy) = (it.item.x + w / 2.0, it.item.y + h / 2.0);
+        let table = tables
+            .iter()
+            .find(|(r, _)| cx >= r.x && cx <= r.x + r.width && cy >= r.y && cy <= r.y + r.height);
+        let Some((_, row_ys)) = table else {
+            continue;
+        };
+        it.item.x = cx - h / 2.0;
+        it.item.y = cy - w / 2.0;
+        it.item.width = h;
+        it.item.height = w;
+        // Snap the vertical extent to the row band the item's centre falls
+        // in. Two rotated words in the same physical (ruled) row can end up
+        // at different natural heights after the swap above — e.g. a
+        // one-line label next to a two-line one — leaving a false gap
+        // between them and the row below that later stages (notably the
+        // XY-cut banner detector) can mistake for a real whitespace break,
+        // splitting the header out of the table it belongs to.
+        let new_cy = it.item.y + it.item.height / 2.0;
+        if let Some(band) = row_ys
+            .windows(2)
+            .find(|band| new_cy >= band[0] && new_cy <= band[1])
+        {
+            it.item.y = band[0];
+            it.item.height = band[1] - band[0];
+        }
+        it.item.rotation = 0.0;
+        it.item.words.clear();
+        it.orig_rotation = 0.0;
+        it.rotated = false;
+        kept += 1;
+        if debug {
+            eprintln!(
+                "[rot] page {page_number}: rotated text inside a ruled table kept upright: {:?} box=({:.1},{:.1},{:.1}x{:.1}) was {rot} deg",
+                it.item.text, it.item.x, it.item.y, it.item.width, it.item.height
+            );
+        }
+    }
+    kept
+}
+
 fn handle_rotation_reading_order(items: &mut [ProjectedTextItem], page_height: f32) {
     if !items
         .iter()
@@ -1749,6 +1821,23 @@ fn project_to_grid(
 
     // Compute median distances
     let (median_width, median_height) = compute_median_textbox_size(&projection_boxes);
+
+    // Rotated text inside a drawn table is cell content: keep it, upright and
+    // row-snapped, before the reading-order pass relocates or groups it as a
+    // margin sidebar.
+    if projection_boxes.iter().any(|b| {
+        let r = canonical_rotation(b.item.rotation);
+        r == 90 || r == 270
+    }) {
+        let tables = crate::markdown_layout::detect_table_grids(
+            &page.graphics,
+            page.page_width,
+            page.page_height,
+        );
+        if !tables.is_empty() {
+            keep_rotated_table_text_in_place(&mut projection_boxes, &tables, page.page_number);
+        }
+    }
 
     // Handle reading order rotations
     handle_rotation_reading_order(&mut projection_boxes, page.page_height);

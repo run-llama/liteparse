@@ -3204,11 +3204,50 @@ const RULED_HLINE_MIN_COVERAGE: f32 = 0.5;
 /// the header band of an otherwise open table is a real layout, and must survive.
 const RULED_VLINE_MIN_COVERAGE: f32 = 0.2;
 
+/// Bounding boxes of the ruled tables drawn on a page (one per connected grid
+/// of horizontal and vertical rules). Used to tell table content apart from
+/// running page chrome: a line inside a drawn grid is a cell, never a page
+/// header, however many pages repeat it.
+pub(super) fn ruled_table_bounds(graphics: &[GraphicPrimitive]) -> Vec<Rect> {
+    let RuleSegments { hs, vs, .. } = extract_rule_segments(graphics);
+    find_grid_components(&hs, &vs)
+        .into_iter()
+        .filter_map(|(h_idx, v_idx)| {
+            let x0 = h_idx
+                .iter()
+                .map(|&i| hs[i].x_min)
+                .fold(f32::INFINITY, f32::min);
+            let x1 = h_idx
+                .iter()
+                .map(|&i| hs[i].x_max)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let y0 = v_idx
+                .iter()
+                .map(|&i| vs[i].y_min)
+                .fold(f32::INFINITY, f32::min);
+            let y1 = v_idx
+                .iter()
+                .map(|&i| vs[i].y_max)
+                .fold(f32::NEG_INFINITY, f32::max);
+            (x1 > x0 && y1 > y0).then_some(Rect {
+                x: x0,
+                y: y0,
+                width: x1 - x0,
+                height: y1 - y0,
+            })
+        })
+        .collect()
+}
+
 /// H/V rule segments extracted once from a page's graphics and shared by every
 /// table-detection pass on the page. The global ruled pass, the per-region
 /// ruled pass, the leaf-veto re-check, and the rule-band pass all consume the
 /// same segments; extracting per call would redo the work once per region.
 pub(super) struct RuleSegments {
+    /// Horizontal segments as extracted, before same-y clustering. Clustering
+    /// unions x-ranges across gaps, which hides the gap a merged cell leaves in
+    /// a row separator; merged-cell resolution needs the gaps.
+    raw_hs: Vec<HSeg>,
     /// Horizontal segments, clustered by y.
     hs: Vec<HSeg>,
     /// Vertical segments as extracted, before same-x clustering. The component
@@ -3219,10 +3258,22 @@ pub(super) struct RuleSegments {
 }
 
 pub(super) fn extract_rule_segments(graphics: &[GraphicPrimitive]) -> RuleSegments {
-    let (hs, raw_vs) = extract_h_v_segments(graphics);
-    let hs = cluster_h_segments(hs);
+    let (raw_hs, raw_vs) = extract_h_v_segments(graphics);
+    let hs = cluster_h_segments(raw_hs.clone());
     let vs = cluster_v_segments(raw_vs.clone());
-    RuleSegments { hs, raw_vs, vs }
+    RuleSegments {
+        raw_hs,
+        hs,
+        raw_vs,
+        vs,
+    }
+}
+
+/// The unclustered rule segments of a page, borrowed for merged-cell resolution.
+#[derive(Clone, Copy)]
+struct RawRules<'a> {
+    hs: &'a [HSeg],
+    vs: &'a [VSeg],
 }
 
 /// Extract horizontal and vertical line segments from a page's graphics. Each
@@ -4317,6 +4368,7 @@ fn build_ruled_table(
     page_width: f32,
     page_height: f32,
     pass: RuledPass,
+    raw: RawRules<'_>,
 ) -> Option<(TableRun, Vec<usize>)> {
     let base = build_ruled_table_from(
         hs,
@@ -4327,6 +4379,7 @@ fn build_ruled_table(
         page_width,
         page_height,
         pass,
+        raw,
     )?;
     let v_kept = filter_short_vlines(hs, h_indices, vs, v_indices);
     let strip = |(run, consumed, _straddle)| (run, consumed);
@@ -4343,6 +4396,7 @@ fn build_ruled_table(
         page_width,
         page_height,
         pass,
+        raw,
     );
     // Take the refined grid only when dropping the stubs measurably stopped the
     // boundaries cutting through text. A stub that sits on a *real* column edge
@@ -4381,6 +4435,7 @@ fn build_ruled_table_from(
     page_width: f32,
     page_height: f32,
     pass: RuledPass,
+    raw: RawRules<'_>,
 ) -> Option<(TableRun, Vec<usize>, f32)> {
     let dbg = *super::flags::DEBUG_RULED;
     let mut xs: Vec<f32> = v_kept.iter().map(|&i| vs[i].x).collect();
@@ -4585,6 +4640,63 @@ fn build_ruled_table_from(
         return None;
     }
 
+    // A merged cell is drawn once; join its text and repeat it into every cell
+    // it covers so each pipe-table row carries its own context. This runs after
+    // the density gate on purpose: filling cells must never change whether a
+    // table is accepted, only what an accepted table says.
+    // Raw (unclustered) strokes, bounded to this table: clustering would union
+    // the pieces of a separator across the gap a merged cell leaves in it.
+    let margin = TABLE_COL_BOUNDARY_CLUSTER_PT;
+    let (bx0, bx1) = (xs[0] - margin, xs[xs.len() - 1] + margin);
+    let (by0, by1) = (ys[0] - margin, ys[ys.len() - 1] + margin);
+    // Stubs (the few-point ends of thin strip rectangles) are not rules.
+    let min_len = TABLE_GRID_CLUSTER_PT * 2.0;
+    let h_rules: Vec<super::table_spans::Rule> = raw
+        .hs
+        .iter()
+        .filter(|h| {
+            h.x_max - h.x_min >= min_len
+                && (by0..=by1).contains(&h.y)
+                && h.x_max >= bx0
+                && h.x_min <= bx1
+        })
+        .map(|h| super::table_spans::Rule {
+            pos: h.y,
+            lo: h.x_min,
+            hi: h.x_max,
+        })
+        .collect();
+    let v_rules: Vec<super::table_spans::Rule> = raw
+        .vs
+        .iter()
+        .filter(|v| {
+            v.y_max - v.y_min >= min_len
+                && (bx0..=bx1).contains(&v.x)
+                && v.y_max >= by0
+                && v.y_min <= by1
+        })
+        .map(|v| super::table_spans::Rule {
+            pos: v.x,
+            lo: v.y_min,
+            hi: v.y_max,
+        })
+        .collect();
+    let mut cells = cells;
+    let mut cell_has_text = cell_has_text;
+    let merged = super::table_spans::resolve_merged_cells(
+        &mut cells,
+        &mut cell_has_text,
+        &super::table_spans::Rules {
+            horizontal: &h_rules,
+            vertical: &v_rules,
+            y_tol: TABLE_GRID_CLUSTER_PT,
+            x_tol: TABLE_COL_BOUNDARY_CLUSTER_PT,
+        },
+    );
+    if dbg && merged > 0 {
+        eprintln!("[ruled]   merged-cell resolve: {merged} region(s)");
+    }
+
     // Header preference order: flattened colspan band (carries the full
     // per-column layer chain) > merged stacked-header band > bold first row.
     let header_qualifies = merged_stacked_header
@@ -4603,6 +4715,128 @@ fn build_ruled_table_from(
         return None;
     }
 
+    // The grid may stop at the body: header rows drawn without rules sit above
+    // it as loose text. Give a headerless table the column names they carry.
+    let mut consumed_indices = consumed_indices;
+    let body_first_line = *consumed_indices.iter().min().unwrap();
+    if dbg {
+        eprintln!(
+            "[ruled-header] table at consumed_indices {:?}: header_qualifies={header_qualifies} header.is_some()={} body_first_line={body_first_line} pass={}",
+            {
+                let mut v: Vec<usize> = consumed_indices.iter().copied().collect();
+                v.sort_unstable();
+                v
+            },
+            header.is_some(),
+            if matches!(pass, RuledPass::PerRegion) {
+                "PerRegion"
+            } else {
+                "Global"
+            },
+        );
+        if body_first_line > 0 {
+            eprintln!(
+                "[ruled-header]   line[body_first_line - 1] = {:?} bbox_y={:.1} bbox_bottom={:.1} (table top bbox.y={:.1})",
+                lines[body_first_line - 1]
+                    .text
+                    .chars()
+                    .take(50)
+                    .collect::<String>(),
+                lines[body_first_line - 1].bbox.y,
+                lines[body_first_line - 1].bbox.y + lines[body_first_line - 1].bbox.height,
+                bbox.y,
+            );
+        } else {
+            eprintln!("[ruled-header]   body_first_line == 0, nothing above to look back at");
+        }
+    }
+    let mut header = header;
+    // Per-region pass only. The global pass decides whether to take a table
+    // over from the per-region path from the set of lines the run consumed, so
+    // adding a header line to that set can flip the decision and drop the table.
+    if header.is_none() && !matches!(pass, RuledPass::PerRegion) {
+        if dbg {
+            eprintln!("[ruled-header] skipped: header lookback runs in the per-region pass only");
+        }
+    }
+    if header.is_none() && matches!(pass, RuledPass::PerRegion) {
+        let bands: Option<Vec<(f32, f32)>> = cells[0]
+            .iter()
+            .map(|c| c.bbox.as_ref().map(|b| (b.x, b.x + b.width)))
+            .collect();
+        if dbg {
+            eprintln!("[ruled-header]   bands computed: {}", bands.is_some());
+        }
+        if let Some(bands) = bands {
+            let mut up: Vec<(usize, super::table_header::HdrLine)> = Vec::new();
+            let mut j = body_first_line;
+            while j > 0 && up.len() < super::table_header::MAX_LOOKBACK_LINES {
+                let l = &lines[j - 1];
+                if l.bbox.y + l.bbox.height > bbox.y + TABLE_GRID_CLUSTER_PT {
+                    if dbg {
+                        eprintln!(
+                            "[ruled-header]   stop walking up at line {:?}: bbox_bottom {:.1} > table_top+{:.1}={:.1}",
+                            l.text.chars().take(40).collect::<String>(),
+                            l.bbox.y + l.bbox.height,
+                            TABLE_GRID_CLUSTER_PT,
+                            bbox.y + TABLE_GRID_CLUSTER_PT,
+                        );
+                    }
+                    break;
+                }
+                // Stay in the body's layout region. A header line from another
+                // region would change how the run is classified (single-region
+                // tables are left to the per-region path), which can drop the
+                // whole table.
+                if l.region_path != lines[body_first_line].region_path {
+                    if dbg {
+                        eprintln!(
+                            "[ruled-header] stop: line {:?} is in another layout region than the table body",
+                            l.text.chars().take(40).collect::<String>()
+                        );
+                    }
+                    break;
+                }
+                let hdr_cells = split_cells(l)
+                    .into_iter()
+                    .map(|c| super::table_header::HdrCell {
+                        start_x: c.start_x,
+                        end_x: c.end_x,
+                        text: c.text,
+                    })
+                    .collect();
+                up.push((
+                    j - 1,
+                    super::table_header::HdrLine {
+                        top: l.bbox.y,
+                        bottom: l.bbox.y + l.bbox.height,
+                        cells: hdr_cells,
+                    },
+                ));
+                j -= 1;
+            }
+            let offered: Vec<super::table_header::HdrLine> =
+                up.iter().map(|(_, l)| l.clone()).collect();
+            let mut log = Vec::new();
+            let found =
+                super::table_header::ruled_header_lookback(&bands, bbox.y, &offered, &mut log);
+            if dbg {
+                for l in &log {
+                    eprintln!("{l}");
+                }
+            }
+            if let Some(f) = found {
+                header = Some(
+                    f.header
+                        .into_iter()
+                        .map(|text| Cell { text, bbox: None })
+                        .collect(),
+                );
+                consumed_indices.extend(up.iter().take(f.lines_used).map(|(idx, _)| *idx));
+            }
+        }
+    }
+
     // Line index span this table covers.
     let start = *consumed_indices.iter().min().unwrap();
     let end = *consumed_indices.iter().max().unwrap() + 1;
@@ -4611,7 +4845,7 @@ fn build_ruled_table_from(
         TableRun {
             start,
             end,
-            body_start: start,
+            body_start: body_first_line,
             interstitials: Vec::new(),
             // A ruled table's region is the grid the generator actually drew.
             bbox: Some(bbox),
@@ -4726,47 +4960,97 @@ fn find_bucket(boundaries: &[f32], val: f32) -> Option<usize> {
 /// column-major reading order). Empty-cell-fraction
 /// and other quality filters are deliberately skipped here: we want the bbox
 /// even of sparse forms or partially-filled grids, because the obstacle
+/// Like [`detect_table_rects`], but also returns each table's row-boundary
+/// y-coordinates (sorted), for callers that need to place something at a
+/// specific row rather than just know the table's outer bounds. Same
+/// geometry-only, pre-projection safety checks (minimum size, whole-page-border
+/// exclusion) — reused exactly rather than re-implemented, since it is those
+/// checks that stop a page's full-bleed background fill from being read as a
+/// one-cell "table" spanning the entire page.
+pub(crate) fn detect_table_grids(
+    graphics: &[GraphicPrimitive],
+    page_width: f32,
+    page_height: f32,
+) -> Vec<(Rect, Vec<f32>)> {
+    table_grid_bands(graphics, page_width, page_height)
+}
+
 /// machinery only cares about geometry.
 pub fn detect_table_rects(
     graphics: &[GraphicPrimitive],
     page_width: f32,
     page_height: f32,
 ) -> Vec<Rect> {
-    let (hs, vs) = extract_h_v_segments(graphics);
-    let hs = cluster_h_segments(hs);
-    let vs = cluster_v_segments(vs);
+    table_grid_bands(graphics, page_width, page_height)
+        .into_iter()
+        .map(|(rect, _)| rect)
+        .collect()
+}
+
+/// Shared geometry-only table-bbox detector behind [`detect_table_grids`] and
+/// [`detect_table_rects`]. Each connected grid component is run through
+/// [`split_component_at_grid_gaps`] before its bbox is measured: without that,
+/// two ruled tables stacked in the same column (sharing an x-position by
+/// coincidence — a common case when a template reuses column widths) would
+/// report as a single bbox spanning both, wrongly telling the XY-cut obstacle
+/// check that the gap *and whatever sits inside it* is one uncuttable table.
+fn table_grid_bands(
+    graphics: &[GraphicPrimitive],
+    page_width: f32,
+    page_height: f32,
+) -> Vec<(Rect, Vec<f32>)> {
+    let (raw_hs, raw_vs) = extract_h_v_segments(graphics);
+    let hs = cluster_h_segments(raw_hs);
+    let vs = cluster_v_segments(raw_vs.clone());
     if hs.len() < 2 || vs.len() < 2 {
         return Vec::new();
     }
     let components = find_grid_components(&hs, &vs);
     let mut out = Vec::new();
     for (h_idx, v_idx) in components {
-        let ys: Vec<f32> = h_idx.iter().map(|&i| hs[i].y).collect();
-        let xs: Vec<f32> = v_idx.iter().map(|&i| vs[i].x).collect();
-        let y_min = ys.iter().copied().fold(f32::INFINITY, f32::min);
-        let y_max = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        let x_min = xs.iter().copied().fold(f32::INFINITY, f32::min);
-        let x_max = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        let w = x_max - x_min;
-        let h = y_max - y_min;
-        if w < 5.0 || h < 5.0 {
-            continue;
+        for band in split_component_at_grid_gaps(&hs, &vs, &raw_vs, &h_idx, &v_idx) {
+            let mut ys: Vec<f32> = band.h_idx.iter().map(|&i| hs[i].y).collect();
+            ys.sort_by(f32::total_cmp);
+            let xs: Vec<f32> = band.v_idx.iter().map(|&i| vs[i].x).collect();
+            let (Some(&y_min), Some(&y_max)) = (ys.first(), ys.last()) else {
+                continue;
+            };
+            let x_min = xs.iter().copied().fold(f32::INFINITY, f32::min);
+            let x_max = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let w = x_max - x_min;
+            let h = y_max - y_min;
+            if w < 5.0 || h < 5.0 {
+                continue;
+            }
+            // A genuine table has interior structure: at least two row bands or
+            // two column bands. Four edges of a single filled rectangle (a
+            // page-background fill, a decorative box) cluster to exactly 2 H and
+            // 2 V segments -- a 1x1 "grid" with no interior division at all. That
+            // is never a real table, however large or small the rectangle is, so
+            // this check catches it independently of (and before) the
+            // whole-page-coverage check below, which only catches the large case.
+            if ys.len() < 3 && xs.len() < 3 {
+                continue;
+            }
+            // Skip whole-page borders — same rationale as `TABLE_MAX_PAGE_COVERAGE`
+            // in the post-projection detector.
+            if page_width > 0.0
+                && page_height > 0.0
+                && w / page_width >= TABLE_MAX_PAGE_COVERAGE
+                && h / page_height >= TABLE_MAX_PAGE_COVERAGE
+            {
+                continue;
+            }
+            out.push((
+                Rect {
+                    x: x_min,
+                    y: y_min,
+                    width: w,
+                    height: h,
+                },
+                ys,
+            ));
         }
-        // Skip whole-page borders — same rationale as `TABLE_MAX_PAGE_COVERAGE`
-        // in the post-projection detector.
-        if page_width > 0.0
-            && page_height > 0.0
-            && w / page_width >= TABLE_MAX_PAGE_COVERAGE
-            && h / page_height >= TABLE_MAX_PAGE_COVERAGE
-        {
-            continue;
-        }
-        out.push(Rect {
-            x: x_min,
-            y: y_min,
-            width: w,
-            height: h,
-        });
     }
     out
 }
@@ -4805,10 +5089,15 @@ fn split_component_at_grid_gaps(
     /// Row pitch below this means the component is decoration, not a table -
     /// vector-drawn maths glyphs make components with a 3-4pt pitch.
     const MIN_PITCH_PT: f32 = 8.0;
-    /// A gap must dwarf the component's own row pitch *and* clear an absolute
-    /// floor, so ordinary row-height variation never cuts.
+    /// A gap must dwarf the *locally* surrounding row pitch *and* clear an
+    /// absolute floor, so ordinary row-height variation never cuts.
     const GAP_PITCH_MULT: f32 = 2.5;
     const GAP_MIN_PT: f32 = 30.0;
+    /// How many pitches on each side of a candidate gap to draw the local
+    /// pitch estimate from. Kept small and symmetric so a gap right next to
+    /// the boundary between two differently-pitched fused tables is judged
+    /// against its own neighbourhood, not the pair as a whole.
+    const LOCAL_PITCH_WINDOW: usize = 2;
     /// Each side must keep a real table: 3 boundaries is 2 rows, the minimum
     /// `build_ruled_table` will look at.
     const MIN_BAND_HLINES: usize = 3;
@@ -4825,18 +5114,43 @@ fn split_component_at_grid_gaps(
     if sorted.len() < MIN_BAND_HLINES * 2 {
         return whole();
     }
-    let mut pitches: Vec<f32> = sorted.windows(2).map(|w| hs[w[1]].y - hs[w[0]].y).collect();
-    pitches.sort_by(f32::total_cmp);
-    let pitch = pitches[pitches.len() / 2];
-    if pitch < MIN_PITCH_PT {
+    // Row-order pitches (index i = gap between sorted[i] and sorted[i+1]).
+    // Kept in position order (not sorted) so a per-gap local window can be
+    // drawn from its immediate neighbours.
+    let pitches: Vec<f32> = sorted.windows(2).map(|w| hs[w[1]].y - hs[w[0]].y).collect();
+    let mut sorted_pitches = pitches.clone();
+    sorted_pitches.sort_by(f32::total_cmp);
+    let global_pitch = sorted_pitches[sorted_pitches.len() / 2];
+    if global_pitch < MIN_PITCH_PT {
         return whole();
     }
-    let min_gap = (pitch * GAP_PITCH_MULT).max(GAP_MIN_PT);
 
     let tol = TABLE_CROSS_TOLERANCE_PT;
     let mut cuts: Vec<usize> = Vec::new(); // index into `sorted`: cut after this line
     for (i, w) in sorted.windows(2).enumerate() {
         let (lo, hi) = (hs[w[0]].y, hs[w[1]].y);
+        // Judge this gap against the pitch of its own neighbourhood, not a
+        // single global median: a component that fused two tables with
+        // different row heights (e.g. two stacked ruled tables sharing a
+        // column x-position) has a median dominated by whichever table has
+        // more rows, which can under-count how anomalous the seam between
+        // them really is.
+        let lo_idx = i.saturating_sub(LOCAL_PITCH_WINDOW);
+        let hi_idx = (i + 1 + LOCAL_PITCH_WINDOW).min(pitches.len());
+        let mut local: Vec<f32> = pitches[lo_idx..hi_idx]
+            .iter()
+            .enumerate()
+            .filter(|&(j, _)| lo_idx + j != i)
+            .map(|(_, &p)| p)
+            .collect();
+        let pitch = if local.is_empty() {
+            global_pitch
+        } else {
+            local.sort_by(f32::total_cmp);
+            let m = local[local.len() / 2];
+            if m < MIN_PITCH_PT { global_pitch } else { m }
+        };
+        let min_gap = (pitch * GAP_PITCH_MULT).max(GAP_MIN_PT);
         if hi - lo < min_gap {
             continue;
         }
@@ -4895,7 +5209,16 @@ fn detect_ruled_tables_impl(
     page_height: f32,
     pass: RuledPass,
 ) -> Vec<(TableRun, Vec<usize>)> {
-    let RuleSegments { hs, raw_vs, vs } = segs;
+    let RuleSegments {
+        raw_hs,
+        hs,
+        raw_vs,
+        vs,
+    } = segs;
+    let raw = RawRules {
+        hs: raw_hs,
+        vs: raw_vs,
+    };
     if hs.len() < 2 || vs.len() < 2 {
         return Vec::new();
     }
@@ -4912,6 +5235,7 @@ fn detect_ruled_tables_impl(
                 page_width,
                 page_height,
                 pass,
+                raw,
             ) {
                 out.push(run);
             }
@@ -5078,6 +5402,11 @@ fn merge_continuation_rows(rows: &mut Vec<Vec<Cell>>) {
                 for (i, cell) in row.iter().enumerate() {
                     let t = cell.text.trim();
                     if t.is_empty() {
+                        continue;
+                    }
+                    // A cell identical to the one above is the same merged
+                    // (row-spanning) cell repeated, not a wrapped line.
+                    if prev[i].text.trim() == t {
                         continue;
                     }
                     // `prev[i]` is non-empty for every filled column of `row`;
@@ -5531,6 +5860,26 @@ mod tests {
             |_, _| true,
         );
         assert_eq!(xs, vec![123.8, 382.9, 652.1]);
+    }
+
+    #[test]
+    fn continuation_merge_ignores_a_repeated_rowspan_cell() {
+        let cell = |t: &str| Cell {
+            text: t.to_string(),
+            bbox: None,
+        };
+        let mut rows = vec![
+            vec![
+                cell("Item 5."),
+                cell("Market for common equity"),
+                cell("19"),
+            ],
+            vec![cell(""), cell("securities"), cell("19")],
+        ];
+        merge_continuation_rows(&mut rows);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1].text, "Market for common equity securities");
+        assert_eq!(rows[0][2].text, "19");
     }
 
     #[test]
