@@ -57,7 +57,11 @@ def _convert_rect(rect: Any) -> Optional[AnnotationRect]:
 
 
 def _convert_cell(cell: Any) -> LayoutCell:
-    return LayoutCell(text=cell.text, bbox=_convert_rect(cell.bbox))
+    return LayoutCell(
+        text=cell.text,
+        bbox=_convert_rect(cell.bbox),
+        text_item_indices=list(cell.text_item_indices),
+    )
 
 
 def _convert_block(block: Any) -> LayoutBlock:
@@ -84,6 +88,7 @@ def _convert_block(block: Any) -> LayoutBlock:
         id=block.id,
         format=block.format,
         bbox=_convert_rect(block.bbox),
+        text_item_indices=list(block.text_item_indices),
     )
 
 
