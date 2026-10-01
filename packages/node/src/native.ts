@@ -160,6 +160,7 @@ export interface NativeParsedPage {
 export interface NativeLayoutCell {
   text: string;
   bbox?: NativeRect;
+  textItemIndices: number[];
 }
 
 export interface NativeLayoutBlock {
@@ -177,6 +178,7 @@ export interface NativeLayoutBlock {
   id?: string;
   format?: string;
   bbox?: NativeRect;
+  textItemIndices: number[];
 }
 
 export interface NativeStructureAttribute {

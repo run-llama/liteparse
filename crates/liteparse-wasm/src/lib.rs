@@ -566,6 +566,9 @@ pub struct LayoutCell {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bbox: Option<AnnotationRect>,
+    /// Indices into the page's `textItems` of the items the cell was read
+    /// from, in reading order. Empty for padding cells.
+    pub text_item_indices: Vec<usize>,
 }
 
 /// A classified block plus where it sits on the page.
@@ -623,6 +626,10 @@ pub struct LayoutBlock {
     /// geometry behind it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bbox: Option<AnnotationRect>,
+    /// Indices into the page's `textItems` of every item the block was read
+    /// from, sorted. For tables, the union of the cells'. Empty for `figure`
+    /// and for a `rule` drawn as a stroke.
+    pub text_item_indices: Vec<usize>,
 }
 
 fn to_annotation_rect(rect: &liteparse::types::Rect) -> AnnotationRect {
@@ -639,6 +646,7 @@ impl LayoutCell {
         Self {
             text: cell.text.clone(),
             bbox: cell.bbox.as_ref().map(to_annotation_rect),
+            text_item_indices: cell.text_item_indices.clone(),
         }
     }
 }
@@ -666,6 +674,7 @@ impl LayoutBlock {
             id: block.id.clone(),
             format: block.format.clone(),
             bbox: block.bbox.as_ref().map(to_annotation_rect),
+            text_item_indices: block.text_item_indices.clone(),
         }
     }
 }
