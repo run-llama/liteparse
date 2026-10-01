@@ -1001,7 +1001,9 @@ impl LiteParse {
     /// structure (headings, lists, tables, merged cells) alongside the text
     /// items, so per-page markdown renders from the block model with
     /// `render_blocks` while page `.text` still comes from grid projection
-    /// over the supplied text items.
+    /// over the supplied text items. Block and cell `text_item_indices` are
+    /// left empty: projection reorders and merges the supplied items, so
+    /// indices into them would not address the returned `text_items`.
     pub fn parse_from_blocks(
         &self,
         pages: Vec<Page>,
@@ -1024,7 +1026,11 @@ impl LiteParse {
                 page.markdown = stages::render_blocks(blocks);
             }
             if self.config.extract_blocks {
-                page.blocks = Some(stages::layout_blocks(page, blocks));
+                let mut blocks = blocks.clone();
+                blocks
+                    .iter_mut()
+                    .for_each(stages::PositionedBlock::clear_text_items);
+                page.blocks = Some(stages::layout_blocks(page, &blocks));
             }
             page.complexity = stats;
             if !self.config.extract_content_bounds {
@@ -1332,6 +1338,42 @@ mod tests {
         // Projection, not a reading-order join: the projected page text
         // carries the item's text content.
         assert!(result.pages[0].text.contains("hello"));
+    }
+
+    /// Supplied indices address the supplied items, which projection
+    /// reorders, so they are not reported.
+    #[test]
+    fn parse_from_blocks_drops_supplied_item_indices() {
+        use crate::markdown_layout::{Block, Cell, PositionedBlock};
+
+        let mut page = page_with_text_metadata();
+        page.page_width = 612.0;
+        page.page_height = 792.0;
+        let cell = Cell {
+            text_item_indices: vec![0],
+            ..Cell::from("hello")
+        };
+        let blocks = vec![PositionedBlock::sourced(
+            Block::Table {
+                header: None,
+                rows: vec![vec![cell]],
+            },
+            None,
+            vec![0],
+        )];
+        let result = LiteParse::new(LiteParseConfig {
+            extract_blocks: true,
+            ..Default::default()
+        })
+        .parse_from_blocks(vec![page], vec![blocks], None, vec![], vec![], vec![None])
+        .expect("no page filter configured");
+        let block = &result.pages[0].blocks.as_ref().unwrap()[0];
+        assert!(block.text_item_indices.is_empty());
+        assert!(
+            block.rows.as_ref().unwrap()[0][0]
+                .text_item_indices
+                .is_empty()
+        );
     }
 
     /// Page filtering drops `all_blocks` (a doc-level render would leak

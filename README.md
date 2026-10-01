@@ -389,6 +389,8 @@ blocks, the Markdown output is built from. Every block carries:
 - `bbox`: the region it occupies, in the same top-left 72-DPI viewport space as
   `text_items`. This is the union of every source line that fed the block, so a
   wrapped heading or a multi-line paragraph reports its whole band.
+- `text_item_indices`: the positions in `text_items` of the items the block was
+  read from, so a block links back to the text it was built from.
 - Kind-specific fields, omitted when they don't apply: `text` and `level` for
   headings; `ordered` / `marker` for list items; `lines` and `lang` for code;
   `header` and `rows` for tables; `id` / `format` for figures.
