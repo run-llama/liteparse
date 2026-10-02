@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use liteparse::config::OutputFormat;
+use liteparse::config::{CropBox, OutputFormat};
 use liteparse::conversion::convert_data_to_pdf;
 use liteparse::ocr_merge::ComplexityReason;
 use liteparse::types::PdfInput;
@@ -1196,4 +1196,46 @@ async fn test_orientation_correction_rejects_non_cardinal_angle() {
         Err(other) => panic!("expected a config error, got {other}"),
         Ok(_) => panic!("45° is not a valid correction and must be rejected"),
     }
+}
+
+async fn diagonal_column_count(config: LiteParseConfig) -> usize {
+    let stats = LiteParse::new(LiteParseConfig {
+        quiet: true,
+        ..config
+    })
+    .is_complex(PdfInput::Path(
+        "../../integration_tests_data/diagonal_column.pdf".into(),
+    ))
+    .await
+    .expect("is_complex should succeed");
+    stats[0].layout.as_ref().expect("layout stats").column_count
+}
+
+/// `is_complex` honors the same content filters as `parse`, so a column of
+/// diagonal watermark text only counts when it isn't filtered out.
+#[tokio::test]
+#[serial]
+async fn test_is_complex_applies_content_filters() {
+    assert_eq!(diagonal_column_count(LiteParseConfig::default()).await, 2);
+    assert_eq!(
+        diagonal_column_count(LiteParseConfig {
+            skip_diagonal_text: true,
+            ..LiteParseConfig::default()
+        })
+        .await,
+        1
+    );
+    assert_eq!(
+        diagonal_column_count(LiteParseConfig {
+            crop_box: Some(CropBox {
+                top: 0.0,
+                right: 0.5,
+                bottom: 0.0,
+                left: 0.0,
+            }),
+            ..LiteParseConfig::default()
+        })
+        .await,
+        1
+    );
 }

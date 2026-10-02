@@ -471,7 +471,7 @@ impl LiteParse {
         // pass fast (its whole purpose is a cheap pre-OCR check).
         let password = self.config.password.as_deref();
 
-        let (pages, mut page_complexities) = {
+        let (mut pages, mut page_complexities) = {
             let lib = Library::init();
             let document = self.open_document(&lib, &validated_input, password)?;
 
@@ -536,6 +536,8 @@ impl LiteParse {
         // Layout signals come from the real projection pass so they match
         // what a full parse will decide.
         let t_layout = web_time::Instant::now();
+        // Same order as parse: complexity sees every item, layout the filtered page.
+        stages::apply_content_filters(&mut pages, &self.content_filters());
         let parsed_pages = stages::project(pages);
         for (stats, page) in page_complexities.iter_mut().zip(&parsed_pages) {
             stats.layout = Some(stages::layout_complexity(page));
