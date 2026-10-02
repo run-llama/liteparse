@@ -344,6 +344,10 @@ pub struct BlockOptions<'a> {
 /// decomposition [`render_page_markdown`] renders and
 /// `ParsedPage::blocks` reports.
 ///
+/// Table detection splits merged cells on `TextItem.words`, so extract with
+/// `LiteParseConfig::effective_emit_word_boxes` to get the blocks `parse()`
+/// reports.
+///
 /// Returns `None` for a page with no projected lines (blank, or fully OCR
 /// without font metadata): there is no structure to report, and rendering
 /// falls back to the projection text in a fence.

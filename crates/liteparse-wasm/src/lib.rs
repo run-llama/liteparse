@@ -1154,6 +1154,7 @@ impl LiteParse {
         Ok(to_js_result(
             &result,
             self.inner.config().extract_text_metadata,
+            self.inner.config().output_word_boxes(),
         ))
     }
 }
@@ -1162,7 +1163,11 @@ impl LiteParse {
 ///
 /// Shared by `parse()` and `ParseSession::nextBatch()` so a batch is mapped
 /// exactly the same way a whole-document result is.
-fn to_js_result(result: &liteparse::ParseResult, extract_text_metadata: bool) -> ParseResult {
+fn to_js_result(
+    result: &liteparse::ParseResult,
+    extract_text_metadata: bool,
+    word_boxes: bool,
+) -> ParseResult {
     let pages: Vec<ParsedPage> = result
         .pages
         .iter()
@@ -1210,7 +1215,7 @@ fn to_js_result(result: &liteparse::ParseResult, extract_text_metadata: bool) ->
                             .filter(|codes| !codes.is_empty())
                             .map(<[u32]>::to_vec),
                         trailing_space_generated: meta.trailing_space_generated,
-                        words: if i.words.is_empty() {
+                        words: if !word_boxes || i.words.is_empty() {
                             None
                         } else {
                             Some(
@@ -1403,6 +1408,7 @@ impl LiteParse {
 
         Ok(ParseSession {
             extract_text_metadata: self.inner.config().extract_text_metadata,
+            word_boxes: self.inner.config().output_word_boxes(),
             inner: session,
         })
     }
@@ -1430,6 +1436,7 @@ pub struct ParseBatch {
 pub struct ParseSession {
     inner: liteparse::ParseSession,
     extract_text_metadata: bool,
+    word_boxes: bool,
 }
 
 #[wasm_bindgen]
@@ -1456,7 +1463,7 @@ impl ParseSession {
         Ok(batch.map(|batch| ParseBatch {
             start_page: batch.start_page,
             end_page: batch.end_page,
-            result: to_js_result(&batch.result, self.extract_text_metadata),
+            result: to_js_result(&batch.result, self.extract_text_metadata, self.word_boxes),
         }))
     }
 }

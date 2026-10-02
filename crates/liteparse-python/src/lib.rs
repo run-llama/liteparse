@@ -490,8 +490,16 @@ impl PyTextItem {
 
     /// `from_rust` with the rich-metadata fields taken from the core-gated
     /// [`liteparse::types::TextMetadata`] view, so the "what counts as text
-    /// metadata" list lives in one place instead of per binding.
-    fn from_rust_for_output(item: liteparse::types::TextItem, extract_text_metadata: bool) -> Self {
+    /// metadata" list lives in one place instead of per binding. `words` is
+    /// left empty unless `word_boxes` (see `LiteParseConfig::output_word_boxes`).
+    fn from_rust_for_output(
+        mut item: liteparse::types::TextItem,
+        extract_text_metadata: bool,
+        word_boxes: bool,
+    ) -> Self {
+        if !word_boxes {
+            item.words.clear();
+        }
         let meta = item.text_metadata(extract_text_metadata);
         let (fill_color, stroke_color, char_codes) = (
             meta.fill_color.map(str::to_owned),
@@ -666,7 +674,11 @@ impl PyParsedPage {
 }
 
 impl PyParsedPage {
-    fn from_rust(page: liteparse::types::ParsedPage, extract_text_metadata: bool) -> Self {
+    fn from_rust(
+        page: liteparse::types::ParsedPage,
+        extract_text_metadata: bool,
+        word_boxes: bool,
+    ) -> Self {
         Self {
             page_num: page.page_number as u32,
             page_label: page.page_label.clone(),
@@ -683,7 +695,9 @@ impl PyParsedPage {
             text_items: page
                 .text_items
                 .into_iter()
-                .map(|item| PyTextItem::from_rust_for_output(item, extract_text_metadata))
+                .map(|item| {
+                    PyTextItem::from_rust_for_output(item, extract_text_metadata, word_boxes)
+                })
                 .collect(),
             complexity: page
                 .complexity
@@ -851,13 +865,17 @@ impl PyParseResult {
 }
 
 impl PyParseResult {
-    fn from_rust(result: liteparse::parser::ParseResult, extract_text_metadata: bool) -> Self {
+    fn from_rust(
+        result: liteparse::parser::ParseResult,
+        extract_text_metadata: bool,
+        word_boxes: bool,
+    ) -> Self {
         Self {
             total_pages: result.total_pages,
             pages: result
                 .pages
                 .into_iter()
-                .map(|page| PyParsedPage::from_rust(page, extract_text_metadata))
+                .map(|page| PyParsedPage::from_rust(page, extract_text_metadata, word_boxes))
                 .collect(),
             text: result.text,
             images: result
@@ -1388,6 +1406,7 @@ struct PyParseSession {
     inner: liteparse::ParseSession,
     runtime: std::sync::Arc<tokio::runtime::Runtime>,
     extract_text_metadata: bool,
+    word_boxes: bool,
 }
 
 #[pymethods]
@@ -1410,7 +1429,11 @@ impl PyParseSession {
         Ok(batch.map(|batch| PyParseBatch {
             start_page: batch.start_page,
             end_page: batch.end_page,
-            result: PyParseResult::from_rust(batch.result, self.extract_text_metadata),
+            result: PyParseResult::from_rust(
+                batch.result,
+                self.extract_text_metadata,
+                self.word_boxes,
+            ),
         }))
     }
 
@@ -1673,6 +1696,7 @@ impl LiteParse {
         Ok(PyParseResult::from_rust(
             result,
             self.config.extract_text_metadata,
+            self.config.output_word_boxes(),
         ))
     }
 
@@ -1714,6 +1738,7 @@ impl LiteParse {
         Ok(PyParseResult::from_rust(
             result,
             self.config.extract_text_metadata,
+            self.config.output_word_boxes(),
         ))
     }
 
@@ -1818,6 +1843,7 @@ impl LiteParse {
             inner: session,
             runtime: self.runtime.clone(),
             extract_text_metadata: self.config.extract_text_metadata,
+            word_boxes: self.config.output_word_boxes(),
         })
     }
 }
@@ -1928,6 +1954,35 @@ fn _liteparse(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn words_are_returned_only_when_requested() {
+        let item = liteparse::types::TextItem {
+            text: "a b".into(),
+            words: vec![
+                liteparse::types::WordBox {
+                    text: "a".into(),
+                    ..Default::default()
+                },
+                liteparse::types::WordBox {
+                    text: "b".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(
+            PyTextItem::from_rust_for_output(item.clone(), false, false)
+                .words
+                .is_empty()
+        );
+        assert_eq!(
+            PyTextItem::from_rust_for_output(item, false, true)
+                .words
+                .len(),
+            2
+        );
+    }
 
     #[test]
     fn text_metadata_round_trips_through_python_type() {

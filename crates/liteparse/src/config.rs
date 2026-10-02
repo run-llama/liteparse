@@ -253,15 +253,23 @@ impl LiteParseConfig {
     }
 
     /// Whether per-word boxes are needed for this run, whichever stage
-    /// produces the text. True when `emit_word_boxes` is set, or when the
-    /// markdown output format is selected: the markdown table detector splits
-    /// PDFium's merged multi-cell runs on real word geometry, so it needs
-    /// word boxes even when the caller didn't ask for them.
+    /// produces the text. True when `emit_word_boxes` is set, or when blocks
+    /// are classified (markdown output or `extract_blocks`): the table
+    /// detector splits PDFium's merged multi-cell runs on real word geometry,
+    /// so it needs word boxes even when the caller didn't ask for them.
     ///
     /// Every stage that fills `TextItem.words` must gate on this, so a run
     /// with word boxes off stays allocation-free on the whole path — including
     /// the OCR merge, where native text and scanned pages must agree.
     pub fn effective_emit_word_boxes(&self) -> bool {
+        self.emit_word_boxes || self.output_format == OutputFormat::Markdown || self.extract_blocks
+    }
+
+    /// Whether the bindings return `TextItem.words` (napi, python, wasm; the
+    /// CLI JSON never does). Word boxes extracted only for `extract_blocks`
+    /// are left out there, so turning on blocks doesn't grow their text-item
+    /// payload. Rust callers still get them on `ParseResult`'s items.
+    pub fn output_word_boxes(&self) -> bool {
         self.emit_word_boxes || self.output_format == OutputFormat::Markdown
     }
 }
@@ -451,6 +459,29 @@ mod tests {
         assert!(c.password.is_none());
         assert!(!c.extract_images);
         assert!(!c.extract_structure_tree);
+    }
+
+    #[test]
+    fn extract_blocks_extracts_word_boxes() {
+        let c = LiteParseConfig {
+            extract_blocks: true,
+            ..LiteParseConfig::default()
+        };
+        assert!(c.effective_emit_word_boxes());
+    }
+
+    #[test]
+    fn word_boxes_extracted_only_for_blocks_are_not_output() {
+        let mut c = LiteParseConfig {
+            extract_blocks: true,
+            ..LiteParseConfig::default()
+        };
+        assert!(!c.output_word_boxes());
+        c.emit_word_boxes = true;
+        assert!(c.output_word_boxes());
+        c.emit_word_boxes = false;
+        c.output_format = OutputFormat::Markdown;
+        assert!(c.output_word_boxes());
     }
 
     #[test]
