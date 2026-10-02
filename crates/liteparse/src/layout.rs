@@ -224,7 +224,46 @@ pub(crate) fn blocks_for_page(page: &ParsedPage, blocks: &[PositionedBlock]) -> 
     if !page.projected_item_frames.is_empty() {
         remap_to_page_frame(&mut out, &page.projected_item_frames);
     }
+    clip_tables_to_page(&mut out, page.page_width, page.page_height);
     out
+}
+
+/// Clip table and cell boxes to the page. Ruled-grid boundaries come from
+/// vector paths, whose bounds PDFium reports unclipped, so a path drawn past
+/// the page edge would otherwise stretch a column (and the table) off the page.
+fn clip_tables_to_page(blocks: &mut [LayoutBlock], width: f32, height: f32) {
+    if !(width > 0.0 && width.is_finite() && height > 0.0 && height.is_finite()) {
+        return;
+    }
+    for block in blocks.iter_mut() {
+        if !matches!(block.kind.as_str(), "table" | "merged_table") {
+            continue;
+        }
+        let cells = block
+            .header
+            .iter_mut()
+            .flatten()
+            .chain(block.rows.iter_mut().flatten().flatten());
+        for r in std::iter::once(&mut block.bbox)
+            .chain(cells.map(|c| &mut c.bbox))
+            .flatten()
+        {
+            clip_rect(r, width, height);
+        }
+    }
+}
+
+/// Leaves a non-finite rect as-is (`f32::clamp` panics on NaN, and `inf - inf` is NaN).
+fn clip_rect(r: &mut Rect, width: f32, height: f32) {
+    if ![r.x, r.y, r.width, r.height].iter().all(|v| v.is_finite()) {
+        return;
+    }
+    let x1 = (r.x + r.width).clamp(0.0, width);
+    let y1 = (r.y + r.height).clamp(0.0, height);
+    r.x = r.x.clamp(0.0, x1);
+    r.y = r.y.clamp(0.0, y1);
+    r.width = x1 - r.x;
+    r.height = y1 - r.y;
 }
 
 /// Map text-derived block and cell boxes from the projection frame back to
@@ -323,6 +362,53 @@ mod tests {
         assert_eq!(blocks[1].bbox, Some(rect(14.0, 300.0, 12.0, 200.0)));
         // Graphics-derived boxes are already in page space.
         assert_eq!(blocks[2].bbox, Some(rect(300.0, 300.0, 50.0, 50.0)));
+    }
+
+    #[test]
+    fn clip_tables_to_page_clips_offpage_cells() {
+        let cell = |text: &str, bbox: Rect| LayoutCell {
+            text: text.into(),
+            bbox: Some(bbox),
+            colspan: None,
+            rowspan: None,
+        };
+        // A ruled column whose right boundary came from a path drawn far past
+        // the 595pt page edge.
+        let mut blocks = vec![
+            LayoutBlock {
+                header: Some(vec![cell("h", rect(-20.0, -5.0, 200.0, 20.0))]),
+                rows: Some(vec![vec![
+                    cell("a", rect(160.0, 650.0, 274.0, 14.0)),
+                    cell("", rect(434.0, 650.0, 5088.0, 14.0)),
+                ]]),
+                ..LayoutBlock::of("table", Some(rect(160.0, 650.0, 5362.0, 14.0)))
+            },
+            para(rect(-10.0, 10.0, 100.0, 10.0)),
+        ];
+        clip_tables_to_page(&mut blocks, 595.0, 842.0);
+        assert_eq!(blocks[0].bbox, Some(rect(160.0, 650.0, 435.0, 14.0)));
+        let header = &blocks[0].header.as_ref().unwrap()[0];
+        assert_eq!(header.bbox, Some(rect(0.0, 0.0, 180.0, 15.0)));
+        let row = &blocks[0].rows.as_ref().unwrap()[0];
+        assert_eq!(row[0].bbox, Some(rect(160.0, 650.0, 274.0, 14.0)));
+        assert_eq!(row[1].bbox, Some(rect(434.0, 650.0, 161.0, 14.0)));
+        // Only table geometry is clipped.
+        assert_eq!(blocks[1].bbox, Some(rect(-10.0, 10.0, 100.0, 10.0)));
+    }
+
+    #[test]
+    fn clip_tables_to_page_leaves_non_finite_geometry_alone() {
+        let nan = rect(f32::NAN, 10.0, 50.0, 10.0);
+        let mut blocks = vec![LayoutBlock::of("table", Some(nan))];
+        clip_tables_to_page(&mut blocks, 595.0, 842.0);
+        assert!(blocks[0].bbox.as_ref().unwrap().x.is_nan());
+        let inf = rect(f32::NEG_INFINITY, 10.0, f32::INFINITY, 10.0);
+        let mut blocks = vec![LayoutBlock::of("table", Some(inf.clone()))];
+        clip_tables_to_page(&mut blocks, 595.0, 842.0);
+        assert_eq!(blocks[0].bbox, Some(inf));
+        let mut blocks = vec![LayoutBlock::of("table", Some(rect(0.0, 0.0, 900.0, 10.0)))];
+        clip_tables_to_page(&mut blocks, f32::NAN, 842.0);
+        assert_eq!(blocks[0].bbox, Some(rect(0.0, 0.0, 900.0, 10.0)));
     }
 
     #[test]
