@@ -322,7 +322,19 @@ fn handle_rotation_reading_order(items: &mut [ProjectedTextItem], page_height: f
                 }
             }
 
-            let global_delta = delta_y + group_max_x + page_height;
+            // Push later groups just below the block. `delta_y` already includes
+            // earlier pushes, so pushing by the block's absolute bottom compounds them.
+            let block_bottom = delta_y + group_max_x;
+            let later_top = bbox_groups[(group_idx + 1)..]
+                .iter()
+                .flatten()
+                .map(|idx| items[*idx].item.y + items[*idx].d)
+                .fold(f32::INFINITY, f32::min);
+            let global_delta = if later_top.is_finite() {
+                (block_bottom + page_height - later_top).max(0.0)
+            } else {
+                0.0
+            };
             for other_group in &bbox_groups[(group_idx + 1)..] {
                 for idx in other_group {
                     let rot = canonical_rotation(items[*idx].item.rotation);
@@ -3092,6 +3104,14 @@ pub(crate) fn is_mono_item(item: &TextItem) -> bool {
 
 /// Bucket size for the 1D density projection (points).
 const XY_BUCKET_PT: f32 = 2.0;
+/// Upper bound on density-histogram buckets per axis; longer extents get wider
+/// buckets instead of a multi-GB histogram.
+const XY_MAX_BUCKETS: usize = 1 << 16;
+
+/// Bucket width for an axis of `length` points, capped at `XY_MAX_BUCKETS` buckets.
+fn xy_bucket_pt(length: f32) -> f32 {
+    XY_BUCKET_PT.max(length / XY_MAX_BUCKETS as f32)
+}
 /// Density threshold for a "valley", expressed as a fraction of the local
 /// median non-zero bucket density.
 const XY_T_DENS: f32 = 0.10;
@@ -3273,7 +3293,8 @@ fn xy_find_best_cut(
     if length <= 0.0 {
         return None;
     }
-    let n_buckets = ((length / XY_BUCKET_PT).ceil() as usize).max(1);
+    let bucket_pt = xy_bucket_pt(length);
+    let n_buckets = ((length / bucket_pt).ceil() as usize).max(1);
     let mut density = vec![0.0f32; n_buckets];
 
     for &i in idxs {
@@ -3283,8 +3304,8 @@ fn xy_find_best_cut(
             CutAxis::Vertical => (it.x, it.x + it.width.max(0.0)),
         };
         let weight = xy_item_weight(it);
-        let b0_f = ((c0 - origin) / XY_BUCKET_PT).floor();
-        let b1_f = ((c1 - origin) / XY_BUCKET_PT).ceil();
+        let b0_f = ((c0 - origin) / bucket_pt).floor();
+        let b1_f = ((c1 - origin) / bucket_pt).ceil();
         let b0 = b0_f.max(0.0) as usize;
         let b1 = (b1_f.max(b0_f + 1.0) as usize).min(n_buckets);
         for b in b0..b1 {
@@ -3310,8 +3331,8 @@ fn xy_find_best_cut(
             CutAxis::Vertical => (fx0, fx1, fy1 - fy0),
         };
         let weight = perp.max(1.0);
-        let b0_f = ((c0 - origin) / XY_BUCKET_PT).floor();
-        let b1_f = ((c1 - origin) / XY_BUCKET_PT).ceil();
+        let b0_f = ((c0 - origin) / bucket_pt).floor();
+        let b1_f = ((c1 - origin) / bucket_pt).ceil();
         let b0 = b0_f.max(0.0) as usize;
         let b1 = (b1_f.max(b0_f + 1.0) as usize).min(n_buckets);
         for b in b0..b1 {
@@ -3342,7 +3363,7 @@ fn xy_find_best_cut(
         CutAxis::Vertical => XY_MIN_V_VALLEY_PT,
         CutAxis::Horizontal => median_h * XY_MIN_H_VALLEY_FACTOR,
     };
-    let min_valley_buckets = ((min_valley_pt / XY_BUCKET_PT).ceil() as usize).max(1);
+    let min_valley_buckets = ((min_valley_pt / bucket_pt).ceil() as usize).max(1);
 
     let mut best: Option<CutCandidate> = None;
     let mut i = first_dense + 1;
@@ -3359,7 +3380,7 @@ fn xy_find_best_cut(
                 let depth = (1.0 - mean / median).max(0.0);
                 let score = width as f32 * depth;
                 let mid = (s as f32 + e as f32) * 0.5;
-                let position = origin + mid * XY_BUCKET_PT;
+                let position = origin + mid * bucket_pt;
                 // Density-stamping alone isn't always enough to push the
                 // gutter inside a table region below threshold — the
                 // inter-cell gaps win on tables with sparsely-filled cells
@@ -5834,6 +5855,44 @@ mod tests {
         assert!((item.y - 100.0).abs() < 0.001);
         assert!((item.width - 22.5).abs() < 0.01);
         assert!((item.height - 9.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn restacked_rotated_groups_do_not_compound_canvas_offsets() {
+        // Restacked 90° labels alternating with off-axis markers (map exports) must
+        // grow the canvas linearly, not double per label.
+        let page_height = 4000.0;
+        let pairs = 30;
+        let mut items = vec![item_at("heading", 100.0, 40.0, 200.0, 12.0)];
+        for i in 0..pairs {
+            let (x, y) = (200.0 + 60.0 * i as f32, 150.0 + 100.0 * i as f32);
+            let mut marker = item_at("m", x - 30.0, y, 6.0, 6.0);
+            marker.item.rotation = 30.0 + i as f32;
+            items.push(marker);
+            let mut label = item_at("label", x, y, 10.0, 22.0);
+            label.item.rotation = 90.0;
+            items.push(label);
+        }
+
+        handle_rotation_reading_order(&mut items, page_height);
+
+        let bottom = items
+            .iter()
+            .map(|p| p.item.y + p.item.height)
+            .fold(f32::MIN, f32::max);
+        let linear_bound = pairs as f32 * 3.0 * (page_height + 2000.0);
+        assert!(
+            bottom.is_finite() && bottom < linear_bound,
+            "canvas bottom {bottom} exceeds linear bound {linear_bound}"
+        );
+    }
+
+    #[test]
+    fn xy_bucket_size_caps_histogram_length() {
+        assert_eq!(xy_bucket_pt(792.0), XY_BUCKET_PT);
+        assert_eq!(xy_bucket_pt(2.0 * 65_536.0), XY_BUCKET_PT);
+        let runaway = 3.0e9_f32;
+        assert!((runaway / xy_bucket_pt(runaway)).ceil() as usize <= XY_MAX_BUCKETS);
     }
 
     #[test]

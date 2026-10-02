@@ -1197,3 +1197,28 @@ async fn test_orientation_correction_rejects_non_cardinal_angle() {
         Ok(_) => panic!("45° is not a valid correction and must be rejected"),
     }
 }
+
+/// Map exports alternate restacked 90° labels with off-axis marker glyphs; the
+/// layout canvas must grow linearly instead of doubling per label.
+#[tokio::test]
+#[serial]
+async fn test_rotated_map_labels_keep_layout_canvas_bounded() {
+    let lit = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        quiet: true,
+        ..LiteParseConfig::default()
+    });
+    let parsed = lit
+        .parse("../../integration_tests_data/rotated_map_labels.pdf")
+        .await
+        .expect("map-style page should parse");
+
+    let page = &parsed.pages[0];
+    let canvas = &page.regions.bbox;
+    assert!(
+        canvas.height < 50.0 * page.page_height,
+        "layout canvas {:.0}pt tall for a {:.0}pt page",
+        canvas.height,
+        page.page_height
+    );
+}
