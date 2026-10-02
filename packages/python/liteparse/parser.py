@@ -524,7 +524,8 @@ class LiteParse:
                 return them in ``ParseResult.page_errors``. Document-level
                 failures remain fatal. Default False.
             dpi: DPI for rendering (affects OCR quality)
-            output_format: Output format: "json", "text", or "markdown" (default: "json")
+            output_format: Output format: "json", "text", or "markdown" (default: "json").
+                ``"md"`` is accepted as an alias. Any other value raises ``ValueError``.
             preserve_very_small_text: Whether to preserve very small text
             password: Password for encrypted/protected documents
             quiet: Suppress progress output

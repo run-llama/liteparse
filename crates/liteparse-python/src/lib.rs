@@ -1551,11 +1551,8 @@ impl LiteParse {
             cfg.dpi = v;
         }
         if let Some(v) = output_format {
-            cfg.output_format = match v.as_str() {
-                "text" => OutputFormat::Text,
-                "markdown" | "md" => OutputFormat::Markdown,
-                _ => OutputFormat::Json,
-            };
+            cfg.output_format = OutputFormat::from_binding_name(&v)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
         }
         if let Some(v) = preserve_very_small_text {
             cfg.preserve_very_small_text = v;

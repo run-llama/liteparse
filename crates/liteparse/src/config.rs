@@ -243,6 +243,23 @@ pub enum OutputFormat {
     Markdown,
 }
 
+impl OutputFormat {
+    /// Parse a binding-level format name.
+    ///
+    /// `"md"` is an alias of markdown. Anything else, including a typo such as
+    /// `"yaml"`, is an error so callers do not silently receive JSON.
+    pub fn from_binding_name(value: &str) -> Result<Self, String> {
+        match value {
+            "json" => Ok(Self::Json),
+            "text" => Ok(Self::Text),
+            "markdown" | "md" => Ok(Self::Markdown),
+            other => Err(format!(
+                "invalid output format '{other}' (expected 'json', 'text', or 'markdown')"
+            )),
+        }
+    }
+}
+
 impl LiteParseConfig {
     /// Whether embedded-image extraction should run. True when
     /// `extract_images` is set, or when the legacy `ImageMode::Embed` is
@@ -432,6 +449,29 @@ mod tests {
         assert!(parse_target_pages("1-60000,60001-120000").is_err());
         // A selection within the limit is still parsed normally.
         assert_eq!(parse_target_pages("1-1000").unwrap().len(), 1000);
+    }
+
+    #[test]
+    fn test_output_format_from_binding_name() {
+        assert_eq!(
+            OutputFormat::from_binding_name("json").unwrap(),
+            OutputFormat::Json
+        );
+        assert_eq!(
+            OutputFormat::from_binding_name("text").unwrap(),
+            OutputFormat::Text
+        );
+        assert_eq!(
+            OutputFormat::from_binding_name("markdown").unwrap(),
+            OutputFormat::Markdown
+        );
+        assert_eq!(
+            OutputFormat::from_binding_name("md").unwrap(),
+            OutputFormat::Markdown
+        );
+        let err = OutputFormat::from_binding_name("yaml").unwrap_err();
+        assert!(err.contains("yaml"));
+        assert!(OutputFormat::from_binding_name("JSON").is_err());
     }
 
     #[test]

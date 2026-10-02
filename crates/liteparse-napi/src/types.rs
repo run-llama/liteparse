@@ -151,7 +151,7 @@ pub struct JsCropBox {
 }
 
 impl JsLiteParseConfig {
-    pub fn into_rust(self) -> LiteParseConfig {
+    pub fn into_rust(self) -> Result<LiteParseConfig, napi::Error> {
         let mut cfg = LiteParseConfig::default();
         if let Some(v) = self.ocr_language {
             cfg.ocr_language = v;
@@ -184,11 +184,8 @@ impl JsLiteParseConfig {
             cfg.dpi = v as f32;
         }
         if let Some(v) = self.output_format {
-            cfg.output_format = match v.as_str() {
-                "text" => OutputFormat::Text,
-                "markdown" | "md" => OutputFormat::Markdown,
-                _ => OutputFormat::Json,
-            };
+            cfg.output_format =
+                OutputFormat::from_binding_name(&v).map_err(napi::Error::from_reason)?;
         }
         if let Some(v) = self.preserve_very_small_text {
             cfg.preserve_very_small_text = v;
@@ -286,7 +283,7 @@ impl JsLiteParseConfig {
         if let Some(v) = self.extract_vector_graphics {
             cfg.extract_vector_graphics = v;
         }
-        cfg
+        Ok(cfg)
     }
 
     pub fn from_rust(cfg: &LiteParseConfig) -> Self {
@@ -1428,7 +1425,7 @@ mod tests {
         let mut js = JsLiteParseConfig::from_rust(&LiteParseConfig::default());
         assert_eq!(js.extract_text_metadata, Some(false));
         js.extract_text_metadata = Some(true);
-        assert!(js.into_rust().extract_text_metadata);
+        assert!(js.into_rust().unwrap().extract_text_metadata);
     }
 
     #[test]
