@@ -52,6 +52,14 @@
 //!   heuristic, or when any non-generated glyph decodes to a control or private-use
 //!   codepoint. A glyph pdfium cannot map to Unicode decodes to 0 and therefore counts,
 //!   so every Type3 item is buggy.
+//! - A buggy verdict earned by a control or private-use decode is then widened to the
+//!   whole font on the page when the font's map is shown wrong: an embedded font with
+//!   such an item, whose other mapped glyphs the glyph recovery below identifies as
+//!   something else (see [`font_map_is_contradicted`]), makes every item of the font
+//!   buggy. Such a map shifts or scrambles all its codes, and only the codes that
+//!   land on a control character give themselves away; the rest decode to the wrong
+//!   printable characters. A font whose recovered glyphs agree with its map keeps the
+//!   per-item verdict.
 //! - With a [`GlyphResolver`], every non-generated glyph of a buggy item is re-decoded:
 //!   Type3 glyph names first, then the resolver on the glyph outline. An unrecognised
 //!   glyph becomes a space. Without a resolver the text is left as pdfium decoded it.
@@ -159,27 +167,15 @@ pub fn extract_raw_text_items(
     let page_rotation = page.rotation();
     let mut chunks = CharInfoChunks::new(text_page);
     let clips = crate::text_clip::TextClip::new(page);
-    let mut items = Vec::new();
+    // Runs are collected first and turned into items afterwards, because whether a
+    // run's font is buggy can depend on the font's other runs on the page.
+    let mut runs: Vec<Vec<Glyph>> = Vec::new();
     let mut run: Vec<Glyph> = Vec::new();
-    // Outline shapes repeat across a page (the same glyph at the same size and
-    // matrix), so they are computed once per page, not once per item.
-    let mut outline_cache = OutlineSupportCache::default();
 
-    let mut flush = |run: &mut Vec<Glyph>, items: &mut Vec<RawTextItem>| {
-        if run.is_empty() {
-            return;
+    let flush = |run: &mut Vec<Glyph>, runs: &mut Vec<Vec<Glyph>>| {
+        if !run.is_empty() {
+            runs.push(std::mem::take(run));
         }
-        if let Some(item) = build_item(
-            page,
-            text_page,
-            view_box,
-            run,
-            glyph_resolver,
-            &mut outline_cache,
-        ) {
-            items.push(item);
-        }
-        run.clear();
     };
 
     for i in 0..char_count {
@@ -189,7 +185,7 @@ pub fn extract_raw_text_items(
             rec: chunks.as_mut().and_then(|chunks| chunks.record(i)),
         };
         if clips.hides(&cv) {
-            flush(&mut run, &mut items);
+            flush(&mut run, &mut runs);
             continue;
         }
         let glyph = load_glyph(page, view_box, page_rotation, &cv, i);
@@ -198,22 +194,179 @@ pub fn extract_raw_text_items(
             && (first.text_object != glyph.text_object
                 || (first.angle - glyph.angle).abs() > ANGLE_SPLIT_RADIANS)
         {
-            flush(&mut run, &mut items);
+            flush(&mut run, &mut runs);
         }
 
         if glyph.generated && matches!(glyph.unicode, 0x0A | 0x0D) {
-            flush(&mut run, &mut items);
+            flush(&mut run, &mut runs);
             continue;
         }
 
         let closes_item = glyph.generated || is_c_locale_space(glyph.unicode);
         run.push(glyph);
         if closes_item {
-            flush(&mut run, &mut items);
+            flush(&mut run, &mut runs);
         }
     }
-    flush(&mut run, &mut items);
-    items
+    flush(&mut run, &mut runs);
+
+    let mut recovery = glyph_resolver.map(GlyphRecovery::new);
+    let contradicted = match &mut recovery {
+        Some(recovery) => contradicted_fonts(&runs, recovery),
+        None => Vec::new(),
+    };
+    // Outline shapes repeat across a page (the same glyph at the same size and
+    // matrix), so they are computed once per page, not once per item.
+    let mut outline_cache = OutlineSupportCache::default();
+    runs.iter()
+        .filter_map(|run| {
+            let font_map_broken = run_font_key(run).is_some_and(|key| contradicted.contains(&key));
+            build_item(
+                page,
+                text_page,
+                view_box,
+                run,
+                recovery.as_mut(),
+                font_map_broken,
+                &mut outline_cache,
+            )
+        })
+        .collect()
+}
+
+/// Glyph recovery for one page, with its answers kept per (font handle, char
+/// code): the same glyph recurs across a page's items, and identifying it hashes
+/// its outline.
+struct GlyphRecovery<'r> {
+    resolver: &'r dyn GlyphResolver,
+    answers: std::collections::HashMap<(usize, u32), Option<u32>>,
+}
+
+impl<'r> GlyphRecovery<'r> {
+    fn new(resolver: &'r dyn GlyphResolver) -> Self {
+        Self {
+            resolver,
+            answers: std::collections::HashMap::new(),
+        }
+    }
+
+    /// The recovered codepoint for `char_code` of `font`: the Type3 glyph name
+    /// first, then the resolver on the outline. `None` when neither knows it.
+    fn get(&mut self, font: &Font, char_code: u32) -> Option<u32> {
+        let resolver = self.resolver;
+        *self
+            .answers
+            .entry((font.handle() as usize, char_code))
+            .or_insert_with(|| {
+                (font.font_type() == FontType::Type3)
+                    .then(|| type3_glyph_codepoint(font, char_code))
+                    .flatten()
+                    .or_else(|| identify_glyph(resolver, font, char_code))
+            })
+    }
+}
+
+/// Two letters of which exactly one is ASCII. An outline cannot tell a Latin
+/// capital from its Greek or Cyrillic twin (A and Alpha are drawn alike), so an
+/// outline database may answer either, and such a pair proves nothing about the
+/// map.
+fn is_cross_script_letter(a: u32, b: u32) -> bool {
+    match (char::from_u32(a), char::from_u32(b)) {
+        (Some(a), Some(b)) => {
+            a.is_alphabetic() && b.is_alphabetic() && a.is_ascii() != b.is_ascii()
+        }
+        _ => false,
+    }
+}
+
+/// The font handle of a run's text object, which every glyph of the run shares.
+fn run_font_key(run: &[Glyph]) -> Option<usize> {
+    let obj = run.first()?.text_object?;
+    unsafe { Font::from_text_object(obj) }.map(|font| font.handle() as usize)
+}
+
+/// A run is buggy on its own evidence when its font is embedded and one of its
+/// real glyphs decodes to a control or private-use codepoint (0, unmapped, counts).
+fn run_has_buggy_codepoint(run: &[Glyph]) -> bool {
+    run.iter()
+        .any(|glyph| !glyph.generated && is_buggy_codepoint(glyph.unicode))
+}
+
+/// The fonts of the page whose code-to-character map is contradicted by their
+/// glyph outlines (see [`font_map_is_contradicted`]). Only embedded fonts that
+/// already hold a run with a control or private-use decode are examined, and a
+/// font already buggy by name needs no widening, so a page without such a run
+/// costs nothing here.
+fn contradicted_fonts(runs: &[Vec<Glyph>], recovery: &mut GlyphRecovery<'_>) -> Vec<usize> {
+    let mut suspects: Vec<(usize, Font)> = Vec::new();
+    for run in runs {
+        let Some(font) = run
+            .first()
+            .and_then(|glyph| glyph.text_object)
+            .and_then(|obj| unsafe { Font::from_text_object(obj) })
+        else {
+            continue;
+        };
+        let key = font.handle() as usize;
+        if suspects.iter().any(|(k, _)| *k == key)
+            || !font.is_embedded()
+            || is_buggy_font(&font.base_name().unwrap_or_default(), font.font_type())
+            || !run_has_buggy_codepoint(run)
+        {
+            continue;
+        }
+        suspects.push((key, font));
+    }
+    suspects
+        .into_iter()
+        .filter(|(key, font)| {
+            // Each distinct code once: the map's printable answer for it, from any
+            // run of the font on the page.
+            let mut codes: Vec<(u32, u32)> = Vec::new();
+            for run in runs.iter().filter(|run| run_font_key(run) == Some(*key)) {
+                for glyph in run {
+                    if glyph.generated
+                        || is_buggy_codepoint(glyph.unicode)
+                        || is_c_locale_space(glyph.unicode)
+                        || codes.iter().any(|(code, _)| *code == glyph.char_code)
+                    {
+                        continue;
+                    }
+                    codes.push((glyph.char_code, glyph.unicode));
+                }
+            }
+            let answers = codes
+                .iter()
+                .map(|&(code, mapped)| (mapped, recovery.get(font, code)));
+            font_map_is_contradicted(answers)
+        })
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// Least number of distinct codes whose recovered glyph differs from the map's
+/// character before a font's map is called wrong.
+const MIN_CONTRADICTED_CODES: usize = 3;
+
+/// Whether a font's map is wrong, judged on its distinct printable codes as
+/// `(map's codepoint, recovered codepoint)` pairs: at least
+/// [`MIN_CONTRADICTED_CODES`] codes recover to another character, and they
+/// outnumber the codes that agree two to one. Codes recovery cannot identify are
+/// no evidence either way, and neither is a letter recovered in another script
+/// (see [`is_cross_script_letter`]). A sound map that disagrees with recovery on
+/// a few look-alike glyphs (quote and dash variants) keeps a clear majority of
+/// agreeing codes; a shifted or scrambled map agrees on almost none.
+fn font_map_is_contradicted(answers: impl Iterator<Item = (u32, Option<u32>)>) -> bool {
+    let (mut agree, mut disagree) = (0usize, 0usize);
+    for (mapped, recovered) in answers {
+        match recovered {
+            Some(recovered) if recovered == mapped => agree += 1,
+            Some(recovered) if is_cross_script_letter(mapped, recovered) => {}
+            Some(_) => disagree += 1,
+            None => {}
+        }
+    }
+    disagree >= MIN_CONTRADICTED_CODES && disagree >= 2 * agree
 }
 
 /// The per-glyph reads. A glyph whose loose box cannot be read falls back to its
@@ -312,7 +465,8 @@ fn build_item(
     text_page: &TextPage,
     view_box: &RectF,
     glyphs: &[Glyph],
-    glyph_resolver: Option<&dyn GlyphResolver>,
+    recovery: Option<&mut GlyphRecovery<'_>>,
+    font_map_broken: bool,
     outline_cache: &mut OutlineSupportCache,
 ) -> Option<RawTextItem> {
     let first = glyphs.first()?;
@@ -365,26 +519,22 @@ fn build_item(
             }
         }
     }
-    // A control / private-use decode in an embedded font flags the whole item.
-    // `unicode` is 0 for an unmapped glyph, so those count too.
+    // A control / private-use decode in an embedded font flags the whole item
+    // (`unicode` is 0 for an unmapped glyph, so those count too), and so does a
+    // font whose map the page's other items show wrong (see the module docs).
     if font_is_embedded && !font_is_buggy {
-        font_is_buggy = glyphs
-            .iter()
-            .any(|glyph| !glyph.generated && is_buggy_codepoint(glyph.unicode));
+        font_is_buggy = font_map_broken || run_has_buggy_codepoint(glyphs);
     }
 
     let mut codepoints: Vec<u32> = glyphs.iter().map(|glyph| glyph.unicode).collect();
-    if font_is_buggy && let (Some(font), Some(resolver)) = (&font, glyph_resolver) {
-        let is_type3 = font.font_type() == FontType::Type3;
+    if font_is_buggy && let (Some(font), Some(recovery)) = (&font, recovery) {
         for (glyph, codepoint) in glyphs.iter().zip(codepoints.iter_mut()) {
             if glyph.generated {
                 continue;
             }
-            let identified = is_type3
-                .then(|| type3_glyph_codepoint(font, glyph.char_code))
-                .flatten()
-                .or_else(|| identify_glyph(resolver, font, glyph.char_code));
-            *codepoint = identified.unwrap_or(u32::from(' '));
+            *codepoint = recovery
+                .get(font, glyph.char_code)
+                .unwrap_or(u32::from(' '));
         }
     }
     let text = c_string_from_utf32(&codepoints)?;
@@ -860,6 +1010,53 @@ fn c_string_from_utf32(codepoints: &[u32]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pairs(list: &[(char, Option<char>)]) -> impl Iterator<Item = (u32, Option<u32>)> + '_ {
+        list.iter()
+            .map(|&(mapped, recovered)| (u32::from(mapped), recovered.map(u32::from)))
+    }
+
+    #[test]
+    fn map_is_contradicted_by_a_two_to_one_majority_of_three_or_more() {
+        // Every code recovered as the character a constant offset away.
+        let shifted = [
+            ('*', Some('2')),
+            ('(', Some('0')),
+            (',', Some('4')),
+            ('A', Some('I')),
+        ];
+        assert!(font_map_is_contradicted(pairs(&shifted)));
+        // Two contradictions are too few to judge.
+        assert!(!font_map_is_contradicted(pairs(&shifted[..2])));
+        // Unidentified codes are no evidence.
+        let unknown = [('*', Some('2')), ('(', Some('0')), ('x', None), ('y', None)];
+        assert!(!font_map_is_contradicted(pairs(&unknown)));
+        // A sound map with a few variant glyphs keeps its majority.
+        let sound = [
+            ('a', Some('a')),
+            ('b', Some('b')),
+            ('c', Some('c')),
+            ('\'', Some('\u{2019}')),
+            ('-', Some('\u{2013}')),
+            ('"', Some('\u{201D}')),
+        ];
+        assert!(!font_map_is_contradicted(pairs(&sound)));
+    }
+
+    #[test]
+    fn letters_recovered_in_another_script_are_no_evidence() {
+        // Latin capitals answered with their Greek and Cyrillic twins.
+        let twins = [
+            ('A', Some('\u{391}')),
+            ('N', Some('\u{39D}')),
+            ('E', Some('\u{415}')),
+            ('O', Some('\u{41E}')),
+        ];
+        assert!(!font_map_is_contradicted(pairs(&twins)));
+        assert!(is_cross_script_letter(u32::from('P'), 0x420));
+        assert!(!is_cross_script_letter(u32::from('P'), u32::from('R')));
+        assert!(!is_cross_script_letter(u32::from('1'), 0x391));
+    }
 
     #[test]
     fn c_locale_space_is_ascii_only() {
