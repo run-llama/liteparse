@@ -1940,6 +1940,19 @@ fn dedup_pair_drops_earlier(items: &[TextItem], i: usize, j: usize, debug: bool)
         return false;
     }
 
+    // Different lines must never dedupe, even with heavy loose-box overlap.
+    // A single glyph with pathological font metrics can stretch its line
+    // over the line above (#486); overpainted layers share a baseline.
+    if !dedup_same_line(a, b) {
+        if debug {
+            eprintln!(
+                "[extract-debug] DEDUP skip (different lines) i={i} text='{}' at ({:.1},{:.1} {}x{}) j={j} text='{}' at ({:.1},{:.1} {}x{})",
+                a.text, a.x, a.y, a.width, a.height, b.text, b.x, b.y, b.width, b.height,
+            );
+        }
+        return false;
+    }
+
     if a.text == b.text {
         if debug {
             eprintln!(
@@ -2948,6 +2961,77 @@ fn prescan_page_batched(
     (skip_invisible, garbage_fonts)
 }
 
+/// Maximum loose-box height as a multiple of the font size before the
+/// vertical extent is treated as pathological. A single glyph in a font
+/// with very tall vertical metrics (e.g. Cambria Math
+/// `/Ascent 3116 /Descent -2463` makes a 9pt hyphen 50pt tall) would
+/// otherwise stretch its whole line over adjacent lines (#486). When
+/// triggered, vertical expansion uses the ink (strict) box instead —
+/// the same "judge by ink box, not loose box" move as #485 for clipping.
+fn clamped_vertical_bounds(vp_loose: &RectF, vp_strict: &RectF, font_size: f32) -> (f32, f32) {
+    let loose_h = (vp_loose.bottom - vp_loose.top).abs();
+    let strict_h = (vp_strict.bottom - vp_strict.top).abs();
+    if font_size > 0.0 && loose_h > 2.5 * font_size && strict_h > 0.0 && strict_h < loose_h {
+        (vp_strict.top, vp_strict.bottom)
+    } else {
+        (vp_loose.top, vp_loose.bottom)
+    }
+}
+
+/// True when two items print on the same line, for the dedupe overpaint
+/// check. Overpainted layers share a baseline; adjacent lines 10pt apart
+/// must never dedupe even when a pathological loose box makes them overlap
+/// (#486). Horizontal text compares vertical centers, vertical text compares
+/// horizontal centers, with 50% of the smaller extent as slack for slight
+/// restamp offsets.
+fn dedup_same_line(a: &TextItem, b: &TextItem) -> bool {
+    fn orientation(rotation: f32) -> Option<bool> {
+        // Some(true) = horizontal (near 0/180), Some(false) = vertical (near 90/270).
+        let norm = rotation.rem_euclid(360.0);
+        let dist_to = |target: f32| {
+            let d = (norm - target).abs();
+            d.min(360.0 - d)
+        };
+        let d_horiz = dist_to(0.0).min(dist_to(180.0));
+        let d_vert = dist_to(90.0).min(dist_to(270.0));
+        if d_horiz <= 45.0 && d_horiz <= d_vert {
+            Some(true)
+        } else if d_vert < 45.0 {
+            Some(false)
+        } else {
+            None
+        }
+    }
+    match (orientation(a.rotation), orientation(b.rotation)) {
+        (Some(true), Some(true)) => {
+            let ha = a.height.abs();
+            let hb = b.height.abs();
+            let smaller = ha.min(hb);
+            if !(smaller > 0.0) {
+                return true;
+            }
+            let ca = a.y + a.height / 2.0;
+            let cb = b.y + b.height / 2.0;
+            (ca - cb).abs() <= 0.5 * smaller
+        }
+        (Some(false), Some(false)) => {
+            let wa = a.width.abs();
+            let wb = b.width.abs();
+            let smaller = wa.min(wb);
+            if !(smaller > 0.0) {
+                return true;
+            }
+            let ca = a.x + a.width / 2.0;
+            let cb = b.x + b.width / 2.0;
+            (ca - cb).abs() <= 0.5 * smaller
+        }
+        // Mixed orientations overlapping heavily is not an overpaint layer.
+        (Some(_), Some(_)) => false,
+        // Unknown orientation: fail open (preserve old behavior).
+        _ => true,
+    }
+}
+
 /// Accumulates characters into a single TextItem segment.
 struct SegmentBuilder {
     text: String,
@@ -3176,10 +3260,19 @@ impl SegmentBuilder {
     ) {
         self.text.clear();
         self.text.push(c);
+        // Clamp pathological loose vertical extent (e.g. Cambria Math tall
+        // metrics) to the ink box so one glyph doesn't stretch the item
+        // over adjacent lines (#486).
+        let fs_hint = if meta.font_size > 0.0 {
+            meta.font_size.abs()
+        } else {
+            (vp_loose.bottom - vp_loose.top).abs()
+        };
+        let (eff_top, eff_bottom) = clamped_vertical_bounds(vp_loose, vp_strict, fs_hint);
         self.vp_left = vp_loose.left;
         self.vp_right = vp_loose.right;
-        self.vp_top = vp_loose.top;
-        self.vp_bottom = vp_loose.bottom;
+        self.vp_top = eff_top;
+        self.vp_bottom = eff_bottom;
         self.last_char_right = vp_strict.right;
         self.last_char_loose_right = vp_loose.right;
         self.last_char_left = vp_strict.left;
@@ -3201,7 +3294,13 @@ impl SegmentBuilder {
         self.pending_space_generated = false;
         self.words.clear();
         self.word_has = false;
-        self.add_word_char(c, vp_loose);
+        let eff_word_box = RectF {
+            left: vp_loose.left,
+            top: eff_top,
+            right: vp_loose.right,
+            bottom: eff_bottom,
+        };
+        self.add_word_char(c, &eff_word_box);
         self.text_width = 0.0;
         if self.extract_text_metadata {
             self.char_codes.clear();
@@ -3300,11 +3399,21 @@ impl SegmentBuilder {
         recovered: bool,
     ) {
         self.text.push(c);
-        self.add_word_char(c, vp_loose);
+        // Same tall-glyph clamp as `start`: use the ink box for vertical
+        // expansion when the loose box is pathologically tall (#486).
+        let (eff_top, eff_bottom) =
+            clamped_vertical_bounds(vp_loose, vp_strict, self.font_size.abs());
+        let eff_word_box = RectF {
+            left: vp_loose.left,
+            top: eff_top,
+            right: vp_loose.right,
+            bottom: eff_bottom,
+        };
+        self.add_word_char(c, &eff_word_box);
         self.vp_left = self.vp_left.min(vp_loose.left);
         self.vp_right = self.vp_right.max(vp_loose.right);
-        self.vp_top = self.vp_top.min(vp_loose.top);
-        self.vp_bottom = self.vp_bottom.max(vp_loose.bottom);
+        self.vp_top = self.vp_top.min(eff_top);
+        self.vp_bottom = self.vp_bottom.max(eff_bottom);
         self.last_char_right = vp_strict.right;
         self.last_char_loose_right = vp_loose.right;
         self.last_char_left = vp_strict.left;
@@ -3777,6 +3886,78 @@ mod tests {
             height: h,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn dedup_keeps_adjacent_lines_despite_tall_loose_box() {
+        // #486: a 9pt hyphen in Cambria Math (Ascent 3116 / Descent -2463)
+        // stretches its line to 50.2pt tall, covering 78% of the line above
+        // with a 3.9x area ratio — just under the old cutoffs. Adjacent
+        // lines must survive; overpaint dedupe requires a shared baseline.
+        let mut items = vec![
+            ti(
+                "Based upon payment history, the otherwise applicable premium shall be modified.",
+                72.0,
+                83.9,
+                325.6,
+                10.0,
+            ),
+            ti(
+                "if there are no late fees in the previous 24 months. History is re-",
+                72.0,
+                74.4,
+                254.7,
+                50.2,
+            ),
+            ti("evaluated at each renewal.", 72.0, 104.7, 107.6, 10.0),
+        ];
+        dedup_overlapping_items(&mut items, false);
+        assert_eq!(
+            items.len(),
+            3,
+            "tall loose box must not drop the line above"
+        );
+    }
+
+    #[test]
+    fn dedup_same_line_allows_true_overpaint() {
+        // Identical boxes on the same baseline still dedupe.
+        assert!(dedup_same_line(
+            &ti("old", 0.0, 0.0, 10.0, 5.0),
+            &ti("new", 0.0, 0.0, 10.0, 5.0)
+        ));
+        // 10.4pt-apart baselines with 10pt-tall boxes do not share a line.
+        assert!(!dedup_same_line(
+            &ti("a", 72.0, 83.9, 325.6, 10.0),
+            &ti("b", 72.0, 74.4, 254.7, 50.2)
+        ));
+    }
+
+    #[test]
+    fn clamped_vertical_bounds_uses_ink_for_pathological_loose() {
+        let loose = RectF {
+            left: 0.0,
+            top: 74.4,
+            right: 10.0,
+            bottom: 124.6,
+        };
+        let strict = RectF {
+            left: 0.0,
+            top: 90.0,
+            right: 10.0,
+            bottom: 93.0,
+        };
+        let (top, bottom) = clamped_vertical_bounds(&loose, &strict, 9.0);
+        assert_eq!((top, bottom), (90.0, 93.0));
+        // Normal 9pt Helvetica loose height (~10pt) is untouched.
+        let normal_loose = RectF {
+            left: 0.0,
+            top: 83.9,
+            right: 10.0,
+            bottom: 93.9,
+        };
+        let (top, bottom) = clamped_vertical_bounds(&normal_loose, &strict, 9.0);
+        assert_eq!((top, bottom), (83.9, 93.9));
     }
 
     #[test]
