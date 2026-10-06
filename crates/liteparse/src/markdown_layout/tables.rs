@@ -523,6 +523,21 @@ fn cell_aligns_track(cell: &TableCell, track_range: (f32, f32)) -> bool {
     false
 }
 
+/// All column tracks overlapped by `cell` (range overlap with tolerance).
+/// A two-level header label centered over two sub-columns (e.g. a year
+/// spanning `Mill. u$s | Part.`) overlaps both tracks; binding it to a
+/// single nearest track mis-pairs the year with one sub-column (#487).
+/// Returns empty when the cell overlaps no track.
+fn spanning_track_indices(cell: &TableCell, track_ranges: &[(f32, f32)]) -> Vec<usize> {
+    let tol = TABLE_TRACK_TOLERANCE_PT;
+    track_ranges
+        .iter()
+        .enumerate()
+        .filter(|(_, (s, e))| cell.start_x <= e + tol && cell.end_x >= s - tol)
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// Pick the best matching column index for `cell`, preferring center
 /// containment, then start_x match, then end_x match. Returns `None` when no
 /// column aligns.
@@ -930,7 +945,7 @@ fn finalize_table_run(
     // 1 when the bold-first-row promotion consumes rows[0].
     let first_row = &rows[0].2;
     let bold_header_qualifies = absorbed.is_none() && bold_first_row_eligible;
-    let (run_start, header, row_start, interstitials) = match absorbed {
+    let (run_start, header, row_start, mut interstitials) = match absorbed {
         Some((hstart, header_texts, interstitials)) => {
             (hstart, Some(header_texts), 0, interstitials)
         }
@@ -947,10 +962,57 @@ fn finalize_table_run(
         ),
         None => (start_idx, None, 0, Vec::new()),
     };
-    let body_rows: Vec<Vec<Cell>> = rows[row_start..]
+    let mut body_rows: Vec<Vec<Cell>> = rows[row_start..]
         .iter()
         .map(|(_, line, cells)| cells.iter().map(|c| located_cell(c, line)).collect())
         .collect();
+    // Leading wrapped row labels: a single-cell interstitial directly above the
+    // first body row, aligned to the first column, is the first half of that
+    // row's label rather than a note (#487). E.g. "Productos primarios" above
+    // "pesqueros|663|..." becomes "Productos primarios pesqueros" instead of
+    // prose plus a "pesqueros" row.
+    if !interstitials.is_empty() && !body_rows.is_empty() && !body_rows[0].is_empty() {
+        let first_track_x = track_ranges.first().map(|r| r.0).unwrap_or(0.0);
+        let mut prepended: Vec<String> = Vec::new();
+        for inter in &interstitials {
+            let t = inter.text.trim();
+            if t.is_empty() || t.len() > 60 || t.ends_with('.') || t.ends_with(':') {
+                break;
+            }
+            let aligned = inter
+                .bbox
+                .as_ref()
+                .is_some_and(|b| (b.x - first_track_x).abs() <= TABLE_TRACK_TOLERANCE_PT.max(8.0));
+            if !aligned {
+                break;
+            }
+            prepended.push(t.to_string());
+        }
+        if !prepended.is_empty() {
+            let prefix = prepended.join(" ");
+            if let Some(first_cell) = body_rows[0].first_mut() {
+                if !first_cell.text.is_empty() {
+                    first_cell.text = format!("{prefix} {}", first_cell.text);
+                } else {
+                    first_cell.text = prefix.clone();
+                }
+                if let (Some(cb), Some(ib)) =
+                    (first_cell.bbox.as_mut(), interstitials[0].bbox.as_ref())
+                {
+                    // Expand the label box to cover the wrapped prefix.
+                    let x0 = cb.x.min(ib.x);
+                    let y0 = cb.y.min(ib.y);
+                    let x1 = (cb.x + cb.width).max(ib.x + ib.width);
+                    let y1 = (cb.y + cb.height).max(ib.y + ib.height);
+                    cb.x = x0;
+                    cb.y = y0;
+                    cb.width = (x1 - x0).max(0.0);
+                    cb.height = (y1 - y0).max(0.0);
+                }
+            }
+            interstitials.drain(..prepended.len().min(interstitials.len()));
+        }
+    }
     if header.is_none() && body_rows.len() < TABLE_MIN_ROWS {
         return None;
     }
@@ -1266,6 +1328,12 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> 
     let tracks_right_edge = track_max_x + TABLE_TRACK_TOLERANCE_PT.max(8.0);
 
     let mut j = start_idx + 1;
+    // Pending leading-label prefix: a single-cell line between two full rows
+    // that reads as the first half of the *next* row's label (e.g.
+    // "Exportaciones totales" above "pesqueras|895|...") must prefix the next
+    // row, not suffix the prior one (#487). Buffered here, prepended when the
+    // next full row is pushed.
+    let mut pending_prefix: Vec<TableCell> = Vec::new();
     while j < lines.len() {
         // Skip lines that sit entirely to the right of the table's column
         // tracks — almost certainly content from a different page column.
@@ -1276,6 +1344,10 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> 
             continue;
         }
         if !table_rows_adjacent(rows.last().unwrap().1, &lines[j]) {
+            // A pending leading label with no following row to attach to is
+            // dropped here (run ends); it stays outside the table rather than
+            // corrupting the last row.
+            pending_prefix.clear();
             break;
         }
         let mut cells = split_cells(&lines[j]);
@@ -1344,9 +1416,37 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> 
                     continue;
                 }
             }
-            // Wrap path (existing, unchanged): tight stack against prior
-            // row, multi-line cell continuation.
+            // Wrap path: tight stack against prior row, multi-line cell
+            // continuation — except a single-cell first-column line that reads
+            // as the *leading* half of the next row's label. When the next
+            // line is a full data row whose first cell is a single short word
+            // (e.g. "pesqueras") and the current line is longer (e.g.
+            // "Exportaciones totales"), buffer the current line as a prefix
+            // for the next row instead of suffixing the prior row (#487).
             if centroid_dy <= line_height * 1.5 && all_align_track {
+                let is_leading_label = cells.len() == 1
+                    && mapping.len() == 1
+                    && mapping[0] == 0
+                    && j + 1 < lines.len()
+                    && {
+                        let next_cells = split_cells(&lines[j + 1]);
+                        next_cells.len() == column_count
+                            && table_rows_adjacent(&lines[j], &lines[j + 1])
+                            && {
+                                let cur_text = cells[0].text.trim();
+                                let next_first = next_cells[0].text.trim();
+                                let next_words = next_first.split_whitespace().count();
+                                next_words == 1
+                                    && next_first.chars().count() <= 12
+                                    && cur_text.chars().count() > next_first.chars().count()
+                                    && !cur_text.ends_with('.')
+                            }
+                    };
+                if is_leading_label {
+                    pending_prefix.push(cells[0].clone());
+                    j += 1;
+                    continue;
+                }
                 let prev_cells = &mut rows.last_mut().unwrap().2;
                 for (c, &idx) in cells.iter().zip(&mapping) {
                     if !prev_cells[idx].text.is_empty() && !c.text.is_empty() {
@@ -1402,7 +1502,25 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> 
             .filter(|(c, r)| !cell_aligns_track(c, **r))
             .count();
         if misaligned > 1 {
+            pending_prefix.clear();
             break;
+        }
+        if !pending_prefix.is_empty() {
+            // Prepend buffered leading-label halves to this row's first cell.
+            let prefix = pending_prefix
+                .iter()
+                .map(|c| c.text.trim())
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !prefix.is_empty() && !cells.is_empty() {
+                if !cells[0].text.is_empty() {
+                    cells[0].text = format!("{prefix} {}", cells[0].text);
+                } else {
+                    cells[0].text = prefix;
+                }
+            }
+            pending_prefix.clear();
         }
         rows.push((j, &lines[j], cells));
         j += 1;
@@ -1577,14 +1695,27 @@ fn absorb_header_lines(
     let mut header = vec![Cell::default(); column_count];
     for (line_idx, cells) in &absorbed {
         for c in cells {
-            let Some(idx) = match_track_idx(c, track_ranges) else {
-                continue;
+            // A header cell spanning several tracks (a year centered over two
+            // sub-columns) names each covered column (#487). Replicate its
+            // text into every overlapped track so `2001` pairs with both
+            // `Mill. u$s` and `Part.` instead of binding to one neighbor.
+            // Single-track cells keep the nearest-track binding.
+            let covered = spanning_track_indices(c, track_ranges);
+            let indices: Vec<usize> = if covered.len() >= 2 {
+                covered
+            } else {
+                match match_track_idx(c, track_ranges) {
+                    Some(idx) => vec![idx],
+                    None => continue,
+                }
             };
-            if !header[idx].text.is_empty() && !c.text.is_empty() {
-                header[idx].text.push(' ');
+            for idx in indices {
+                if !header[idx].text.is_empty() && !c.text.is_empty() {
+                    header[idx].text.push(' ');
+                }
+                header[idx].text.push_str(&c.text);
+                Rect::extend(&mut header[idx].bbox, &cell_rect(c, &lines[*line_idx]));
             }
-            header[idx].text.push_str(&c.text);
-            Rect::extend(&mut header[idx].bbox, &cell_rect(c, &lines[*line_idx]));
         }
     }
     // A header reached via a skip is held to a coverage bar: it must name at
@@ -5253,6 +5384,28 @@ mod tests {
         v.iter()
             .map(|r| r.iter().map(|s| Cell::from(*s)).collect())
             .collect()
+    }
+
+    #[test]
+    fn spanning_year_header_covers_both_subcolumns() {
+        // #487: a year centered over `Mill. u$s | Part.` overlaps both tracks
+        // and must name both columns, not bind to the nearest one.
+        let tracks = vec![(152.0, 167.0), (179.0, 195.0)];
+        let year = TableCell {
+            start_x: 170.0,
+            end_x: 186.0,
+            text: "2001".to_string(),
+            bold: false,
+        };
+        assert_eq!(spanning_track_indices(&year, &tracks), vec![0, 1]);
+        // A plain sub-header covers a single track.
+        let mill = TableCell {
+            start_x: 152.0,
+            end_x: 167.0,
+            text: "Mill.".to_string(),
+            bold: false,
+        };
+        assert_eq!(spanning_track_indices(&mill, &tracks), vec![0]);
     }
 
     #[test]
