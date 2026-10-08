@@ -1428,6 +1428,18 @@ impl PyParseSession {
 // Main LiteParse class
 // ---------------------------------------------------------------------------
 
+fn parse_output_format_str(v: &str) -> Result<OutputFormat, String> {
+    match v {
+        "json" => Ok(OutputFormat::Json),
+        "text" => Ok(OutputFormat::Text),
+        "markdown" | "md" => Ok(OutputFormat::Markdown),
+        other => Err(format!(
+            "invalid output_format: {} (expected 'json', 'text', or 'markdown')",
+            other
+        )),
+    }
+}
+
 #[pyclass]
 struct LiteParse {
     inner: liteparse::parser::LiteParse,
@@ -1551,11 +1563,8 @@ impl LiteParse {
             cfg.dpi = v;
         }
         if let Some(v) = output_format {
-            cfg.output_format = match v.as_str() {
-                "text" => OutputFormat::Text,
-                "markdown" | "md" => OutputFormat::Markdown,
-                _ => OutputFormat::Json,
-            };
+            cfg.output_format = parse_output_format_str(v.as_str())
+                .map_err(pyo3::exceptions::PyValueError::new_err)?;
         }
         if let Some(v) = preserve_very_small_text {
             cfg.preserve_very_small_text = v;
@@ -1999,5 +2008,23 @@ mod tests {
         let py = PyVectorGraphics::from_rust(rust);
         assert_eq!(py.shapes[0].bbox.height, 4.0);
         assert_eq!(py.shapes[0].fill_color.as_deref(), Some("ffffffff"));
+    }
+
+    #[test]
+    fn output_format_validation() {
+        for (input, expected) in [
+            ("json", OutputFormat::Json),
+            ("text", OutputFormat::Text),
+            ("markdown", OutputFormat::Markdown),
+            ("md", OutputFormat::Markdown),
+        ] {
+            assert_eq!(parse_output_format_str(input).unwrap(), expected);
+        }
+
+        let err = parse_output_format_str("yaml").unwrap_err();
+        assert_eq!(
+            err,
+            "invalid output_format: yaml (expected 'json', 'text', or 'markdown')"
+        );
     }
 }

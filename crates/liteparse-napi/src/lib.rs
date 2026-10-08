@@ -20,13 +20,16 @@ impl LiteParse {
     /// Create a new LiteParse instance with optional configuration.
     /// Any fields not provided will use defaults.
     #[napi(constructor)]
-    pub fn new(config: Option<JsLiteParseConfig>) -> Self {
-        let rust_config = config.map(|c| c.into_rust()).unwrap_or_default();
+    pub fn new(config: Option<JsLiteParseConfig>) -> Result<Self> {
+        let rust_config = match config {
+            Some(c) => c.into_rust()?,
+            None => liteparse::config::LiteParseConfig::default(),
+        };
         let inner = liteparse::parser::LiteParse::new(rust_config.clone());
-        Self {
+        Ok(Self {
             inner,
             config: rust_config,
-        }
+        })
     }
 
     /// Parse a document. Accepts a file path (string) or raw PDF bytes (Buffer).
@@ -248,4 +251,22 @@ pub fn search_items(
         .iter()
         .map(JsTextItem::from_rust)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_rejects_invalid_output_format() {
+        let mut js = JsLiteParseConfig::from_rust(&liteparse::config::LiteParseConfig::default());
+        js.output_format = Some("yaml".to_string());
+        let err = LiteParse::new(Some(js)).err().expect("should return error");
+        assert!(err.to_string().contains("invalid outputFormat: yaml (expected 'json', 'text', or 'markdown')"));
+
+        let mut js_valid = JsLiteParseConfig::from_rust(&liteparse::config::LiteParseConfig::default());
+        js_valid.output_format = Some("md".to_string());
+        let parser = LiteParse::new(Some(js_valid)).expect("should succeed");
+        assert_eq!(parser.config.output_format, liteparse::config::OutputFormat::Markdown);
+    }
 }

@@ -151,7 +151,7 @@ pub struct JsCropBox {
 }
 
 impl JsLiteParseConfig {
-    pub fn into_rust(self) -> LiteParseConfig {
+    pub fn into_rust(self) -> napi::Result<LiteParseConfig> {
         let mut cfg = LiteParseConfig::default();
         if let Some(v) = self.ocr_language {
             cfg.ocr_language = v;
@@ -185,9 +185,15 @@ impl JsLiteParseConfig {
         }
         if let Some(v) = self.output_format {
             cfg.output_format = match v.as_str() {
+                "json" => OutputFormat::Json,
                 "text" => OutputFormat::Text,
                 "markdown" | "md" => OutputFormat::Markdown,
-                _ => OutputFormat::Json,
+                other => {
+                    return Err(napi::Error::from_reason(format!(
+                        "invalid outputFormat: {} (expected 'json', 'text', or 'markdown')",
+                        other
+                    )));
+                }
             };
         }
         if let Some(v) = self.preserve_very_small_text {
@@ -286,7 +292,7 @@ impl JsLiteParseConfig {
         if let Some(v) = self.extract_vector_graphics {
             cfg.extract_vector_graphics = v;
         }
-        cfg
+        Ok(cfg)
     }
 
     pub fn from_rust(cfg: &LiteParseConfig) -> Self {
@@ -1428,7 +1434,27 @@ mod tests {
         let mut js = JsLiteParseConfig::from_rust(&LiteParseConfig::default());
         assert_eq!(js.extract_text_metadata, Some(false));
         js.extract_text_metadata = Some(true);
-        assert!(js.into_rust().extract_text_metadata);
+        assert!(js.into_rust().unwrap().extract_text_metadata);
+    }
+
+    #[test]
+    fn output_format_validation() {
+        for (input, expected) in [
+            ("json", OutputFormat::Json),
+            ("text", OutputFormat::Text),
+            ("markdown", OutputFormat::Markdown),
+            ("md", OutputFormat::Markdown),
+        ] {
+            let mut js = JsLiteParseConfig::from_rust(&LiteParseConfig::default());
+            js.output_format = Some(input.to_string());
+            let cfg = js.into_rust().expect("should parse valid output format");
+            assert_eq!(cfg.output_format, expected);
+        }
+
+        let mut js = JsLiteParseConfig::from_rust(&LiteParseConfig::default());
+        js.output_format = Some("yaml".to_string());
+        let err = js.into_rust().unwrap_err();
+        assert!(err.to_string().contains("invalid outputFormat: yaml (expected 'json', 'text', or 'markdown')"));
     }
 
     #[test]
