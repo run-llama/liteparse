@@ -1043,6 +1043,8 @@ pub struct JsParseResult {
     pub total_pages: u32,
     pub pages: Vec<JsParsedPage>,
     pub page_errors: Vec<JsPageError>,
+    /// OCR failures in source page order. Empty when no OCR job failed.
+    pub ocr_errors: Vec<JsPageError>,
     pub text: String,
     pub images: Vec<JsExtractedImage>,
     pub screenshots: Vec<JsScreenshotResult>,
@@ -1337,6 +1339,14 @@ impl JsParseResult {
                 })
                 .collect(),
             text: result.text.clone(),
+            ocr_errors: result
+                .ocr_errors
+                .iter()
+                .map(|error| JsPageError {
+                    page_num: error.page_number,
+                    message: error.message.clone(),
+                })
+                .collect(),
             image_error_count: result.image_error_count,
             form_type: result.form_type,
             creator: result.creator.clone(),

@@ -464,6 +464,8 @@ export interface ParseResult {
   pages: ParsedPage[];
   /** Page-level PDFium extraction failures when tolerance is enabled. */
   pageErrors: Array<{ pageNum: number; message: string }>;
+  /** OCR failures in source page order. Empty when no OCR job failed. */
+  ocrErrors: Array<{ pageNum: number; message: string }>;
   text: string;
   /** Populated only when `extractImages` is true. */
   images: ExtractedImage[];
@@ -942,6 +944,7 @@ export function toParseResult(result: NativeParseResult): ParseResult {
     totalPages: result.totalPages,
     pages: result.pages.map(toPage),
     pageErrors: result.pageErrors ?? [],
+    ocrErrors: result.ocrErrors ?? [],
     text: result.text,
     images: (result.images ?? []).map(toImage),
     screenshots: (result.screenshots ?? []).map(toScreenshot),

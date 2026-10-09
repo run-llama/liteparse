@@ -270,6 +270,7 @@ export interface NativeParseResult {
   totalPages: number;
   pages: NativeParsedPage[];
   pageErrors: Array<{ pageNum: number; message: string }>;
+  ocrErrors: Array<{ pageNum: number; message: string }>;
   text: string;
   images: NativeExtractedImage[];
   screenshots: NativeScreenshotResult[];

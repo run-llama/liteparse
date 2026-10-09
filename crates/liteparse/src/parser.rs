@@ -7,6 +7,13 @@
 //! directly, or a caller sequencing the stages themselves could no longer
 //! reproduce `parse()`. `tests/stages_compose.rs` asserts that equivalence.
 
+#[cfg(target_arch = "wasm32")]
+use std::future::{Future, poll_fn};
+#[cfg(target_arch = "wasm32")]
+use std::pin::Pin;
+#[cfg(target_arch = "wasm32")]
+use std::task::Poll;
+
 use crate::config::{LiteParseConfig, parse_target_pages};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::conversion;
@@ -24,6 +31,47 @@ use crate::types::{
 };
 use pdfium::Library;
 
+#[cfg(target_arch = "wasm32")]
+type OcrJob = Pin<Box<dyn Future<Output = stages::PageOcrOutcome>>>;
+
+/// Receive a merged OCR page before document-wide layout is available.
+#[cfg(target_arch = "wasm32")]
+pub type OcrPageCallback<'a> = dyn Fn(&ParsedPage) -> Result<(), LiteParseError> + 'a;
+
+#[cfg(target_arch = "wasm32")]
+fn ocr_job(
+    raster: stages::OcrRaster,
+    engine: std::sync::Arc<dyn OcrEngine>,
+    language: String,
+) -> OcrJob {
+    Box::pin(async move {
+        stages::recognize(vec![raster], engine, &language, 1)
+            .await
+            .pop()
+            .expect("one OCR raster must produce one outcome")
+    })
+}
+
+/// Return the first OCR job that finishes. All pending jobs use the same
+/// caller waker, so one completed engine callback resumes the scheduler.
+#[cfg(target_arch = "wasm32")]
+async fn next_ocr_outcome(active: &mut Vec<OcrJob>) -> Option<stages::PageOcrOutcome> {
+    if active.is_empty() {
+        return None;
+    }
+    poll_fn(|context| {
+        for index in 0..active.len() {
+            if let Poll::Ready(outcome) = active[index].as_mut().poll(context) {
+                let completed_job = active.swap_remove(index);
+                drop(completed_job);
+                return Poll::Ready(Some(outcome));
+            }
+        }
+        Poll::Pending
+    })
+    .await
+}
+
 /// Result of parsing a document.
 pub struct ParseResult {
     /// Total number of pages in the source document, before `target_pages` or
@@ -34,6 +82,8 @@ pub struct ParseResult {
     /// Page-level PDFium extraction failures collected when
     /// `continue_on_page_error` is enabled.
     pub page_errors: Vec<PageError>,
+    /// OCR failures in source page order. Native text remains available.
+    pub ocr_errors: Vec<PageError>,
     /// Full document text, concatenated from all pages.
     pub text: String,
     /// Document outline (bookmarks) when present. Used by the markdown
@@ -353,7 +403,7 @@ impl LiteParse {
             std::collections::HashSet::new()
         };
         stages::OcrRenderOptions {
-            // One round per `num_workers` pages bounds raster memory.
+            // One bounded set per `num_workers` pages limits raster memory.
             max_rasters: self.config.num_workers.max(1),
             dpi: self.config.dpi,
             grayscale,
@@ -576,6 +626,31 @@ impl LiteParse {
             target_pages.as_deref(),
             self.config.max_pages,
             None,
+            #[cfg(target_arch = "wasm32")]
+            None,
+        )
+        .await
+    }
+
+    /// Parse PDF bytes and report each successfully recognized OCR page.
+    /// Callbacks run in completion order, on the caller thread. They contain
+    /// filtered text and boxes, but no document-wide blocks or markdown.
+    /// A callback error stops the parse. The final result remains authoritative.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn parse_input_with_ocr_page_callback(
+        &self,
+        input: PdfInput,
+        on_ocr_page: &OcrPageCallback<'_>,
+    ) -> Result<ParseResult, LiteParseError> {
+        self.validate_output_config()?;
+        let resolved = self.resolve_input(input).await?;
+        let target_pages = self.resolve_target_pages()?;
+        self.parse_resolved(
+            &resolved,
+            target_pages.as_deref(),
+            self.config.max_pages,
+            None,
+            Some(on_ocr_page),
         )
         .await
     }
@@ -615,6 +690,7 @@ impl LiteParse {
         target_pages: Option<&[u32]>,
         max_pages: usize,
         outline: Option<Vec<OutlineTarget>>,
+        #[cfg(target_arch = "wasm32")] on_ocr_page: Option<&OcrPageCallback<'_>>,
     ) -> Result<ParseResult, LiteParseError> {
         let log = |msg: &str| {
             if !self.config.quiet {
@@ -787,44 +863,133 @@ impl LiteParse {
             )
         };
         let mut pages = pages;
+        let mut ocr_errors = Vec::new();
         let t1 = web_time::Instant::now();
 
         if let Some(engine) = ocr_engine {
             let render_options = ocr_render_options;
             let ocr_input = repaired_input.as_ref().unwrap_or(validated_input);
-            let mut round_start = 0usize;
-            while round_start < pages.len() {
-                let (rendered, next_start) = {
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                let worker_count = self.config.num_workers.max(1);
+                let mut active_jobs = Vec::with_capacity(worker_count);
+                let mut merge = stages::OcrMergeState::default();
+                let page_indices: std::collections::HashMap<_, _> = pages
+                    .iter()
+                    .enumerate()
+                    .map(|(index, page)| (page.page_number, index))
+                    .collect();
+
+                // Fill the active slots in one document pass.
+                let (rendered, mut next_start) = {
                     let lib = Library::init();
                     let document = self.open_document(&lib, ocr_input, password)?;
-                    stages::render_for_ocr(&document, &pages, round_start, &render_options)?
+                    stages::render_for_ocr(&document, &pages, 0, &render_options)?
                     // `lib` drops here, releasing the PDFium lock before the
                     // engine's async recognition below.
                 };
-                round_start = next_start;
-                if rendered.is_empty() {
-                    // The scan reached the end without finding another page
-                    // that needs OCR.
-                    continue;
+                for raster in rendered {
+                    active_jobs.push(ocr_job(
+                        raster,
+                        engine.clone(),
+                        self.config.ocr_language.clone(),
+                    ));
                 }
-                // `OcrRaster::page_idx` is absolute, so the whole slice is
-                // passed regardless of where this round started.
-                let outcomes = stages::recognize(
-                    rendered,
-                    engine.clone(),
-                    &self.config.ocr_language,
-                    self.config.num_workers,
-                )
-                .await;
-                stages::merge_ocr(
-                    &mut pages,
-                    outcomes,
-                    self.config.ocr_failure_fatal,
-                    self.config.effective_emit_word_boxes(),
-                )?;
+
+                // Replace each completed job at once. The other jobs continue
+                // in their Web Workers or HTTP requests while PDFium prepares
+                // the replacement raster. There is no batch-wide wait for the
+                // slowest active job.
+                while let Some(outcome) = next_ocr_outcome(&mut active_jobs).await {
+                    let succeeded = outcome.error.is_none();
+                    if let Some(message) = &outcome.error {
+                        ocr_errors.push(PageError {
+                            page_number: outcome.page_number as u32,
+                            message: message.clone(),
+                        });
+                    }
+                    let index = page_indices.get(&outcome.page_number).ok_or_else(|| {
+                        LiteParseError::Other(format!(
+                            "No page for OCR outcome {}",
+                            outcome.page_number
+                        ))
+                    })?;
+                    let page = &mut pages[*index];
+                    merge.merge(
+                        std::slice::from_mut(page),
+                        vec![outcome],
+                        self.config.effective_emit_word_boxes(),
+                    )?;
+                    if succeeded && let Some(callback) = on_ocr_page {
+                        let mut preview = vec![page.clone()];
+                        stages::apply_content_filters(&mut preview, &self.content_filters());
+                        let preview = stages::project(preview);
+                        callback(&preview[0])?;
+                    }
+                    if next_start >= pages.len() {
+                        continue;
+                    }
+
+                    let mut refill_options = render_options.clone();
+                    refill_options.max_rasters = 1;
+                    let (rendered, resume_at) = {
+                        let lib = Library::init();
+                        let document = self.open_document(&lib, ocr_input, password)?;
+                        stages::render_for_ocr(&document, &pages, next_start, &refill_options)?
+                    };
+                    next_start = resume_at;
+                    for raster in rendered {
+                        active_jobs.push(ocr_job(
+                            raster,
+                            engine.clone(),
+                            self.config.ocr_language.clone(),
+                        ));
+                    }
+                }
+
+                merge.finish(self.config.ocr_failure_fatal)?;
+            }
+
+            // Keep the native path unchanged. Its Tokio scheduler already
+            // fills free worker slots inside each bounded raster set.
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let mut round_start = 0usize;
+                while round_start < pages.len() {
+                    let (rendered, next_start) = {
+                        let lib = Library::init();
+                        let document = self.open_document(&lib, ocr_input, password)?;
+                        stages::render_for_ocr(&document, &pages, round_start, &render_options)?
+                    };
+                    round_start = next_start;
+                    if rendered.is_empty() {
+                        continue;
+                    }
+                    let outcomes = stages::recognize(
+                        rendered,
+                        engine.clone(),
+                        &self.config.ocr_language,
+                        self.config.num_workers,
+                    )
+                    .await;
+                    ocr_errors.extend(outcomes.iter().filter_map(|outcome| {
+                        outcome.error.as_ref().map(|message| PageError {
+                            page_number: outcome.page_number as u32,
+                            message: message.clone(),
+                        })
+                    }));
+                    stages::merge_ocr(
+                        &mut pages,
+                        outcomes,
+                        self.config.ocr_failure_fatal,
+                        self.config.effective_emit_word_boxes(),
+                    )?;
+                }
             }
         }
         let t_ocr = web_time::Instant::now();
+        ocr_errors.sort_by_key(|error| error.page_number);
         log(&format!(
             "[liteparse] ocr: {:.1}ms",
             t_ocr.duration_since(t1).as_secs_f64() * 1000.0
@@ -890,6 +1055,7 @@ impl LiteParse {
             total_pages,
             pages: parsed_pages,
             page_errors,
+            ocr_errors,
             text: full_text,
             outline,
             images,
@@ -929,6 +1095,7 @@ impl LiteParse {
             total_pages,
             pages: parsed_pages,
             page_errors: Vec::new(),
+            ocr_errors: Vec::new(),
             text: full_text,
             outline,
             images: Vec::new(),
@@ -1040,6 +1207,7 @@ impl LiteParse {
             total_pages,
             pages: parsed_pages,
             page_errors: Vec::new(),
+            ocr_errors: Vec::new(),
             text: full_text,
             outline,
             images,
@@ -1205,6 +1373,8 @@ impl ParseSession {
                 Some(&targets),
                 targets.len(),
                 Some(self.outline.clone()),
+                #[cfg(target_arch = "wasm32")]
+                None,
             )
             .await?;
 

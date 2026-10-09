@@ -433,6 +433,8 @@ export interface JsParseResult {
   totalPages: number
   pages: Array<JsParsedPage>
   pageErrors: Array<JsPageError>
+  /** OCR failures in source page order. Empty when no OCR job failed. */
+  ocrErrors: Array<JsPageError>
   text: string
   images: Array<JsExtractedImage>
   screenshots: Array<JsScreenshotResult>

@@ -299,7 +299,7 @@ class DocumentMetadata:
 
 @dataclass
 class PageError:
-    """A page-level extraction failure skipped during a tolerant parse."""
+    """A source page number and its extraction or OCR failure."""
     page_num: int
     message: str
 
@@ -327,6 +327,8 @@ class ParseResult:
     doc_meta: Optional[DocumentMetadata] = None
     #: Raw XFA packets; present only when ``extract_xfa_packets=True``.
     xfa_packets: Optional[List[XfaPacket]] = None
+    #: OCR failures in source page order. Empty when no OCR job failed.
+    ocr_errors: List[PageError] = field(default_factory=list)
 
     @property
     def num_pages(self) -> int:

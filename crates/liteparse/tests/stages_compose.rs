@@ -50,6 +50,30 @@ fn corpus_pdfs() -> Vec<String> {
 /// size, so a raster routed to the wrong page is visible in the output.
 struct MockOcr;
 
+struct FailedOcr;
+
+impl OcrEngine for FailedOcr {
+    fn name(&self) -> &str {
+        "failed-test-engine"
+    }
+
+    fn recognize<'a, 'b: 'a, 'c: 'a>(
+        &'a self,
+        _image_data: &'c [u8],
+        _width: u32,
+        _height: u32,
+        _options: &'b OcrOptions,
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async { Err("test OCR failure".into()) })
+    }
+}
+
 impl OcrEngine for MockOcr {
     fn name(&self) -> &str {
         "mock"
@@ -99,6 +123,7 @@ struct Snapshot {
     total_pages: u32,
     pages: Vec<serde_json::Value>,
     page_errors: Vec<(u32, String)>,
+    ocr_errors: Vec<(u32, String)>,
     text: String,
     outline: String,
     images: Vec<serde_json::Value>,
@@ -125,6 +150,11 @@ fn snapshot(result: &ParseResult) -> Snapshot {
             .map(|e| (e.page_number, e.message.clone()))
             .collect(),
         text: result.text.clone(),
+        ocr_errors: result
+            .ocr_errors
+            .iter()
+            .map(|e| (e.page_number, e.message.clone()))
+            .collect(),
         outline: format!("{:?}", result.outline),
         images: result
             .images
@@ -285,6 +315,7 @@ async fn compose(parser: &LiteParse, input: PdfInput) -> ParseResult {
         image.bytes = bytes;
     }
     let mut pages: Vec<Page> = pages;
+    let mut ocr_errors = Vec::new();
 
     // ── OCR: render rounds (pdfium) → recognize (async) → merge (pure)
     if let Some(engine) = engine {
@@ -316,6 +347,15 @@ async fn compose(parser: &LiteParse, input: PdfInput) -> ParseResult {
             )
             .await;
             let outcomes = round_trip(outcomes, "Vec<PageOcrOutcome>");
+            ocr_errors.extend(outcomes.iter().filter_map(|outcome| {
+                outcome
+                    .error
+                    .as_ref()
+                    .map(|message| liteparse::types::PageError {
+                        page_number: outcome.page_number as u32,
+                        message: message.clone(),
+                    })
+            }));
             stages::merge_ocr(
                 &mut pages,
                 outcomes,
@@ -393,6 +433,7 @@ async fn compose(parser: &LiteParse, input: PdfInput) -> ParseResult {
         total_pages,
         pages: parsed,
         page_errors,
+        ocr_errors,
         text,
         outline,
         images,
@@ -552,8 +593,44 @@ async fn parse_equals_composed_stages_on_converted_image() {
     );
 }
 
-/// Orientation corrections applied at open, a page selection, and the
-/// content filters.
+/// Report OCR failures without changing the fatal policy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn parse_reports_ocr_errors_without_changing_failure_policy() {
+    if skip_integration() {
+        return;
+    }
+    for fatal in [false, true] {
+        let parser = LiteParse::new(LiteParseConfig {
+            ocr_enabled: true,
+            ocr_failure_fatal: fatal,
+            quiet: true,
+            ..LiteParseConfig::default()
+        })
+        .with_ocr_engine(Arc::new(FailedOcr));
+        let result = parser.parse(&fixture("receipt.png")).await;
+        if fatal {
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("test OCR failure")
+            );
+        } else {
+            let result = result.unwrap();
+            assert_eq!(result.pages.len(), 1);
+            assert!(result.page_errors.is_empty());
+            assert_eq!(result.ocr_errors.len(), 1);
+            assert_eq!(result.ocr_errors[0].page_number, 1);
+            assert_eq!(result.ocr_errors[0].message, "test OCR failure");
+            let composed = compose(&parser, PdfInput::Path(fixture("receipt.png"))).await;
+            assert_eq!(snapshot(&result), snapshot(&composed));
+        }
+    }
+}
+
+/// Check orientation changes and content filters on selected pages.
 #[tokio::test]
 #[serial]
 async fn parse_equals_composed_stages_with_orientation_selection_and_filters() {

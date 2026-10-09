@@ -430,6 +430,10 @@ def _convert_native_result(native_result: Any) -> ParseResult:
             for error in getattr(native_result, "page_errors", [])
         ],
         form_type=getattr(native_result, "form_type", None),
+        ocr_errors=[
+            PageError(page_num=error.page_num, message=error.message)
+            for error in getattr(native_result, "ocr_errors", [])
+        ],
         creator=getattr(native_result, "creator", None),
         producer=getattr(native_result, "producer", None),
         doc_meta=doc_meta,

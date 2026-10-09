@@ -77,6 +77,8 @@ pub(crate) struct ParseResultJson {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub page_errors: Vec<crate::types::PageError>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ocr_errors: Vec<crate::types::PageError>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<JsonImage>,
     #[serde(skip_serializing_if = "is_zero")]
     pub image_error_count: u32,
@@ -116,6 +118,7 @@ pub(crate) fn build_json(pages: &[ParsedPage], extract_text_metadata: bool) -> P
         total_pages: pages.len().min(u32::MAX as usize) as u32,
         images: Vec::new(),
         page_errors: Vec::new(),
+        ocr_errors: Vec::new(),
         image_error_count: 0,
         form_type: None,
         xfa_packets: None,
@@ -199,6 +202,7 @@ pub fn format_json_result(
         })
         .collect();
     json.page_errors = result.page_errors.clone();
+    json.ocr_errors = result.ocr_errors.clone();
     json.image_error_count = result.image_error_count;
     json.form_type = result.form_type;
     json.xfa_packets = result.xfa_packets.clone();
@@ -411,6 +415,10 @@ mod tests {
                 page_number: 3,
                 message: "page extraction failed".into(),
             }],
+            ocr_errors: vec![crate::types::PageError {
+                page_number: 2,
+                message: "OCR worker failed".into(),
+            }],
             text: String::new(),
             outline: vec![],
             images: vec![image],
@@ -443,6 +451,8 @@ mod tests {
         assert_eq!(value["image_error_count"], 2);
         assert_eq!(value["page_errors"][0]["page"], 3);
         assert_eq!(value["page_errors"][0]["message"], "page extraction failed");
+        assert_eq!(value["ocr_errors"][0]["page"], 2);
+        assert_eq!(value["ocr_errors"][0]["message"], "OCR worker failed");
     }
 
     #[test]

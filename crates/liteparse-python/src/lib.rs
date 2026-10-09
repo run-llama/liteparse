@@ -730,6 +730,9 @@ struct PyParseResult {
     image_error_count: u32,
     #[pyo3(get)]
     page_errors: Vec<PyPageError>,
+    /// OCR failures in source page order. Empty when no OCR job failed.
+    #[pyo3(get)]
+    ocr_errors: Vec<PyPageError>,
     #[pyo3(get)]
     form_type: Option<i32>,
     #[pyo3(get)]
@@ -880,6 +883,14 @@ impl PyParseResult {
                 })
                 .collect(),
             form_type: result.form_type,
+            ocr_errors: result
+                .ocr_errors
+                .into_iter()
+                .map(|error| PyPageError {
+                    page_num: error.page_number,
+                    message: error.message,
+                })
+                .collect(),
             creator: result.creator,
             producer: result.producer,
             doc_meta: result.doc_meta.map(Into::into),

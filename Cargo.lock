@@ -2024,6 +2024,7 @@ dependencies = [
  "crc32fast",
  "file-format",
  "flate2",
+ "futures-util",
  "image",
  "liteparse-pdfium",
  "liteparse-pdfium-sys",
