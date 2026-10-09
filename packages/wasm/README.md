@@ -75,7 +75,9 @@ All optional, camelCase:
 | `preserveVerySmallText` | `boolean` | `false` | Keep tiny text that's normally filtered |
 | `password` | `string` | — | Password for protected PDFs |
 | `quiet` | `boolean` | `false` | Suppress progress logging |
+| `numWorkers` | `number` | `1` | Maximum concurrent OCR calls |
 | `ocrEngine` | `object` | — | JS-side OCR engine (see below) |
+| `onOcrPage` | `(page: ParsedPage) => void` | — | Receive merged OCR text and boxes during `parse()` |
 
 ## OCR in the browser
 
@@ -85,6 +87,8 @@ The native HTTP-OCR and Tesseract backends are not available in the browser. To 
 const parser = new LiteParse({
   ocrEnabled: true,
   ocrLanguage: "eng",
+  // Use more than 1 only if the engine supports concurrent jobs.
+  numWorkers: 2,
   ocrEngine: {
     /**
      * @param imageData PNG-encoded image bytes
@@ -102,6 +106,56 @@ const parser = new LiteParse({
   },
 });
 ```
+
+LiteParse keeps at most `numWorkers` calls to `recognize` active. When one call
+finishes, LiteParse prepares and starts the next page without waiting for the
+other calls. An OCR engine can send the calls to a Web Worker pool or to
+concurrent HTTP requests. Results stay assigned to their source pages when
+jobs finish out of order. Active calls can keep up to `numWorkers` rendered
+page rasters in memory, so use a small value for high-DPI documents.
+
+### Receive OCR pages before parsing ends
+
+LiteParse merges each completed OCR result into its page on the caller thread.
+Set `onOcrPage` to receive that page's text and boxes before `parse()` returns:
+
+```typescript
+import type { ParsedPage } from "@llamaindex/liteparse-wasm";
+
+const previews = new Map<number, ParsedPage>();
+const parser = new LiteParse({
+  ocrEnabled: true,
+  ocrEngine,
+  numWorkers: 4,
+  onOcrPage(page) {
+    previews.set(page.pageNum, page);
+    // Schedule a UI update here. Keep this callback short and synchronous.
+  },
+});
+const result = await parser.parse(pdfBytes);
+// Replace the previews with the final pages, which include document layout.
+previews.clear();
+for (const page of result.pages) previews.set(page.pageNum, page);
+```
+
+The callback runs once for each successful OCR page, including an empty OCR
+result. It does not run for failed OCR jobs or pages that do not need OCR.
+Calls can arrive out of order. Use the source `pageNum`, not the callback order.
+Early delivery also works with `numWorkers: 1`.
+
+The page contains merged, filtered text and boxes. It has no `blocks` or
+`complexity`, and its `markdown` is empty. Document-wide layout still runs at
+the end. Treat these pages as previews and use the final result for complete
+output. Changes to a JS preview do not change the final Rust result.
+
+Callbacks run synchronously on the caller thread. Their return values are
+ignored; LiteParse does not await them. A thrown exception rejects `parse()`.
+A later parse error can also invalidate earlier previews. The caller must
+handle rejection and manage its own OCR worker pool. The callback applies to
+`parse()` only, not to `ParseSession.nextBatch()`.
+
+Without a callback, LiteParse still merges each OCR page as it finishes, but
+does not create or serialize preview pages. The OCR failure policy is unchanged.
 
 ## Building from source
 

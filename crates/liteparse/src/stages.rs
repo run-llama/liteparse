@@ -51,8 +51,8 @@ pub use crate::layout::{LayoutBlock, LayoutCell};
 pub use crate::markdown_layout::{Block, Cell, PositionedBlock, SpanCell, render_blocks};
 pub use crate::ocr::OcrResult;
 pub use crate::ocr_merge::{
-    ComplexityReason, LayoutComplexityReason, LayoutComplexityStats, OcrRaster, OcrRenderOptions,
-    PageComplexityStats, PageOcrOutcome,
+    ComplexityReason, LayoutComplexityReason, LayoutComplexityStats, OcrMergeState, OcrRaster,
+    OcrRenderOptions, PageComplexityStats, PageOcrOutcome,
 };
 pub use crate::parser::ScreenshotResult;
 /// The PDFium handle types the pdfium-bound stages take. Re-exported so a
@@ -250,6 +250,7 @@ pub async fn recognize(
 /// attach a word box, and it has to agree with what extraction used or a run
 /// ends up with word boxes on native text only. See
 /// [`ExtractionOutputOptions::emit_word_boxes`](crate::extract::ExtractionOutputOptions).
+/// Use [`OcrMergeState`] to merge outcomes as they arrive with one failure check.
 pub fn merge_ocr(
     pages: &mut [Page],
     outcomes: Vec<PageOcrOutcome>,
