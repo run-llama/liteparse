@@ -538,6 +538,45 @@ fn spanning_track_indices(cell: &TableCell, track_ranges: &[(f32, f32)]) -> Vec<
         .collect()
 }
 
+/// Whether a header cell may name every track in `covered` instead of binding
+/// to one. Bare range overlap is not enough: an ordinary one-line header that
+/// runs a few points past its column would otherwise be copied into the
+/// neighbor. Replication needs a two-layer header shape: short single-token
+/// text (a year like `2001`, not prose), a cell straddling each internal gap,
+/// and a center near the spanned band, plus at least two absorbed header
+/// lines so a lone wide header never replicates.
+fn spanning_header_eligible(
+    cell: &TableCell,
+    covered: &[usize],
+    track_ranges: &[(f32, f32)],
+    header_lines: usize,
+) -> bool {
+    if covered.len() < 2 || header_lines < 2 {
+        return false;
+    }
+    for pair in covered.windows(2) {
+        if pair[1] != pair[0] + 1 {
+            return false;
+        }
+    }
+    let text = cell.text.trim();
+    if text.is_empty() || text.chars().count() > 10 || text.chars().any(|c| c.is_whitespace()) {
+        return false;
+    }
+    let tol = TABLE_TRACK_TOLERANCE_PT;
+    for pair in covered.windows(2) {
+        let (_, e0) = track_ranges[pair[0]];
+        let (s1, _) = track_ranges[pair[1]];
+        if !(cell.start_x <= s1 + tol && cell.end_x >= e0 - tol) {
+            return false;
+        }
+    }
+    let band_start = track_ranges[covered[0]].0;
+    let band_end = track_ranges[covered[covered.len() - 1]].1;
+    let center = (cell.start_x + cell.end_x) * 0.5;
+    (center - (band_start + band_end) * 0.5).abs() <= tol.max(8.0)
+}
+
 /// Pick the best matching column index for `cell`, preferring center
 /// containment, then start_x match, then end_x match. Returns `None` when no
 /// column aligns.
@@ -976,7 +1015,15 @@ fn finalize_table_run(
         let mut prepended: Vec<String> = Vec::new();
         for inter in &interstitials {
             let t = inter.text.trim();
-            if t.is_empty() || t.len() > 60 || t.ends_with('.') || t.ends_with(':') {
+            if t.is_empty()
+                || t.len() > 60
+                || t.ends_with('.')
+                || t.ends_with(':')
+                || t.ends_with(';')
+                || t.ends_with(',')
+                || is_value_like(t)
+                || !is_alpha_dominant(t)
+            {
                 break;
             }
             let aligned = inter
@@ -1427,6 +1474,7 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> 
                 let is_leading_label = cells.len() == 1
                     && mapping.len() == 1
                     && mapping[0] == 0
+                    && pending_prefix.len() < 2
                     && j + 1 < lines.len()
                     && {
                         let next_cells = split_cells(&lines[j + 1]);
@@ -1439,7 +1487,15 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> 
                                 next_words == 1
                                     && next_first.chars().count() <= 12
                                     && cur_text.chars().count() > next_first.chars().count()
+                                    && cur_text.chars().count() <= 60
                                     && !cur_text.ends_with('.')
+                                    && !cur_text.ends_with(':')
+                                    && !cur_text.ends_with(';')
+                                    && !cur_text.ends_with(',')
+                                    && is_alpha_dominant(cur_text)
+                                    && !is_value_like(cur_text)
+                                    && is_alpha_dominant(next_first)
+                                    && !is_value_like(next_first)
                             }
                     };
                 if is_leading_label {
@@ -1696,12 +1752,13 @@ fn absorb_header_lines(
     for (line_idx, cells) in &absorbed {
         for c in cells {
             // A header cell spanning several tracks (a year centered over two
-            // sub-columns) names each covered column (#487). Replicate its
-            // text into every overlapped track so `2001` pairs with both
-            // `Mill. u$s` and `Part.` instead of binding to one neighbor.
-            // Single-track cells keep the nearest-track binding.
+            // sub-columns) names each covered column (#487), but only when it
+            // reads as a two-layer spanning label. An ordinary header that
+            // runs past its column keeps the single nearest-track binding.
             let covered = spanning_track_indices(c, track_ranges);
-            let indices: Vec<usize> = if covered.len() >= 2 {
+            let indices: Vec<usize> = if covered.len() >= 2
+                && spanning_header_eligible(c, &covered, track_ranges, absorbed.len())
+            {
                 covered
             } else {
                 match match_track_idx(c, track_ranges) {
@@ -5406,6 +5463,66 @@ mod tests {
             bold: false,
         };
         assert_eq!(spanning_track_indices(&mill, &tracks), vec![0]);
+    }
+
+    #[test]
+    fn year_header_is_eligible_to_name_both_subcolumns() {
+        // #487/#490 review: a year centered over two sub-columns replicates,
+        // but only inside a real two-layer header.
+        let tracks = vec![(152.0, 167.0), (179.0, 195.0)];
+        let year = TableCell {
+            start_x: 170.0,
+            end_x: 186.0,
+            text: "2001".to_string(),
+            bold: false,
+        };
+        let covered = spanning_track_indices(&year, &tracks);
+        assert_eq!(covered, vec![0, 1]);
+        assert!(spanning_header_eligible(&year, &covered, &tracks, 2));
+    }
+
+    #[test]
+    fn single_header_line_never_replicates() {
+        // Review finding: an ordinary one-line header that runs past its
+        // column must not be copied into the neighbor.
+        let tracks = vec![(152.0, 167.0), (179.0, 195.0)];
+        let year = TableCell {
+            start_x: 170.0,
+            end_x: 186.0,
+            text: "2001".to_string(),
+            bold: false,
+        };
+        let covered = spanning_track_indices(&year, &tracks);
+        assert!(!spanning_header_eligible(&year, &covered, &tracks, 1));
+    }
+
+    #[test]
+    fn wide_single_token_header_stays_in_its_column() {
+        // Left-aligned "Revenue" bleeding 5pt into the next track is centered
+        // in its own column, not over the gap, so it keeps one binding.
+        let tracks = vec![(100.0, 150.0), (160.0, 200.0)];
+        let cell = TableCell {
+            start_x: 100.0,
+            end_x: 165.0,
+            text: "Revenue".to_string(),
+            bold: false,
+        };
+        let covered = spanning_track_indices(&cell, &tracks);
+        assert_eq!(covered, vec![0, 1]);
+        assert!(!spanning_header_eligible(&cell, &covered, &tracks, 2));
+    }
+
+    #[test]
+    fn prose_header_never_replicates() {
+        let tracks = vec![(100.0, 150.0), (160.0, 200.0)];
+        let cell = TableCell {
+            start_x: 95.0,
+            end_x: 205.0,
+            text: "Clasificacion por grandes rubros".to_string(),
+            bold: false,
+        };
+        let covered = spanning_track_indices(&cell, &tracks);
+        assert!(!spanning_header_eligible(&cell, &covered, &tracks, 2));
     }
 
     #[test]
