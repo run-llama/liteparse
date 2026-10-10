@@ -2961,17 +2961,43 @@ fn prescan_page_batched(
     (skip_invisible, garbage_fonts)
 }
 
-/// Maximum loose-box height as a multiple of the font size before the
-/// vertical extent is treated as pathological. A single glyph in a font
+/// Rendered font height for the tall-glyph clamp: raw text-space size scaled
+/// by the char matrix, falling back to the loose-box height (which disables
+/// the clamp) when no usable size exists. Comparing a raw size against
+/// device-space boxes misfires wherever the text matrix scales the font.
+fn clamp_hint_height(raw_size: f32, scale_y: Option<f32>, loose_h: f32) -> f32 {
+    if raw_size > 0.0 {
+        raw_size.abs() * scale_y.unwrap_or(1.0)
+    } else {
+        loose_h.abs()
+    }
+}
+
+/// Maximum loose-box height as a multiple of the RENDERED font height before
+/// the vertical extent is treated as pathological. A single glyph in a font
 /// with very tall vertical metrics (e.g. Cambria Math
 /// `/Ascent 3116 /Descent -2463` makes a 9pt hyphen 50pt tall) would
 /// otherwise stretch its whole line over adjacent lines (#486). When
 /// triggered, vertical expansion uses the ink (strict) box instead —
 /// the same "judge by ink box, not loose box" move as #485 for clipping.
-fn clamped_vertical_bounds(vp_loose: &RectF, vp_strict: &RectF, font_size: f32) -> (f32, f32) {
+///
+/// `rendered_font_height` must be in the same coordinate space as the boxes
+/// (raw font size scaled by the char matrix): comparing a text-space size
+/// against device-space boxes misfires on any PDF that scales fonts through
+/// the text matrix (e.g. `1 Tf` with a scaled Tm renders ~21pt boxes from a
+/// size-1 font and would clamp every line).
+fn clamped_vertical_bounds(
+    vp_loose: &RectF,
+    vp_strict: &RectF,
+    rendered_font_height: f32,
+) -> (f32, f32) {
     let loose_h = (vp_loose.bottom - vp_loose.top).abs();
     let strict_h = (vp_strict.bottom - vp_strict.top).abs();
-    if font_size > 0.0 && loose_h > 2.5 * font_size && strict_h > 0.0 && strict_h < loose_h {
+    if rendered_font_height > 0.0
+        && loose_h > 2.5 * rendered_font_height
+        && strict_h > 0.0
+        && strict_h < loose_h
+    {
         (vp_strict.top, vp_strict.bottom)
     } else {
         (vp_loose.top, vp_loose.bottom)
@@ -3262,12 +3288,11 @@ impl SegmentBuilder {
         self.text.push(c);
         // Clamp pathological loose vertical extent (e.g. Cambria Math tall
         // metrics) to the ink box so one glyph doesn't stretch the item
-        // over adjacent lines (#486).
-        let fs_hint = if meta.font_size > 0.0 {
-            meta.font_size.abs()
-        } else {
-            (vp_loose.bottom - vp_loose.top).abs()
-        };
+        // over adjacent lines (#486). The comparison height is the RENDERED
+        // size (raw size scaled by the char matrix): a raw text-space size
+        // would misfire wherever the text matrix scales the font.
+        let fs_hint =
+            clamp_hint_height(meta.font_size, meta.scale_y, vp_loose.bottom - vp_loose.top);
         let (eff_top, eff_bottom) = clamped_vertical_bounds(vp_loose, vp_strict, fs_hint);
         self.vp_left = vp_loose.left;
         self.vp_right = vp_loose.right;
@@ -3399,10 +3424,12 @@ impl SegmentBuilder {
         recovered: bool,
     ) {
         self.text.push(c);
-        // Same tall-glyph clamp as `start`: use the ink box for vertical
-        // expansion when the loose box is pathologically tall (#486).
-        let (eff_top, eff_bottom) =
-            clamped_vertical_bounds(vp_loose, vp_strict, self.font_size.abs());
+        // Same tall-glyph clamp as `start`: compare against the rendered
+        // font height (first char's size scaled by the char matrix), so
+        // text-matrix-scaled fonts are judged in the boxes' own space (#486).
+        // Falls back to the raw size exactly as before when no scale was seen.
+        let rendered = self.font_height.unwrap_or(self.font_size.abs());
+        let (eff_top, eff_bottom) = clamped_vertical_bounds(vp_loose, vp_strict, rendered);
         let eff_word_box = RectF {
             left: vp_loose.left,
             top: eff_top,
@@ -3958,6 +3985,22 @@ mod tests {
         };
         let (top, bottom) = clamped_vertical_bounds(&normal_loose, &strict, 9.0);
         assert_eq!((top, bottom), (83.9, 93.9));
+    }
+
+    #[test]
+    fn clamp_hint_uses_rendered_size_in_the_boxes_space() {
+        // sample.pdf scales a size-1 font to ~21pt boxes through the text
+        // matrix: the raw size must be scaled before comparing, or every
+        // line clamps and the line fragments (#489 broke
+        // test_extract_blocks_carries_geometry_without_changing_markdown).
+        assert_eq!(clamp_hint_height(1.0, Some(21.0), 21.0), 21.0);
+        // #486: unscaled 9pt font, no scaling to apply.
+        assert_eq!(clamp_hint_height(9.0, Some(1.0), 50.2), 9.0);
+        // Unknown scale keeps the old raw-size behavior.
+        assert_eq!(clamp_hint_height(9.0, None, 50.2), 9.0);
+        // Unavailable size falls back to the loose height (never clamps).
+        assert_eq!(clamp_hint_height(0.0, Some(21.0), 21.0), 21.0);
+        assert_eq!(clamp_hint_height(-5.0, Some(2.0), 21.0), 21.0);
     }
 
     #[test]
