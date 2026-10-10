@@ -75,6 +75,7 @@ All optional, camelCase:
 | `preserveVerySmallText` | `boolean` | `false` | Keep tiny text that's normally filtered |
 | `password` | `string` | — | Password for protected PDFs |
 | `quiet` | `boolean` | `false` | Suppress progress logging |
+| `numWorkers` | `number` | `1` | Maximum concurrent OCR calls |
 | `ocrEngine` | `object` | — | JS-side OCR engine (see below) |
 
 ## OCR in the browser
@@ -87,6 +88,8 @@ To use OCR, set `ocrEnabled: true` and supply an `ocrEngine` object with a
 const parser = new LiteParse({
   ocrEnabled: true,
   ocrLanguage: "eng",
+  // Use more than 1 only if the engine supports concurrent jobs.
+  numWorkers: 2,
   ocrEngine: {
     /**
      * @param imageData PNG-encoded image bytes
@@ -104,6 +107,18 @@ const parser = new LiteParse({
   },
 });
 ```
+
+LiteParse keeps at most `numWorkers` calls to `recognize` active. When one call
+finishes, LiteParse prepares and starts the next page without waiting for the
+other calls. An OCR engine can send the calls to a Web Worker pool or to
+concurrent HTTP requests. Results stay assigned to their source pages when
+jobs finish out of order. Active calls can keep up to `numWorkers` rendered
+page rasters in memory, so use a small value for high-DPI documents.
+
+A failed `recognize` call only affects its own page. With `ocrFailureFatal:
+true` (the default), `parse()` rejects only when every OCR call failed and at
+least one failed page had little native text. If parsing fails, OCR calls that
+have already started can continue.
 
 ## Building from source
 

@@ -228,7 +228,8 @@ pub fn render_for_ocr(
 }
 
 /// Run an [`OcrEngine`] over rasters, at most `num_workers` at a time. Pure
-/// recognition; failures are per-outcome, not errors. A caller with its own
+/// recognition; failures are per-outcome, not errors.
+/// Results are returned in input order on every target. A caller with its own
 /// OCR service can skip this and build [`PageOcrOutcome`]s directly from
 /// the [`OcrRaster`] facts and its engine's word boxes (raster pixel space).
 pub async fn recognize(
@@ -250,14 +251,12 @@ pub async fn recognize(
 /// [`OcrWindow::render_next`], which renders no more pages than there are
 /// free slots.
 ///
-/// Browser WASM has no blocking thread pool, so `parse` uses [`recognize`]
-/// there. This type exists only on native targets.
-#[cfg(not(target_arch = "wasm32"))]
+/// Native recognition runs on Tokio blocking threads.
+/// On WASM, recognition futures can await JavaScript promises.
 pub struct OcrWindow {
     inner: ocr_merge::OcrTaskPool,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl OcrWindow {
     /// Start a window that will run at most `num_workers` recognitions at once.
     pub fn new(engine: Arc<dyn OcrEngine>, language: &str, num_workers: usize) -> Self {
@@ -298,6 +297,12 @@ impl OcrWindow {
     /// `false` without waiting when nothing is in flight.
     pub async fn complete_one(&mut self) -> bool {
         self.inner.complete_one().await
+    }
+
+    /// Remove completed outcomes in submission order. Later calls to `finish`
+    /// return only outcomes that have not been removed.
+    pub fn take_completed(&mut self) -> Vec<PageOcrOutcome> {
+        self.inner.take_completed()
     }
 
     /// Start recognition for one raster, first waiting for a free slot if the

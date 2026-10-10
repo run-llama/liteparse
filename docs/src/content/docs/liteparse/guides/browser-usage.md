@@ -48,7 +48,6 @@ console.log(result.pages[0]);
 - **DOCX/XLSX/PPTX conversion** — requires LibreOffice, which isn't available in the browser
 - **Built-in Tesseract or HTTP OCR** — use the custom `ocrEngine` interface instead
 - **Screenshots** — not available in the WASM build
-- **`numWorkers`** — parsing is single-threaded in WASM; the option is not exposed
 - **`imageOutputDir`** — there is no filesystem to write to. Use `extractImages` and read the bytes from the result instead
 
 ## OCR in the browser
@@ -59,6 +58,8 @@ The native Tesseract and HTTP OCR backends are not available in WASM. To use OCR
 const parser = new LiteParse({
   ocrEnabled: true,
   ocrLanguage: "eng",
+  // Use more than 1 only if the engine supports concurrent jobs.
+  numWorkers: 2,
   ocrEngine: {
     /**
      * @param imageData PNG-encoded image bytes
@@ -79,6 +80,18 @@ const parser = new LiteParse({
 
 This lets you plug in any OCR implementation — a Web Worker running tesseract.js, a cloud OCR API, or anything else that returns text with bounding boxes.
 
+LiteParse keeps at most `numWorkers` calls to `recognize` active. When one call
+finishes, LiteParse prepares and starts the next page without waiting for the
+other calls. An OCR engine can send the calls to a Web Worker pool or to
+concurrent HTTP requests. Results stay assigned to their source pages when
+jobs finish out of order. Active calls can keep up to `numWorkers` rendered
+page rasters in memory, so use a small value for high-DPI documents.
+
+PDF parsing and rendering remain single-threaded in WASM. `numWorkers`
+defaults to `1` and limits concurrent OCR calls. LiteParse does not create
+Web Workers. To process OCR jobs in parallel, supply an engine that supports
+concurrent jobs.
+
 ## Config options
 
 All optional, camelCase:
@@ -88,6 +101,7 @@ All optional, camelCase:
 | `ocrLanguage` | `string` | `"eng"` | Language code passed to the OCR engine |
 | `ocrEnabled` | `boolean` | `false` | Run OCR on text-sparse pages. Off by default in WASM — there is no built-in engine, so this does nothing without `ocrEngine` |
 | `ocrEngine` | `object` | — | Custom JS-side OCR engine (see above) |
+| `numWorkers` | `number` | `1` | Maximum concurrent OCR calls |
 | `ocrFailureFatal` | `boolean` | `true` | When `false`, OCR failures return partial results instead of throwing |
 | `ocrHedgeDelaysMs` | `number[]` | `[]` | Request-hedging schedule for a remote `ocrEngine` |
 | `maxPages` | `number` | `1000` | Stop after this many pages |

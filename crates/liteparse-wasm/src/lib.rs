@@ -86,6 +86,9 @@ pub struct LiteParseConfig {
     preserve_very_small_text: Option<bool>,
     password: Option<String>,
     quiet: Option<bool>,
+    /// Maximum number of concurrent `ocrEngine.recognize` calls. Each call
+    /// also keeps one rendered page raster in memory. Default 1.
+    num_workers: Option<usize>,
     emit_word_boxes: Option<bool>,
     /// Restrict output to a page sub-region. Each field is the fraction of the
     /// page cropped from that side; a text item survives only if it lies
@@ -277,7 +280,10 @@ impl LiteParseConfig {
         if let Some(v) = self.extract_blocks {
             cfg.extract_blocks = v;
         }
-        cfg.num_workers = 1;
+        // Default to one OCR call at a time. The caller can increase this
+        // limit when its engine supports concurrent jobs.
+        // Treat zero as one. Engine capacity is not detected automatically.
+        cfg.num_workers = self.num_workers.unwrap_or(1).max(1);
         Ok(cfg)
     }
 
@@ -322,6 +328,7 @@ impl LiteParseConfig {
             preserve_very_small_text: Some(cfg.preserve_very_small_text),
             password: cfg.password.clone(),
             quiet: Some(cfg.quiet),
+            num_workers: Some(cfg.num_workers),
             emit_word_boxes: Some(cfg.emit_word_boxes),
             crop_box: cfg.crop_box.map(|c| CropBox {
                 top: c.top,

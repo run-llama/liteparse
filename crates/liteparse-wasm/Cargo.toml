@@ -28,6 +28,9 @@ console_error_panic_hook = { version = "0.1", optional = true }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 pdfium-sys = { package = "liteparse-pdfium-sys", version = "1.11.0", path = "../pdfium-sys" }
 
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
 [features]
 default = ["panic_hook"]
 panic_hook = ["dep:console_error_panic_hook"]

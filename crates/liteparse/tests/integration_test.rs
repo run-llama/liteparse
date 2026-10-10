@@ -1290,6 +1290,101 @@ async fn test_orientation_correction_rejects_non_cardinal_angle() {
     }
 }
 
+/// Fails recognition for the listed raster widths; succeeds otherwise.
+struct FailingWidthsEngine {
+    fail: Vec<u32>,
+}
+
+impl liteparse::ocr::OcrEngine for FailingWidthsEngine {
+    fn name(&self) -> &str {
+        "failing-widths"
+    }
+    fn recognize<'a, 'b: 'a, 'c: 'a>(
+        &'a self,
+        _pixels: &'c [u8],
+        width: u32,
+        _height: u32,
+        _options: &'b liteparse::ocr::OcrOptions,
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Vec<liteparse::ocr::OcrResult>,
+                        Box<dyn std::error::Error + Send + Sync>,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            if self.fail.contains(&width) {
+                return Err("EXPECTED_OCR_FAILURE".into());
+            }
+            Ok(vec![liteparse::ocr::OcrResult {
+                text: format!("SUCCESS_{width}"),
+                bbox: [4.0, 4.0, 100.0, 24.0],
+                confidence: 0.99,
+                polygon: None,
+            }])
+        })
+    }
+}
+
+async fn parse_with_failing_widths(
+    fail: &[u32],
+    fatal: bool,
+) -> Result<liteparse::ParseResult, liteparse::LiteParseError> {
+    LiteParse::new(LiteParseConfig {
+        ocr_enabled: true,
+        num_workers: 2,
+        dpi: 72.0,
+        quiet: true,
+        ocr_failure_fatal: fatal,
+        ..Default::default()
+    })
+    .with_ocr_engine(std::sync::Arc::new(FailingWidthsEngine {
+        fail: fail.to_vec(),
+    }))
+    .parse_input(PdfInput::Bytes(blank_pdf(&[
+        (200, 200),
+        (201, 200),
+        (202, 200),
+    ])))
+    .await
+}
+
+// `ocr_failure_fatal` only aborts when *every* OCR task failed. One failed
+// page among successes must never abort the parse, regardless of the setting
+// or of the order in which concurrent recognitions complete.
+#[tokio::test]
+#[serial]
+async fn test_ocr_partial_failure_is_never_fatal() {
+    for fatal in [true, false] {
+        let result = parse_with_failing_widths(&[201], fatal)
+            .await
+            .unwrap_or_else(|e| panic!("fatal={fatal}: one failed page aborted the parse: {e}"));
+        assert_eq!(result.pages.len(), 3);
+        assert!(result.pages[0].text.contains("SUCCESS_200"));
+        assert!(result.pages[1].text.trim().is_empty());
+        assert!(result.pages[2].text.contains("SUCCESS_202"));
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_ocr_systemic_failure_respects_fatal_flag() {
+    let all = [200, 201, 202];
+    match parse_with_failing_widths(&all, true).await {
+        Err(err) => assert!(err.to_string().contains("EXPECTED_OCR_FAILURE")),
+        Ok(_) => panic!("every page failing OCR must abort when fatal"),
+    }
+
+    let result = parse_with_failing_widths(&all, false)
+        .await
+        .expect("non-fatal mode must return partial results");
+    assert_eq!(result.pages.len(), 3);
+}
+
 async fn diagonal_column_count(config: LiteParseConfig) -> usize {
     let stats = LiteParse::new(LiteParseConfig {
         quiet: true,

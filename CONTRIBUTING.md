@@ -113,6 +113,17 @@ npm run build:nodejs   # Node.js target
 
 PDFium is statically linked into the `.wasm` binary — the output in `packages/wasm/pkg/` is fully self-contained.
 
+Run the WASM OCR stage tests from the repository root:
+
+```bash
+NODE_PATH="$PWD/scripts/browser-compat/stage-test-support" \
+  wasm-pack test --node crates/liteparse-wasm --test ocr_stages
+```
+
+These tests run the WASM recognition stage in Node.js. They use a mock OCR
+engine and control job completion without timers. The test support module
+resolves linked WASI imports and fails if a test calls one of them.
+
 ## Development Workflow
 
 ### Testing Local Changes

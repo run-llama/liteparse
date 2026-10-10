@@ -4,6 +4,11 @@ use std::sync::Arc;
 use crate::error::LiteParseError;
 use crate::ocr::{OcrEngine, OcrOptions, OcrResult};
 use crate::types::{CutAxis, Page, ParsedPage, Rect, Region, RegionKind, TextItem, WordBox};
+#[cfg(target_arch = "wasm32")]
+use futures_util::{
+    FutureExt,
+    stream::{FuturesUnordered, StreamExt},
+};
 use pdfium::{Document, ImageBounds};
 use serde::{Deserialize, Serialize};
 
@@ -152,39 +157,52 @@ impl PageOcrOutcome {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+type OcrJob = std::pin::Pin<Box<dyn std::future::Future<Output = (usize, PageOcrOutcome)>>>;
+
 /// At most `max_workers` recognitions in flight; a slot frees as soon as its
 /// recognition finishes, so the caller can refill it without waiting on the
 /// slowest request.
 ///
-/// Each recognition runs on a blocking thread (Tesseract is CPU-bound). A
-/// task is only spawned once a slot is free, so at most `max_workers`
+/// On native targets, recognition runs on a Tokio blocking thread
+/// because engines such as Tesseract perform CPU-intensive work.
+/// A task starts only when a slot is free, so at most `max_workers`
 /// blocking threads are ever in use. That bound is load-bearing: the HTTP
 /// engine's client resolves DNS through its own `spawn_blocking`, and if
 /// every pool thread were parked waiting for a slot, that lookup could never
 /// run and the whole OCR pass would deadlock.
 ///
-/// Dropping the pool aborts the async tasks, but a recognition already on a
-/// blocking thread runs to completion in the background and is discarded.
-#[cfg(not(target_arch = "wasm32"))]
+/// On WASM, `FuturesUnordered` polls recognition futures, which can
+/// await JavaScript promises.
+///
+/// Dropping the pool aborts native async tasks. Active blocking calls and
+/// JavaScript promises can continue after the pool is dropped.
 pub(crate) struct OcrTaskPool {
     max_workers: usize,
     engine: Arc<dyn OcrEngine>,
     language: String,
+    #[cfg(not(target_arch = "wasm32"))]
     tasks: tokio::task::JoinSet<OcrTaskResult>,
-    /// Submission index and pending outcome for each running task.
+    #[cfg(target_arch = "wasm32")]
+    tasks: FuturesUnordered<OcrJob>,
+    /// Submission index and pending outcome for each native task.
+    #[cfg(not(target_arch = "wasm32"))]
     running: HashMap<tokio::task::Id, (usize, PageOcrOutcome)>,
     completed: Vec<(usize, PageOcrOutcome)>,
     submitted: usize,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl OcrTaskPool {
     pub(crate) fn new(engine: Arc<dyn OcrEngine>, language: &str, num_workers: usize) -> Self {
         Self {
             max_workers: num_workers.max(1),
             engine,
             language: language.to_string(),
+            #[cfg(not(target_arch = "wasm32"))]
             tasks: tokio::task::JoinSet::new(),
+            #[cfg(target_arch = "wasm32")]
+            tasks: FuturesUnordered::new(),
+            #[cfg(not(target_arch = "wasm32"))]
             running: HashMap::new(),
             completed: Vec::new(),
             submitted: 0,
@@ -208,44 +226,76 @@ impl OcrTaskPool {
             language: self.language.clone(),
             dpi: raster.dpi,
         };
-        let runtime = tokio::runtime::Handle::current();
-        let task = self.tasks.spawn(async move {
-            match tokio::task::spawn_blocking(move || {
-                runtime.block_on(engine.recognize(
-                    &raster.pixels,
-                    raster.width,
-                    raster.height,
-                    &options,
-                ))
-            })
-            .await
-            {
-                Ok(result) => result,
-                Err(join_err) => Err(Box::new(join_err) as _),
-            }
-        });
-        self.running.insert(task.id(), (self.submitted, pending));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let runtime = tokio::runtime::Handle::current();
+            let task = self.tasks.spawn(async move {
+                match tokio::task::spawn_blocking(move || {
+                    runtime.block_on(engine.recognize(
+                        &raster.pixels,
+                        raster.width,
+                        raster.height,
+                        &options,
+                    ))
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(join_err) => Err(Box::new(join_err) as _),
+                }
+            });
+            self.running.insert(task.id(), (self.submitted, pending));
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let order = self.submitted;
+            self.tasks.push(Box::pin(async move {
+                let result = engine
+                    .recognize(&raster.pixels, raster.width, raster.height, &options)
+                    .await;
+                (order, pending.with_result(result))
+            }));
+        }
         self.submitted += 1;
     }
 
     /// Wait for one running recognition to finish and record it. Returns
     /// `false` (without waiting) when nothing is running.
     pub(crate) async fn complete_one(&mut self) -> bool {
-        match self.tasks.join_next_with_id().await {
-            Some(joined) => {
-                self.record_completion(joined);
-                true
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            match self.tasks.join_next_with_id().await {
+                Some(joined) => {
+                    self.record_completion(joined);
+                    true
+                }
+                None => false,
             }
-            None => false,
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            match self.tasks.next().await {
+                Some(outcome) => {
+                    self.completed.push(outcome);
+                    true
+                }
+                None => false,
+            }
         }
     }
 
     pub(crate) fn complete_ready(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
         while let Some(joined) = self.tasks.try_join_next_with_id() {
             self.record_completion(joined);
         }
+        #[cfg(target_arch = "wasm32")]
+        while let Some(Some(outcome)) = self.tasks.next().now_or_never() {
+            self.completed.push(outcome);
+        }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn record_completion(
         &mut self,
         joined: Result<(tokio::task::Id, OcrTaskResult), tokio::task::JoinError>,
@@ -266,8 +316,12 @@ impl OcrTaskPool {
     /// merge reports first) does not depend on request timing.
     pub(crate) async fn finish(mut self) -> Vec<PageOcrOutcome> {
         while self.complete_one().await {}
+        self.take_completed()
+    }
+
+    pub(crate) fn take_completed(&mut self) -> Vec<PageOcrOutcome> {
         self.completed.sort_by_key(|(order, _)| *order);
-        self.completed
+        std::mem::take(&mut self.completed)
             .into_iter()
             .map(|(_, outcome)| outcome)
             .collect()
@@ -1019,34 +1073,11 @@ pub async fn recognize_rasters(
     ocr_language: &str,
     num_workers: usize,
 ) -> Vec<PageOcrOutcome> {
-    // Browser WASM uses the JavaScript event loop. It has no Tokio runtime or
-    // blocking thread pool. Run each JavaScript OCR callback directly so the
-    // returned Promise can make progress on the browser event loop.
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = num_workers;
-        let mut outcomes = Vec::with_capacity(rendered.len());
-        for r in rendered {
-            let options = OcrOptions {
-                language: ocr_language.to_string(),
-                dpi: r.dpi,
-            };
-            let result = ocr_engine
-                .recognize(&r.pixels, r.width, r.height, &options)
-                .await;
-            outcomes.push(PageOcrOutcome::pending(&r).with_result(result));
-        }
-        outcomes
+    let mut pool = OcrTaskPool::new(ocr_engine, ocr_language, num_workers);
+    for raster in rendered {
+        pool.submit(raster).await;
     }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let mut pool = OcrTaskPool::new(ocr_engine, ocr_language, num_workers);
-        for r in rendered {
-            pool.submit(r).await;
-        }
-        pool.finish().await
-    }
+    pool.finish().await
 }
 
 /// Merge recognition outcomes into `pages`, in place. Pure: needs neither the

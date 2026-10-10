@@ -52,6 +52,11 @@ jobs:
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
 
+      - name: Test WASM OCR stages
+        env:
+          NODE_PATH: ${{ github.workspace }}/scripts/browser-compat/stage-test-support
+        run: wasm-pack test --node crates/liteparse-wasm --test ocr_stages
+
       - name: Build WASM package
         working-directory: packages/wasm
         run: npm run build
