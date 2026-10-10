@@ -1940,10 +1940,15 @@ fn dedup_pair_drops_earlier(items: &[TextItem], i: usize, j: usize, debug: bool)
         return false;
     }
 
-    // Different lines must never dedupe, even with heavy loose-box overlap.
-    // A single glyph with pathological font metrics can stretch its line
-    // over the line above (#486); overpainted layers share a baseline.
-    if !dedup_same_line(a, b) {
+    // Different lines must never dedupe, even with heavy loose-box overlap —
+    // but only when the pair shows the tall-box pathology signature (one box
+    // several times the height of the other, e.g. #486's 50pt line over a
+    // 10pt line). Similarly-sized overlapping stamps are restamps/footer
+    // overprints and keep the legacy dedupe, or repeated headers and tag
+    // clouds would survive as duplicates.
+    let ha = a.height.abs().max(1e-6);
+    let hb = b.height.abs().max(1e-6);
+    if ha.max(hb) > 2.5 * ha.min(hb) && !dedup_same_line(a, b) {
         if debug {
             eprintln!(
                 "[extract-debug] DEDUP skip (different lines) i={i} text='{}' at ({:.1},{:.1} {}x{}) j={j} text='{}' at ({:.1},{:.1} {}x{})",
@@ -2961,43 +2966,27 @@ fn prescan_page_batched(
     (skip_invisible, garbage_fonts)
 }
 
-/// Rendered font height for the tall-glyph clamp: raw text-space size scaled
-/// by the char matrix, falling back to the loose-box height (which disables
-/// the clamp) when no usable size exists. Comparing a raw size against
-/// device-space boxes misfires wherever the text matrix scales the font.
-fn clamp_hint_height(raw_size: f32, scale_y: Option<f32>, loose_h: f32) -> f32 {
-    if raw_size > 0.0 {
-        raw_size.abs() * scale_y.unwrap_or(1.0)
-    } else {
-        loose_h.abs()
-    }
-}
-
-/// Maximum loose-box height as a multiple of the RENDERED font height before
-/// the vertical extent is treated as pathological. A single glyph in a font
+/// Maximum loose-box height as a multiple of the INK height before the
+/// vertical extent is treated as pathological. A single glyph in a font
 /// with very tall vertical metrics (e.g. Cambria Math
-/// `/Ascent 3116 /Descent -2463` makes a 9pt hyphen 50pt tall) would
-/// otherwise stretch its whole line over adjacent lines (#486). When
-/// triggered, vertical expansion uses the ink (strict) box instead —
-/// the same "judge by ink box, not loose box" move as #485 for clipping.
+/// `/Ascent 3116 /Descent -2463` makes a 9pt hyphen 50pt tall with ~0.6pt
+/// of ink) would otherwise stretch its whole line over adjacent lines
+/// (#486). When triggered, vertical expansion uses the ink (strict) box
+/// instead — the same "judge by ink box, not loose box" move as #485.
 ///
-/// `rendered_font_height` must be in the same coordinate space as the boxes
-/// (raw font size scaled by the char matrix): comparing a text-space size
-/// against device-space boxes misfires on any PDF that scales fonts through
-/// the text matrix (e.g. `1 Tf` with a scaled Tm renders ~21pt boxes from a
-/// size-1 font and would clamp every line).
-fn clamped_vertical_bounds(
-    vp_loose: &RectF,
-    vp_strict: &RectF,
-    rendered_font_height: f32,
-) -> (f32, f32) {
+/// Deliberately scale-free: both boxes live in the same space, so no font
+/// size (text-space, device-space, matrix-scaled or otherwise) enters the
+/// decision, and text-matrix scaling like sample.pdf's `1 Tf` cannot shift
+/// the verdict. The bar sits at 40x: the highest healthy ratios measured
+/// across the corpus are hairline punctuation and display-math marks
+/// (~20x for a 12.3pt box around 0.6pt of ink, ~14x for a 39.9pt math box
+/// around 2.8pt of ink), while #486's hyphen reads ~84x. Clamping the
+/// former fragments their lines (periods detach from words, math marks
+/// unjoin formulas); only the latter is clamped.
+fn clamped_vertical_bounds(vp_loose: &RectF, vp_strict: &RectF) -> (f32, f32) {
     let loose_h = (vp_loose.bottom - vp_loose.top).abs();
     let strict_h = (vp_strict.bottom - vp_strict.top).abs();
-    if rendered_font_height > 0.0
-        && loose_h > 2.5 * rendered_font_height
-        && strict_h > 0.0
-        && strict_h < loose_h
-    {
+    if strict_h > 0.0 && strict_h < loose_h && loose_h > 40.0 * strict_h {
         (vp_strict.top, vp_strict.bottom)
     } else {
         (vp_loose.top, vp_loose.bottom)
@@ -3288,12 +3277,8 @@ impl SegmentBuilder {
         self.text.push(c);
         // Clamp pathological loose vertical extent (e.g. Cambria Math tall
         // metrics) to the ink box so one glyph doesn't stretch the item
-        // over adjacent lines (#486). The comparison height is the RENDERED
-        // size (raw size scaled by the char matrix): a raw text-space size
-        // would misfire wherever the text matrix scales the font.
-        let fs_hint =
-            clamp_hint_height(meta.font_size, meta.scale_y, vp_loose.bottom - vp_loose.top);
-        let (eff_top, eff_bottom) = clamped_vertical_bounds(vp_loose, vp_strict, fs_hint);
+        // over adjacent lines (#486).
+        let (eff_top, eff_bottom) = clamped_vertical_bounds(vp_loose, vp_strict);
         self.vp_left = vp_loose.left;
         self.vp_right = vp_loose.right;
         self.vp_top = eff_top;
@@ -3424,12 +3409,8 @@ impl SegmentBuilder {
         recovered: bool,
     ) {
         self.text.push(c);
-        // Same tall-glyph clamp as `start`: compare against the rendered
-        // font height (first char's size scaled by the char matrix), so
-        // text-matrix-scaled fonts are judged in the boxes' own space (#486).
-        // Falls back to the raw size exactly as before when no scale was seen.
-        let rendered = self.font_height.unwrap_or(self.font_size.abs());
-        let (eff_top, eff_bottom) = clamped_vertical_bounds(vp_loose, vp_strict, rendered);
+        // Same tall-glyph clamp as `start` (#486).
+        let (eff_top, eff_bottom) = clamped_vertical_bounds(vp_loose, vp_strict);
         let eff_word_box = RectF {
             left: vp_loose.left,
             top: eff_top,
@@ -3962,6 +3943,7 @@ mod tests {
 
     #[test]
     fn clamped_vertical_bounds_uses_ink_for_pathological_loose() {
+        // #486 hyphen: 50.2pt loose box, ~0.6pt ink (~84x disproportion).
         let loose = RectF {
             left: 0.0,
             top: 74.4,
@@ -3972,35 +3954,56 @@ mod tests {
             left: 0.0,
             top: 90.0,
             right: 10.0,
-            bottom: 93.0,
+            bottom: 90.6,
         };
-        let (top, bottom) = clamped_vertical_bounds(&loose, &strict, 9.0);
-        assert_eq!((top, bottom), (90.0, 93.0));
-        // Normal 9pt Helvetica loose height (~10pt) is untouched.
+        let (top, bottom) = clamped_vertical_bounds(&loose, &strict);
+        assert_eq!((top, bottom), (90.0, 90.6));
+        // Normal 10pt line (10pt loose, 3pt ink: 3.3x) is untouched.
         let normal_loose = RectF {
             left: 0.0,
             top: 83.9,
             right: 10.0,
             bottom: 93.9,
         };
-        let (top, bottom) = clamped_vertical_bounds(&normal_loose, &strict, 9.0);
+        let normal_strict = RectF {
+            left: 0.0,
+            top: 90.0,
+            right: 10.0,
+            bottom: 93.0,
+        };
+        let (top, bottom) = clamped_vertical_bounds(&normal_loose, &normal_strict);
         assert_eq!((top, bottom), (83.9, 93.9));
-    }
-
-    #[test]
-    fn clamp_hint_uses_rendered_size_in_the_boxes_space() {
-        // sample.pdf scales a size-1 font to ~21pt boxes through the text
-        // matrix: the raw size must be scaled before comparing, or every
-        // line clamps and the line fragments (#489 broke
-        // test_extract_blocks_carries_geometry_without_changing_markdown).
-        assert_eq!(clamp_hint_height(1.0, Some(21.0), 21.0), 21.0);
-        // #486: unscaled 9pt font, no scaling to apply.
-        assert_eq!(clamp_hint_height(9.0, Some(1.0), 50.2), 9.0);
-        // Unknown scale keeps the old raw-size behavior.
-        assert_eq!(clamp_hint_height(9.0, None, 50.2), 9.0);
-        // Unavailable size falls back to the loose height (never clamps).
-        assert_eq!(clamp_hint_height(0.0, Some(21.0), 21.0), 21.0);
-        assert_eq!(clamp_hint_height(-5.0, Some(2.0), 21.0), 21.0);
+        // Hairline punctuation (12.3pt loose, 0.6pt ink: ~20x) is untouched:
+        // clamping it would detach periods from their words.
+        let hair_loose = RectF {
+            left: 0.0,
+            top: 119.0,
+            right: 10.0,
+            bottom: 131.3,
+        };
+        let hair_strict = RectF {
+            left: 0.0,
+            top: 130.0,
+            right: 10.0,
+            bottom: 130.6,
+        };
+        let (top, bottom) = clamped_vertical_bounds(&hair_loose, &hair_strict);
+        assert_eq!((top, bottom), (119.0, 131.3));
+        // Display math (39.9pt loose, 9.9pt ink: 4x) is untouched.
+        let math_loose = RectF {
+            left: 0.0,
+            top: 79.0,
+            right: 10.0,
+            bottom: 118.9,
+        };
+        let math_strict = RectF {
+            left: 0.0,
+            top: 90.0,
+            right: 10.0,
+            bottom: 99.9,
+        };
+        let (top, bottom) = clamped_vertical_bounds(&math_loose, &math_strict);
+        assert_eq!((top, bottom), (79.0, 118.9));
     }
 
     #[test]
