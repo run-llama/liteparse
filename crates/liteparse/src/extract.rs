@@ -1443,6 +1443,19 @@ fn rectf_to_rect(r: &RectF) -> Rect {
     }
 }
 
+/// Unicode combining diacritical marks, which PDFs often draw as their own
+/// glyph back over the base letter.
+fn is_combining_mark(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0300}'..='\u{036F}'
+            | '\u{1AB0}'..='\u{1AFF}'
+            | '\u{1DC0}'..='\u{1DFF}'
+            | '\u{20D0}'..='\u{20FF}'
+            | '\u{FE20}'..='\u{FE2F}'
+    )
+}
+
 /// Fold typographic punctuation to its ASCII equivalent so extracted text
 /// matches plain-ASCII transcriptions: curly quotes → `'`/`"`, the dash family
 /// (en/em/figure/non-breaking/minus) → `-`. Applied to every decoded character
@@ -1680,13 +1693,36 @@ fn extract_page_text_items(
             // 2. Line wrap: char goes back against the writing direction AND strict top is below
             //    last char's strict bottom (even slightly), indicating text wrapped to a new line
             //    within the same text object
-            // 3. Very large backward jump: if the char jumps back by more than the current
-            //    segment width, it's definitely a new line (handles OCR text with tall bounding
-            //    boxes that overlap vertically between lines)
+            // 3. Very large backward jump: a long run that jumps back by more than
+            //    half its width, or any run that jumps back by more than a few
+            //    character widths. The half-width test needs the run to already be
+            //    wider than 20pt, so a short run ("48.") used to absorb the next
+            //    glyph however far left it sat. Kerning and italic overhang stay
+            //    inside one glyph, so three character widths (at least 1.5em) is
+            //    the cutoff, scaled to the glyph advance and the font size rather
+            //    than an absolute run width.
             let strict_below = vp_strict.top > seg.last_char_bottom;
             let large_backward_jump = gap < -5.0;
             let seg_width = seg.vp_right - seg.vp_left;
-            let very_large_backward_jump = seg_width > 20.0 && gap < -(seg_width * 0.5);
+            // `font_size` is the raw `Tf` operand, which is 1 when the size
+            // lives in `Tm`/CTM (common in TeX output), and glyph advances are
+            // scaled by it. Take the larger of that and what the run measures on
+            // the page so the cutoff is always in page units. Half an em floors
+            // a run of narrow glyphs (".", "i") so a sub-glyph overlap (or a
+            // ligature reporting both letters at one origin) is not a split.
+            let vp_height = (seg.vp_bottom - seg.vp_top).abs();
+            let em = seg.font_size.max(vp_height);
+            let vp_char_w = if seg.char_count > 0 {
+                seg_width / seg.char_count as f32
+            } else {
+                0.0
+            };
+            let char_w = seg.avg_char_width().max(vp_char_w).max(em * 0.5);
+            // Combining marks (a separately drawn acute over an earlier "e")
+            // jump back by design; leave them to the run they were drawn in.
+            let backward_jump = char_w > 0.0 && gap < -(char_w * 3.0) && !is_combining_mark(c);
+            let very_large_backward_jump =
+                (seg_width > 20.0 && gap < -(seg_width * 0.5)) || backward_jump;
             let line_changed = vp_strict.top > seg.last_char_bottom + y_tolerance
                 || (strict_below && large_backward_jump)
                 || very_large_backward_jump;
@@ -3612,6 +3648,181 @@ mod tests {
             (item.y - (100.0 - 50.3) * 36.0).abs() < 36.0,
             "unexpected y: {}",
             item.y
+        );
+    }
+
+    fn type1_page_pdf(base_font: &str, content: &str) -> Vec<u8> {
+        let content = content.as_bytes();
+        let objects: Vec<Vec<u8>> = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_vec(),
+            format!("<< /Type /Font /Subtype /Type1 /BaseFont /{base_font} >>").into_bytes(),
+            [
+                format!("<< /Length {} >>\nstream\n", content.len()).as_bytes(),
+                content,
+                b"\nendstream",
+            ]
+            .concat(),
+        ];
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::with_capacity(objects.len());
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+            pdf.extend_from_slice(object);
+            pdf.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    fn assert_x_near(item: &TextItem, want: f32) {
+        assert!(
+            (item.x - want).abs() < 0.25,
+            "text {:?} x={} want {want}",
+            item.text,
+            item.x
+        );
+    }
+
+    /// Issue #504: a `TJ` row places `CODE1`, `SOME DESCRIPTION`, and `48.`,
+    /// then `PROD1` is drawn back inside the first gap. The short `48.` run
+    /// must not swallow `PROD1`, or the description is dropped as overpaint.
+    #[test]
+    fn short_run_backward_jump_keeps_intervening_text() {
+        let content = "BT /F1 8 Tf 1 0 0 1 10 700 Tm [(CODE1) -12500 (SOME DESCRIPTION) -27917 (48.)] TJ ET\n\
+                       BT /F1 8 Tf 1 0 0 1 70 700 Tm (PROD1) Tj ET";
+        let pages = extract_pages_from_input(
+            &PdfInput::Bytes(type1_page_pdf("Helvetica", content)),
+            None,
+            usize::MAX,
+            None,
+        )
+        .unwrap();
+        let items = &pages[0].text_items;
+        assert_eq!(
+            items.len(),
+            4,
+            "items: {:?}",
+            items
+                .iter()
+                .map(|it| (it.text.as_str(), it.x, it.width))
+                .collect::<Vec<_>>()
+        );
+        let by_text = |text: &str| {
+            items
+                .iter()
+                .find(|it| it.text == text)
+                .unwrap_or_else(|| panic!("missing {text:?} in {items:?}"))
+        };
+        assert_x_near(by_text("CODE1"), 10.0);
+        assert_x_near(by_text("PROD1"), 70.0);
+        assert_x_near(by_text("SOME DESCRIPTION"), 137.6);
+        assert_x_near(by_text("48."), 441.4);
+    }
+
+    /// Issue #505: Times-Roman 7.7pt, "90000" drawn first on a baseline 5pt
+    /// below the short "13", which is itself left of "18 Jul, 2025". "90000"
+    /// is just under 20pt wide, so the same short-run backward jump used to
+    /// merge it with "13" and the overlap then dropped both.
+    #[test]
+    fn short_run_backward_jump_on_offset_baseline_keeps_each_string() {
+        let content = "BT /F1 7.7 Tf 1 0 0 1 121.33 392.47 Tm (90000) Tj ET\n\
+                       BT /F1 7.7 Tf 1 0 0 1 36 397.48 Tm (13) Tj ET\n\
+                       BT /F1 7.7 Tf 1 0 0 1 58.68 397.48 Tm (18 Jul, 2025) Tj ET";
+        let pages = extract_pages_from_input(
+            &PdfInput::Bytes(type1_page_pdf("Times-Roman", content)),
+            None,
+            usize::MAX,
+            None,
+        )
+        .unwrap();
+        let items = &pages[0].text_items;
+        let got: Vec<(&str, f32)> = items.iter().map(|it| (it.text.as_str(), it.x)).collect();
+        assert_eq!(
+            got.len(),
+            3,
+            "expected 90000, 13, and the date as separate items, got {got:?}"
+        );
+        let by_text = |text: &str| {
+            items
+                .iter()
+                .find(|it| it.text == text)
+                .unwrap_or_else(|| panic!("missing {text:?} in {got:?}"))
+        };
+        assert_x_near(by_text("90000"), 121.33);
+        assert_x_near(by_text("13"), 36.0);
+        assert_x_near(by_text("18 Jul, 2025"), 58.68);
+    }
+
+    /// A same-line kern of a fraction of a glyph must stay one item. The
+    /// adjustment is large enough that the strict boxes overlap (negative
+    /// gap) and small enough to be ordinary kerning, not a column jump.
+    #[test]
+    fn small_negative_kerning_stays_one_item() {
+        // 250 thousandths of an em at 12pt is 3pt of pull-together — about
+        // half a glyph of Helvetica 'A' (advance 8pt), well under three
+        // character widths.
+        let content = "BT /F1 12 Tf 1 0 0 1 72 700 Tm [(A) 250 (VATAR)] TJ ET";
+        let pdf = type1_page_pdf("Helvetica", content);
+
+        {
+            let lib = pdfium::Library::init();
+            let doc = lib.load_document_from_bytes(&pdf, None).unwrap();
+            let page = doc.page(0).unwrap();
+            let text_page = page.text().unwrap();
+            let a = text_page.char_at(0).unwrap().char_box().unwrap();
+            let v = text_page.char_at(1).unwrap().char_box().unwrap();
+            let gap = v.left - a.right;
+            assert!(
+                gap < -0.5 && gap > -8.0,
+                "kerning fixture gap {gap} should be a small negative overlap, not a column jump"
+            );
+        }
+
+        let pages =
+            extract_pages_from_input(&PdfInput::Bytes(pdf), None, usize::MAX, None).unwrap();
+        let items = &pages[0].text_items;
+        assert_eq!(
+            items.len(),
+            1,
+            "items: {:?}",
+            items.iter().map(|it| it.text.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(items[0].text, "AVATAR");
+    }
+
+    /// TeX-style output sets `1 Tf` and puts the real size in `Tm`, so the
+    /// `Tf` operand is 1 and glyph advances come back at 1pt scale. The
+    /// backward-jump cutoff must still be measured in page units, or ordinary
+    /// kerning (and ligatures like "fi") would split words apart.
+    #[test]
+    fn tm_scaled_kerning_stays_one_item() {
+        let content = "BT /F1 1 Tf 12 0 0 12 72 700 Tm [(A) 250 (VATAR)] TJ ET";
+        let pages = extract_pages_from_input(
+            &PdfInput::Bytes(type1_page_pdf("Helvetica", content)),
+            None,
+            usize::MAX,
+            None,
+        )
+        .unwrap();
+        let items = &pages[0].text_items;
+        assert_eq!(
+            items.iter().map(|it| it.text.as_str()).collect::<Vec<_>>(),
+            vec!["AVATAR"]
         );
     }
 
