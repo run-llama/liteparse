@@ -21,6 +21,7 @@ const FIG_MAX_FRACTION: f32 = 0.95;
 /// Cluster two primitives when their bboxes overlap or are within this gap on
 /// both axes.
 const FIG_CLUSTER_GAP_PT: f32 = 10.0;
+const FIG_GRID_CELL_PT: f32 = 64.0;
 /// Drop horizontal-rule-like strokes (long thin horizontal) before clustering
 /// so a section divider doesn't become a degenerate "figure".
 const HR_MIN_WIDTH_FRACTION: f32 = 0.3;
@@ -45,6 +46,25 @@ pub fn detect_figure_rects(
     page_width: f32,
     page_height: f32,
 ) -> Vec<Rect> {
+    detect_figure_rects_with_clusterer(
+        graphics,
+        text_items,
+        page_width,
+        page_height,
+        cluster_bboxes_spatial,
+    )
+}
+
+fn detect_figure_rects_with_clusterer<C>(
+    graphics: &[GraphicPrimitive],
+    text_items: &[TextItem],
+    page_width: f32,
+    page_height: f32,
+    clusterer: C,
+) -> Vec<Rect>
+where
+    C: FnOnce(&[Rect], f32, f32) -> Vec<usize>,
+{
     if graphics.is_empty() || page_width <= 0.0 || page_height <= 0.0 {
         return Vec::new();
     }
@@ -94,16 +114,7 @@ pub fn detect_figure_rects(
         return Vec::new();
     }
 
-    // Union-find: link primitives whose bboxes are close on BOTH axes.
-    let n = bboxes.len();
-    let mut parent: Vec<usize> = (0..n).collect();
-    for i in 0..n {
-        for j in (i + 1)..n {
-            if close_enough(&bboxes[i], &bboxes[j], FIG_CLUSTER_GAP_PT) {
-                uf_union(&mut parent, i, j);
-            }
-        }
-    }
+    let mut parent = clusterer(&bboxes, page_width, page_height);
 
     use std::collections::HashMap;
     let mut groups: HashMap<usize, (Rect, usize)> = HashMap::new();
@@ -169,6 +180,58 @@ fn close_enough(a: &Rect, b: &Rect, gap: f32) -> bool {
     let x_gap = (a.x - (b.x + b.width)).max(b.x - (a.x + a.width));
     let y_gap = (a.y - (b.y + b.height)).max(b.y - (a.y + a.height));
     x_gap <= gap && y_gap <= gap
+}
+
+fn cluster_bboxes_spatial(bboxes: &[Rect], page_width: f32, page_height: f32) -> Vec<usize> {
+    let mut parent: Vec<usize> = (0..bboxes.len()).collect();
+    if bboxes.is_empty() {
+        return parent;
+    }
+
+    let half_gap = FIG_CLUSTER_GAP_PT / 2.0;
+    let expanded_bounds = |bbox: &Rect| {
+        let right = bbox.x + bbox.width;
+        let bottom = bbox.y + bbox.height;
+        (
+            bbox.x.min(right) - half_gap,
+            bbox.y.min(bottom) - half_gap,
+            bbox.x.max(right) + half_gap,
+            bbox.y.max(bottom) + half_gap,
+        )
+    };
+    let columns = (page_width / FIG_GRID_CELL_PT).floor() as usize + 1;
+    let rows = (page_height / FIG_GRID_CELL_PT).floor() as usize + 1;
+    let mut cells = vec![Vec::new(); columns * rows];
+
+    let cell_index =
+        |coord: f32, count: usize| ((coord / FIG_GRID_CELL_PT).floor() as usize).min(count - 1);
+    for (i, bbox) in bboxes.iter().enumerate() {
+        let (left, top, right, bottom) = expanded_bounds(bbox);
+        let first_col = cell_index(left, columns);
+        let last_col = cell_index(right, columns);
+        let first_row = cell_index(top, rows);
+        let last_row = cell_index(bottom, rows);
+        for row in first_row..=last_row {
+            for col in first_col..=last_col {
+                cells[row * columns + col].push(i);
+            }
+        }
+    }
+
+    for cell in cells {
+        for first in 0..cell.len() {
+            let i = cell[first];
+            for &j in &cell[first + 1..] {
+                if uf_find(&mut parent, i) == uf_find(&mut parent, j) {
+                    continue;
+                }
+                if close_enough(&bboxes[i], &bboxes[j], FIG_CLUSTER_GAP_PT) {
+                    uf_union(&mut parent, i, j);
+                }
+            }
+        }
+    }
+    parent
 }
 
 fn union_rect(a: &Rect, b: &Rect) -> Rect {
@@ -295,6 +358,148 @@ mod tests {
             fill: None,
             stroke: None,
         }
+    }
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+
+        fn next_u32(&mut self) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (self.0 >> 32) as u32
+        }
+
+        fn range(&mut self, min: f32, max: f32) -> f32 {
+            let fraction = self.next_u32() as f32 / u32::MAX as f32;
+            min + fraction * (max - min)
+        }
+    }
+
+    fn random_graphics(seed: u64) -> Vec<GraphicPrimitive> {
+        let mut rng = Lcg::new(seed);
+        let count = (rng.next_u32() % 401) as usize;
+        let mut graphics = Vec::with_capacity(count);
+        for _ in 0..count {
+            let x = rng.range(-120.0, 740.0);
+            let y = rng.range(-120.0, 900.0);
+            let primitive = match rng.next_u32() % 4 {
+                0 => rect(x, y, rng.range(0.5, 40.0), rng.range(0.5, 40.0)),
+                1 => stroke(x, y, rng.range(-120.0, 740.0), rng.range(-120.0, 900.0)),
+                2 => rect(x, y, rng.range(2.0, 612.0), rng.range(2.0, 792.0)),
+                _ => rect(x, y, rng.range(2.0, 80.0), rng.range(2.0, 80.0)),
+            };
+            graphics.push(primitive);
+        }
+        if count >= 4 {
+            graphics[0] = rect(1000.0, -1000.0, 12.0, 12.0);
+            graphics[1] = rect(1022.0, -1000.0, 12.0, 12.0);
+            graphics[2] = rect(1300.0, -1000.0, 12.0, 12.0);
+            graphics[3] = rect(1322.01, -1000.0, 12.0, 12.0);
+        }
+        graphics
+    }
+
+    fn all_pairs_cluster_bboxes(
+        bboxes: &[Rect],
+        _page_width: f32,
+        _page_height: f32,
+    ) -> Vec<usize> {
+        let mut parent: Vec<usize> = (0..bboxes.len()).collect();
+        for i in 0..bboxes.len() {
+            for j in (i + 1)..bboxes.len() {
+                if close_enough(&bboxes[i], &bboxes[j], FIG_CLUSTER_GAP_PT) {
+                    uf_union(&mut parent, i, j);
+                }
+            }
+        }
+        parent
+    }
+
+    fn component_partition(mut parent: Vec<usize>) -> Vec<Vec<usize>> {
+        let mut groups = std::collections::HashMap::<usize, Vec<usize>>::new();
+        for i in 0..parent.len() {
+            let root = uf_find(&mut parent, i);
+            groups.entry(root).or_default().push(i);
+        }
+        let mut partition: Vec<Vec<usize>> = groups.into_values().collect();
+        for component in &mut partition {
+            component.sort_unstable();
+        }
+        partition.sort_unstable();
+        partition
+    }
+
+    #[test]
+    fn spatial_grid_matches_all_pairs_for_randomized_inputs() {
+        for seed in 0..200 {
+            let graphics = random_graphics(seed);
+            let bboxes: Vec<Rect> = graphics.iter().map(GraphicPrimitive::bbox).collect();
+            let spatial = cluster_bboxes_spatial(&bboxes, 612.0, 792.0);
+            let reference = all_pairs_cluster_bboxes(&bboxes, 612.0, 792.0);
+            assert_eq!(
+                component_partition(spatial),
+                component_partition(reference),
+                "component partition differs for seed {seed} ({} primitives)",
+                graphics.len()
+            );
+
+            let actual = detect_figure_rects(&graphics, &[], 612.0, 792.0);
+            let expected = detect_figure_rects_with_clusterer(
+                &graphics,
+                &[],
+                612.0,
+                792.0,
+                all_pairs_cluster_bboxes,
+            );
+            assert_eq!(
+                actual,
+                expected,
+                "detected rectangles differ for seed {seed} ({} primitives)",
+                graphics.len()
+            );
+        }
+    }
+
+    #[test]
+    fn spatial_grid_preserves_inclusive_gap_boundary() {
+        let bboxes = [
+            Rect {
+                x: 1000.0,
+                y: -1000.0,
+                width: 12.0,
+                height: 12.0,
+            },
+            Rect {
+                x: 1022.0,
+                y: -1000.0,
+                width: 12.0,
+                height: 12.0,
+            },
+            Rect {
+                x: 1300.0,
+                y: -1000.0,
+                width: 12.0,
+                height: 12.0,
+            },
+            Rect {
+                x: 1322.01,
+                y: -1000.0,
+                width: 12.0,
+                height: 12.0,
+            },
+        ];
+        assert!(close_enough(&bboxes[0], &bboxes[1], FIG_CLUSTER_GAP_PT));
+        assert!(!close_enough(&bboxes[2], &bboxes[3], FIG_CLUSTER_GAP_PT));
+        assert_eq!(
+            component_partition(cluster_bboxes_spatial(&bboxes, 612.0, 792.0)),
+            vec![vec![0, 1], vec![2], vec![3]]
+        );
     }
 
     #[test]

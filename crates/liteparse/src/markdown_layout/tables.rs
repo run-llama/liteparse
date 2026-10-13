@@ -2418,26 +2418,20 @@ fn cluster_adjacent(a: &TableRun, b: &TableRun, lines: &[ProjectedLine]) -> bool
         // check, failed-row fraction) still gate the actual merge.
         return true;
     };
-    let (narrow, wide) = if a_tracks.len() <= b_tracks.len() {
-        (&a_tracks, &b_tracks)
-    } else {
-        (&b_tracks, &a_tracks)
-    };
-    let matched = narrow
-        .iter()
-        .filter(|&&t| {
-            wide.iter()
-                .any(|&w| subset_match_score(t, w, TABLE_SUBSET_TRACK_TOLERANCE_PT).is_some())
-        })
-        .count();
-    let ok = (matched as f32) >= (narrow.len() as f32) * 0.75;
+    let (matched, total) = matching_track_count(&a_tracks, &b_tracks);
+    let ok = (matched as f32) >= (total as f32) * 0.75;
     if !ok && dbgt {
+        let (narrow, wide) = if a_tracks.len() <= b_tracks.len() {
+            (&a_tracks, &b_tracks)
+        } else {
+            (&b_tracks, &a_tracks)
+        };
         eprintln!(
             "[tbl-cluster] adjacency reject @{}..{}: tracks {}/{} matched (narrow=[{}] wide=[{}])",
             a.start,
             b.end,
             matched,
-            narrow.len(),
+            total,
             narrow
                 .iter()
                 .map(|t| format!("{:.0}-{:.0}", t.0, t.1))
@@ -2539,35 +2533,70 @@ fn union_header_from_above(
     lines: &[ProjectedLine],
     body_start: usize,
     floor: usize,
-    tracks: &[f32],
-) -> Option<(usize, Vec<Cell>)> {
+    tracks: &[(f32, f32)],
+    allow_single_interstitial: bool,
+) -> Option<(usize, Vec<Cell>, Vec<Cell>)> {
+    let dbgt = *super::flags::DEBUG_TABLE;
     let tol = TABLE_TRACK_TOLERANCE_PT;
+    if allow_single_interstitial && dbgt {
+        eprintln!(
+            "[tbl-cross-region-header] body tracks=[{}]",
+            tracks
+                .iter()
+                .map(|(start, end)| {
+                    if start.is_finite() && end.is_finite() && start <= end {
+                        format!("{start:.1}..{end:.1}")
+                    } else {
+                        "empty".to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+    }
+    let valid_track_centers: Vec<(usize, f32)> = tracks
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, (start, end))| {
+            (start.is_finite() && end.is_finite() && start <= end)
+                .then_some((idx, (start + end) * 0.5))
+        })
+        .collect();
     // Fallback assignment for centered header cells whose extent doesn't
-    // reach the track anchor: nearest track within half the local gap.
+    // reach the track anchor: nearest track within half the local gap, with a
+    // small extra margin for cross-region header absorption.
     let assign_nearest = |x_center: f32| -> Option<usize> {
-        let (idx, d) = tracks
-            .iter()
-            .enumerate()
-            .map(|(i, &t)| (i, (x_center - t).abs()))
-            .min_by(|a, b| a.1.total_cmp(&b.1))?;
-        let local_gap = if idx + 1 < tracks.len() {
-            tracks[idx + 1] - tracks[idx]
-        } else if idx > 0 {
-            tracks[idx] - tracks[idx - 1]
+        let (position, &(idx, center)) =
+            valid_track_centers
+                .iter()
+                .enumerate()
+                .min_by(|(_, (_, a)), (_, (_, b))| {
+                    (x_center - *a).abs().total_cmp(&(x_center - *b).abs())
+                })?;
+        let d = (x_center - center).abs();
+        let local_gap = if position + 1 < valid_track_centers.len() {
+            valid_track_centers[position + 1].1 - center
+        } else if position > 0 {
+            center - valid_track_centers[position - 1].1
         } else {
             f32::INFINITY
         };
-        if d <= (local_gap * 0.5).max(TABLE_SUBSET_TRACK_TOLERANCE_PT) {
+        let edge_tolerance = if allow_single_interstitial { tol } else { 0.0 };
+        if d <= (local_gap * 0.5 + edge_tolerance).max(TABLE_SUBSET_TRACK_TOLERANCE_PT) {
             Some(idx)
         } else {
             None
         }
     };
     let mut layers: Vec<Vec<Cell>> = Vec::new();
+    let mut skipped = None;
     let mut j = body_start;
     while j > floor && layers.len() < TABLE_CLUSTER_MAX_HEADER_LINES {
         let cand = j - 1;
         if !table_rows_adjacent(&lines[cand], &lines[j]) {
+            if allow_single_interstitial && dbgt {
+                eprintln!("[tbl-cross-region-header] stop @{cand}: not adjacent to line {j}");
+            }
             break;
         }
         let spans: Vec<&TextItem> = lines[cand]
@@ -2576,6 +2605,18 @@ fn union_header_from_above(
             .filter(|s| !s.text.trim().is_empty())
             .collect();
         if spans.len() < 2 {
+            if allow_single_interstitial
+                && layers.is_empty()
+                && skipped.is_none()
+                && spans.len() == 1
+            {
+                if dbgt {
+                    eprintln!("[tbl-cross-region-header] skip single-cell line @{cand}");
+                }
+                skipped = Some(cand);
+                j = cand;
+                continue;
+            }
             break;
         }
         let mut layer = vec![Cell::default(); tracks.len()];
@@ -2583,10 +2624,25 @@ fn union_header_from_above(
         for s in &spans {
             let x0 = s.x;
             let x1 = s.x + s.width.max(0.0);
+            let header_cell = TableCell {
+                start_x: x0,
+                end_x: x1,
+                text: String::new(),
+                bold: false,
+            };
             let covered: Vec<usize> = tracks
                 .iter()
                 .enumerate()
-                .filter(|&(_, &t)| t >= x0 - tol && t <= x1 + tol)
+                .filter(|&(_, range)| {
+                    if !range.0.is_finite() || !range.1.is_finite() || range.0 > range.1 {
+                        return false;
+                    }
+                    if (range.1 - range.0).abs() <= f32::EPSILON {
+                        range.0 >= x0 - tol && range.0 <= x1 + tol
+                    } else {
+                        cell_aligns_track(&header_cell, *range)
+                    }
+                })
                 .map(|(i, _)| i)
                 .collect();
             let targets: Vec<usize> = if !covered.is_empty() {
@@ -2594,6 +2650,12 @@ fn union_header_from_above(
             } else if let Some(idx) = assign_nearest((x0 + x1) * 0.5) {
                 vec![idx]
             } else {
+                if allow_single_interstitial && dbgt {
+                    eprintln!(
+                        "[tbl-cross-region-header] unassigned @{cand} {:?} x={x0:.1}..{x1:.1}",
+                        s.text.trim()
+                    );
+                }
                 ok = false;
                 break;
             };
@@ -2615,12 +2677,18 @@ fn union_header_from_above(
             }
         }
         if !ok || layer.iter().filter(|t| !t.text.is_empty()).count() < 2 {
+            if allow_single_interstitial && dbgt {
+                eprintln!("[tbl-cross-region-header] stop @{cand}: spans don't align");
+            }
             break;
         }
         layers.push(layer);
         j = cand;
     }
     if layers.is_empty() {
+        if allow_single_interstitial && dbgt {
+            eprintln!("[tbl-cross-region-header] no aligned header layers");
+        }
         return None;
     }
     layers.reverse();
@@ -2647,7 +2715,23 @@ fn union_header_from_above(
     if header.iter().all(|h| h.text.is_empty()) {
         return None;
     }
-    Some((j, header))
+    if skipped.is_some()
+        && header.iter().filter(|cell| !cell.text.is_empty()).count() * 3 < tracks.len()
+    {
+        if dbgt {
+            eprintln!(
+                "[tbl-cross-region-header] reject sparse header: {}/{} columns",
+                header.iter().filter(|cell| !cell.text.is_empty()).count(),
+                tracks.len()
+            );
+        }
+        return None;
+    }
+    let interstitials = skipped
+        .into_iter()
+        .map(|idx| Cell::located(lines[idx].text.trim().to_string(), lines[idx].bbox.clone()))
+        .collect();
+    Some((j, header, interstitials))
 }
 
 /// Re-extract a cluster of adjacent table runs as one table against the
@@ -2766,10 +2850,11 @@ fn build_union_table(
         return None;
     }
 
-    let absorbed = union_header_from_above(lines, window_start, floor, &tracks);
-    let (start, header) = match absorbed {
-        Some((hstart, header)) => (hstart, Some(header)),
-        None => (window_start, None),
+    let track_ranges: Vec<(f32, f32)> = tracks.iter().map(|&track| (track, track)).collect();
+    let absorbed = union_header_from_above(lines, window_start, floor, &track_ranges, false);
+    let (start, header, interstitials) = match absorbed {
+        Some((hstart, header, interstitials)) => (hstart, Some(header), interstitials),
+        None => (window_start, None, Vec::new()),
     };
     Some(TableRun {
         start,
@@ -2779,7 +2864,7 @@ fn build_union_table(
         // starts at the first fragment's body and `union_header_from_above`
         // stops at prose, so any stepped-over line lands outside the new span
         // and is classified normally — preserved as a paragraph, not dropped.
-        interstitials: Vec::new(),
+        interstitials,
         bbox: lines_bbox(lines, start, window_end),
         block: Block::Table { header, rows },
     })
@@ -2795,11 +2880,7 @@ fn run_column_count(run: &TableRun) -> Option<usize> {
     }
 }
 
-/// Re-derive column tracks from the run's source lines. Aggregates min start_x
-/// and max end_x across *every* line whose `split_cells` count matches the
-/// run's declared column count, so a column with tight per-row content (e.g.
-/// a right-aligned numeric body cell) still produces a track wide enough to
-/// match a wider header cell that aligns to the same column.
+/// Re-derive column tracks from source lines for adjacency and table merging.
 fn run_body_tracks(run: &TableRun, lines: &[ProjectedLine]) -> Option<Vec<(f32, f32)>> {
     let n_cols = run_column_count(run)?;
     let mut acc: Option<Vec<(f32, f32)>> = None;
@@ -2819,6 +2900,100 @@ fn run_body_tracks(run: &TableRun, lines: &[ProjectedLine]) -> Option<Vec<(f32, 
         });
     }
     acc
+}
+
+/// Re-derive cross-region header tracks from located body cells where possible,
+/// falling back to source lines.
+fn cross_region_header_tracks(run: &TableRun, lines: &[ProjectedLine]) -> Option<Vec<(f32, f32)>> {
+    let n_cols = run_column_count(run)?;
+    let mut acc = vec![None; n_cols];
+    if let Block::Table { rows, .. } = &run.block {
+        for row in rows.iter().filter(|row| row.len() == n_cols) {
+            for (idx, cell) in row.iter().enumerate() {
+                if cell.text.trim().is_empty() {
+                    continue;
+                }
+                let Some(bbox) = &cell.bbox else {
+                    continue;
+                };
+                let range = (bbox.x, bbox.x + bbox.width);
+                acc[idx] = Some(
+                    acc[idx].map_or(range, |(s, e): (f32, f32)| (s.min(range.0), e.max(range.1))),
+                );
+            }
+        }
+    }
+    for line in &lines[run.body_start..run.end.min(lines.len())] {
+        let cells = split_cells(line);
+        if cells.len() != n_cols {
+            continue;
+        }
+        for (idx, cell) in cells.iter().enumerate() {
+            let range = (cell.start_x, cell.end_x);
+            acc[idx] =
+                Some(acc[idx].map_or(range, |(s, e): (f32, f32)| (s.min(range.0), e.max(range.1))));
+        }
+    }
+    if !acc.iter().any(Option::is_some) {
+        return None;
+    }
+    Some(
+        acc.into_iter()
+            .map(|range| range.unwrap_or((f32::INFINITY, f32::NEG_INFINITY)))
+            .collect(),
+    )
+}
+
+pub(super) fn matching_track_count(a: &[(f32, f32)], b: &[(f32, f32)]) -> (usize, usize) {
+    let (narrow, wide) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    let matched = narrow
+        .iter()
+        .filter(|&&track| {
+            wide.iter().any(|&other| {
+                subset_match_score(track, other, TABLE_SUBSET_TRACK_TOLERANCE_PT).is_some()
+            })
+        })
+        .count();
+    (matched, narrow.len())
+}
+
+pub(super) fn absorb_cross_region_headers(lines: &[ProjectedLine], runs: &mut [TableRun]) {
+    let dbgt = *super::flags::DEBUG_TABLE;
+    let mut floor = 0;
+    for run in runs {
+        let needs_header = matches!(
+            &run.block,
+            Block::Table {
+                header: None,
+                rows
+            } if !rows.is_empty()
+        );
+        if needs_header && let Some(body_tracks) = cross_region_header_tracks(run, lines) {
+            if let Some((start, header, interstitials)) =
+                union_header_from_above(lines, run.body_start, floor, &body_tracks, true)
+            {
+                if dbgt {
+                    eprintln!(
+                        "[tbl-cross-region-header] absorbed lines {start}..{} into {} columns",
+                        run.body_start,
+                        header.len()
+                    );
+                }
+                run.start = start;
+                run.bbox = lines_bbox(lines, start, run.end);
+                run.interstitials = interstitials;
+                if let Block::Table {
+                    header: run_header, ..
+                } = &mut run.block
+                {
+                    *run_header = Some(header);
+                }
+            }
+        } else if needs_header && dbgt {
+            eprintln!("[tbl-cross-region-header] skip run: no body tracks");
+        }
+        floor = run.end;
+    }
 }
 
 fn tracks_align_same(a: &[(f32, f32)], b: &[(f32, f32)]) -> bool {
@@ -3632,6 +3807,219 @@ impl CellGrid {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ProseBoundaryCrossing {
+    crossed: bool,
+    via: &'static str,
+    gap_width: Option<f32>,
+}
+
+type ProseXRange = (f32, f32);
+
+fn running_prose_sentence_shape(line: &ProjectedLine) -> bool {
+    let text = line.text.trim();
+    let char_count = text.chars().count();
+    let word_count = text.split_whitespace().count();
+    let non_space_count = text.chars().filter(|ch| !ch.is_whitespace()).count();
+    let alpha_count = text.chars().filter(|ch| ch.is_alphabetic()).count();
+    char_count >= 90
+        && word_count >= 12
+        && non_space_count > 0
+        && alpha_count as f32 >= non_space_count as f32 * 0.6
+        && text.chars().any(|ch| matches!(ch, '.' | '!' | '?'))
+}
+
+fn prose_line_x_ranges(line: &ProjectedLine) -> (Vec<ProseXRange>, Vec<ProseXRange>) {
+    let mut words = Vec::new();
+    let mut item_only = Vec::new();
+    for span in line
+        .spans
+        .iter()
+        .filter(|span| !span.text.trim().is_empty())
+    {
+        if let Some(span_words) = verified_words(span) {
+            words.extend(span_words.into_iter().filter_map(|word| {
+                let x1 = word.x + word.width;
+                (word.width > 0.0 && x1.is_finite()).then_some((word.x, x1))
+            }));
+        } else if span.width > 0.0 {
+            item_only.push((span.x, span.x + span.width));
+        }
+    }
+    words.sort_by(|a, b| a.0.total_cmp(&b.0));
+    (words, item_only)
+}
+
+fn prose_boundary_crossing(
+    boundary: f32,
+    word_ranges: &[ProseXRange],
+    item_only_ranges: &[ProseXRange],
+    gap_limit: f32,
+) -> ProseBoundaryCrossing {
+    const EDGE_MARGIN_PT: f32 = 1.5;
+    if word_ranges
+        .iter()
+        .any(|&(x0, x1)| boundary >= x0 + EDGE_MARGIN_PT && boundary <= x1 - EDGE_MARGIN_PT)
+    {
+        return ProseBoundaryCrossing {
+            crossed: true,
+            via: "word-box",
+            gap_width: None,
+        };
+    }
+    for pair in word_ranges.windows(2) {
+        let gap_width = pair[1].0 - pair[0].1;
+        if gap_width >= 0.0 && boundary >= pair[0].1 && boundary <= pair[1].0 {
+            return ProseBoundaryCrossing {
+                crossed: gap_width < gap_limit,
+                via: if gap_width < gap_limit {
+                    "inter-word-gap"
+                } else {
+                    "wide-gap"
+                },
+                gap_width: Some(gap_width),
+            };
+        }
+    }
+    if word_ranges
+        .iter()
+        .any(|&(x0, x1)| boundary > x0 && boundary < x1)
+    {
+        return ProseBoundaryCrossing {
+            crossed: false,
+            via: "word-edge-margin",
+            gap_width: None,
+        };
+    }
+    if item_only_ranges
+        .iter()
+        .any(|&(x0, x1)| boundary >= x0 + EDGE_MARGIN_PT && boundary <= x1 - EDGE_MARGIN_PT)
+    {
+        return ProseBoundaryCrossing {
+            crossed: true,
+            via: "item-box",
+            gap_width: None,
+        };
+    }
+    if item_only_ranges
+        .iter()
+        .any(|&(x0, x1)| boundary > x0 && boundary < x1)
+    {
+        return ProseBoundaryCrossing {
+            crossed: false,
+            via: "item-edge-margin",
+            gap_width: None,
+        };
+    }
+    ProseBoundaryCrossing {
+        crossed: false,
+        via: "none",
+        gap_width: None,
+    }
+}
+
+fn prose_line_font_height(line: &ProjectedLine) -> f32 {
+    let mut heights: Vec<f32> = line
+        .spans
+        .iter()
+        .filter_map(|span| span.font_height.or(span.font_size))
+        .filter(|height| height.is_finite() && *height > 0.0)
+        .collect();
+    heights.sort_by(f32::total_cmp);
+    heights
+        .get(heights.len() / 2)
+        .copied()
+        .or_else(|| {
+            (line.dominant_font_size.is_finite() && line.dominant_font_size > 0.0)
+                .then_some(line.dominant_font_size)
+        })
+        .unwrap_or_else(|| line.bbox.height.max(1.0))
+}
+
+fn should_stop_at_running_prose(
+    line: &ProjectedLine,
+    xs: &[f32],
+    row: usize,
+    idx: usize,
+    dbg: bool,
+) -> bool {
+    if !running_prose_sentence_shape(line) {
+        return false;
+    }
+    let boundaries: Vec<f32> = xs
+        .iter()
+        .copied()
+        .skip(1)
+        .take(xs.len().saturating_sub(2))
+        .collect();
+    let (word_ranges, item_only_ranges) = prose_line_x_ranges(line);
+    let geometry = match (word_ranges.is_empty(), item_only_ranges.is_empty()) {
+        (false, false) => "verified-word-boxes with item-box fallback",
+        (false, true) => "verified-word-boxes",
+        (true, false) => "item-level boxes (no verified word boxes)",
+        (true, true) => "no word or item boxes",
+    };
+    let line_x0 = line.bbox.x;
+    let line_x1 = line.bbox.x + line.bbox.width;
+    let font_height = prose_line_font_height(line);
+    let gap_limit = font_height * 0.5;
+    if boundaries.is_empty() {
+        if dbg {
+            eprintln!(
+                "[ruled] prose candidate line idx={idx} row={row} x={line_x0:.1}..{line_x1:.1} geometry={geometry}: no interior column boundaries; skip stop"
+            );
+        }
+        return false;
+    }
+    if dbg {
+        eprintln!(
+            "[ruled] prose candidate line idx={idx} row={row} x={line_x0:.1}..{line_x1:.1} font-height={font_height:.1} geometry={geometry} interior-boundaries={}",
+            boundaries.len()
+        );
+    }
+    let mut in_extent = 0usize;
+    let mut crossed = 0usize;
+    for boundary in boundaries {
+        let within_line = boundary >= line_x0 && boundary <= line_x1;
+        let decision = if within_line {
+            in_extent += 1;
+            prose_boundary_crossing(boundary, &word_ranges, &item_only_ranges, gap_limit)
+        } else {
+            ProseBoundaryCrossing {
+                crossed: false,
+                via: "outside-line",
+                gap_width: None,
+            }
+        };
+        if decision.crossed {
+            crossed += 1;
+        }
+        if dbg {
+            let gap_width = decision
+                .gap_width
+                .map_or_else(|| "n/a".to_string(), |gap| format!("{gap:.1}"));
+            eprintln!(
+                "[ruled] prose boundary idx={idx} x={boundary:.1} in_extent={} crossed={} via={} gap_width={gap_width} gap_limit={gap_limit:.1}",
+                if within_line { "yes" } else { "no" },
+                if decision.crossed { "yes" } else { "no" },
+                decision.via
+            );
+        }
+    }
+    let ratio = if in_extent == 0 {
+        0.0
+    } else {
+        crossed as f32 / in_extent as f32
+    };
+    let stop = in_extent >= 2 && crossed >= 2 && ratio >= 0.67;
+    if dbg {
+        eprintln!(
+            "[ruled] prose boundary decision idx={idx} crossed={crossed} in_extent={in_extent} ratio={ratio:.2} stop={stop}"
+        );
+    }
+    stop
+}
+
 /// Bin each line's text into the grid cells defined by column boundaries `xs`
 /// and row boundaries `ys`. A projected line frequently spans several ruled
 /// columns (one baseline = one line), so binning whole lines by centroid would
@@ -3647,6 +4035,7 @@ fn assign_cells(
     lines: &[ProjectedLine],
     xs: &[f32],
     ys: &[f32],
+    stop_at_running_prose: bool,
     dbg: bool,
 ) -> Option<(CellGrid, Vec<usize>)> {
     let n_rows = ys.len() - 1;
@@ -3685,6 +4074,15 @@ fn assign_cells(
         };
         if line.text.trim().is_empty() {
             continue;
+        }
+        if stop_at_running_prose && should_stop_at_running_prose(line, xs, row, idx, dbg) {
+            if dbg {
+                eprintln!(
+                    "[ruled] stop at running prose line idx={idx} row={row}: {:?}",
+                    line.text.chars().take(120).collect::<String>()
+                );
+            }
+            break;
         }
 
         // Only consume the line when its text sits inside the grid
@@ -4499,7 +4897,8 @@ fn build_ruled_table_from(
     // Assign text to cells, then reject if no lines landed inside the grid or
     // too many spans straddle interior column boundaries (decorative box, not
     // a table).
-    let (mut grid, consumed_indices) = assign_cells(lines, &xs, &ys, dbg)?;
+    let (mut grid, consumed_indices) =
+        assign_cells(lines, &xs, &ys, pass == RuledPass::Global, dbg)?;
     let straddle_frac = grid.straddle_frac;
     grid.spanned = rowspan_mask(hs, h_indices, vs, v_kept, &xs, &ys);
 
@@ -5154,6 +5553,157 @@ pub(super) fn escape_table_cell(s: &str) -> String {
 mod tests {
     use super::super::test_helpers::{line, line_with_spans, rect_borders, stroke};
     use super::*;
+
+    fn prose_test_words<'a>(
+        words: &'a [&'a str],
+        start_x: f32,
+        char_width: f32,
+        word_gap: f32,
+    ) -> Vec<(&'a str, f32, f32)> {
+        let mut x = start_x;
+        words
+            .iter()
+            .map(|word| {
+                let width = word.chars().count() as f32 * char_width;
+                let positioned = (*word, x, width);
+                x += width + word_gap;
+                positioned
+            })
+            .collect()
+    }
+
+    fn prose_test_span(words: &[(&str, f32, f32)], font_size: f32) -> crate::types::TextItem {
+        let x = words[0].1;
+        let end_x = words.last().map(|(_, x, width)| x + width).unwrap_or(x);
+        crate::types::TextItem {
+            text: words
+                .iter()
+                .map(|(word, _, _)| *word)
+                .collect::<Vec<_>>()
+                .join(" "),
+            x,
+            y: 0.0,
+            width: end_x - x,
+            height: font_size,
+            font_size: Some(font_size),
+            words: words
+                .iter()
+                .map(|(text, x, width)| crate::types::WordBox {
+                    text: (*text).into(),
+                    x: *x,
+                    y: 0.0,
+                    width: *width,
+                    height: font_size,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn prose_test_line(
+        text: &str,
+        spans: Vec<crate::types::TextItem>,
+        font_size: f32,
+    ) -> ProjectedLine {
+        let x0 = spans
+            .iter()
+            .map(|span| span.x)
+            .fold(f32::INFINITY, f32::min);
+        let x1 = spans
+            .iter()
+            .map(|span| span.x + span.width)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let mut line = line(text, x0, 0.0, font_size, font_size);
+        line.bbox = crate::types::Rect {
+            x: x0,
+            y: 0.0,
+            width: x1 - x0,
+            height: font_size,
+        };
+        line.spans = spans;
+        line
+    }
+
+    #[test]
+    fn justified_prose_crossing_three_ruled_columns_stops() {
+        let text = "During the year ended September 30, 2025, compensation expense increased $1.3 billion, or 2.8%, compared";
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let positions = prose_test_words(&words, 10.0, 3.0, 2.0);
+        let line = prose_test_line(text, vec![prose_test_span(&positions, 10.0)], 10.0);
+        let first_gap = positions[5].1 + positions[5].2 + 1.0;
+        let second_gap = positions[10].1 + positions[10].2 + 1.0;
+        let xs = [0.0, first_gap, second_gap, 330.0];
+
+        assert!(running_prose_sentence_shape(&line));
+        assert!(should_stop_at_running_prose(&line, &xs, 0, 25, false));
+    }
+
+    #[test]
+    fn first_rent_comps_row_with_wide_cell_gaps_continues() {
+        let left_words = ["1", "Ashley", "Gables", "Buckhead", "530", "E", "Paces"];
+        let middle_words = ["Ferry", "Rd", "NE", "2019", "Residential"];
+        let right_words = ["94%", "325", "0.6", "Miles", "$2,443"];
+        let left_positions = prose_test_words(&left_words, 10.0, 2.0, 2.0);
+        let middle_positions = prose_test_words(&middle_words, 120.0, 2.0, 2.0);
+        let right_positions = prose_test_words(&right_words, 220.0, 2.0, 2.0);
+        let text = "1 Ashley Gables Buckhead 530 E Paces Ferry Rd NE 2019 Residential 94% 325 0.6 Miles $2,443";
+        let line = prose_test_line(
+            text,
+            vec![
+                prose_test_span(&left_positions, 10.0),
+                prose_test_span(&middle_positions, 10.0),
+                prose_test_span(&right_positions, 10.0),
+            ],
+            10.0,
+        );
+        let xs = [0.0, 100.0, 200.0, 300.0];
+        let ys = [0.0, 20.0];
+
+        assert!(running_prose_sentence_shape(&line));
+        let (_, consumed) = assign_cells(&[line], &xs, &ys, true, false).unwrap();
+        assert_eq!(
+            consumed,
+            [0],
+            "the first data row has no prior assigned cells"
+        );
+    }
+
+    #[test]
+    fn long_left_column_label_with_right_column_numbers_continues() {
+        let label = "The subject property benefits from recent renovations and convenient access to neighborhood services.";
+        let text = format!("{label} $1,250 2025");
+        let spans = vec![
+            crate::types::TextItem {
+                text: label.into(),
+                x: 10.0,
+                y: 0.0,
+                width: 270.0,
+                height: 10.0,
+                ..Default::default()
+            },
+            crate::types::TextItem {
+                text: "$1,250".into(),
+                x: 330.0,
+                y: 0.0,
+                width: 30.0,
+                height: 10.0,
+                ..Default::default()
+            },
+            crate::types::TextItem {
+                text: "2025".into(),
+                x: 520.0,
+                y: 0.0,
+                width: 24.0,
+                height: 10.0,
+                ..Default::default()
+            },
+        ];
+        let line = prose_test_line(&text, spans, 10.0);
+        let xs = [0.0, 300.0, 500.0, 680.0];
+
+        assert!(running_prose_sentence_shape(&line));
+        assert!(!should_stop_at_running_prose(&line, &xs, 0, 0, false));
+    }
 
     /// One PDFium run whose words sit at the given (x, width) positions.
     fn run_with_words(words: &[(&str, f32, f32)]) -> TextItem {

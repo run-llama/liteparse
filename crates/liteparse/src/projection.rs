@@ -4317,6 +4317,7 @@ fn xy_cut_rec(
     idxs: Vec<usize>,
     bbox: Rect,
     depth: u32,
+    inherited_tabular: bool,
     median_h: f32,
     figures: &[Rect],
 ) -> Region {
@@ -4342,6 +4343,7 @@ fn xy_cut_rec(
     // inter-column gutters either (the dominant column-major-table failure).
     let mut region_tabular = false;
     let column_full = xy_find_column_cut(items, &idxs, &bbox, median_h, &mut region_tabular);
+    let effective_tabular = region_tabular || (inherited_tabular && column_full.is_none());
     let column = if v.is_none() && h.is_none() {
         column_full
     } else {
@@ -4427,10 +4429,15 @@ fn xy_cut_rec(
     // When the histogram fill gate classified this region as tabular, a
     // density V valley here is a table gutter, not a column boundary —
     // suppress it so the table reaches the table detectors row-major.
-    let v = if region_tabular {
+    let v = if effective_tabular {
         if debug_xy && v.is_some() {
             let pad = "  ".repeat(depth as usize);
-            eprintln!("[xy d={depth}]{pad} -> SUPPRESS density V (region tabular)");
+            let reason = if region_tabular {
+                "region tabular"
+            } else {
+                "region tabular, inherited"
+            };
+            eprintln!("[xy d={depth}]{pad} -> SUPPRESS density V ({reason})");
         }
         None
     } else {
@@ -4709,8 +4716,25 @@ fn xy_cut_rec(
                 cut.axis, cut.position
             );
         }
-        let left_region = xy_cut_rec(items, left, left_bbox, depth + 1, median_h, figures);
-        let right_region = xy_cut_rec(items, right, right_bbox, depth + 1, median_h, figures);
+        let child_inherited_tabular = effective_tabular && cut.axis == CutAxis::Horizontal;
+        let left_region = xy_cut_rec(
+            items,
+            left,
+            left_bbox,
+            depth + 1,
+            child_inherited_tabular,
+            median_h,
+            figures,
+        );
+        let right_region = xy_cut_rec(
+            items,
+            right,
+            right_bbox,
+            depth + 1,
+            child_inherited_tabular,
+            median_h,
+            figures,
+        );
         return Region {
             bbox,
             kind: RegionKind::Split {
@@ -4762,7 +4786,7 @@ pub(crate) fn xy_cut(
     }
     let bbox = xy_root_bbox(items, page_width, page_height);
     let median_h = xy_median_line_height(items, &all);
-    xy_cut_rec(items, all, bbox, 0, median_h, figures)
+    xy_cut_rec(items, all, bbox, 0, false, median_h, figures)
 }
 
 /// Pre-order walk of leaves. Each leaf yields its `region_path` (index trail
@@ -5599,6 +5623,119 @@ mod tests {
             !has_vertical_split(&region),
             "table region must not be V-cut into column fragments"
         );
+    }
+
+    #[test]
+    fn xy_cut_inherits_tabular_state_through_section_banners() {
+        let mut items = Vec::new();
+        let mut section_rows = Vec::new();
+        let section_ys = [100.0, 190.0, 280.0];
+        for section in 0..section_ys.len() {
+            let mut rows = Vec::new();
+            for row in 0..3 {
+                let y = section_ys[section] + row as f32 * 12.0;
+                let offset = row as f32 * 24.0;
+                let mut row_indices = Vec::new();
+                for col in 0..7 {
+                    let text = if col == 0 {
+                        format!("Section {section} label {row}")
+                    } else {
+                        format!("{}", (section + 1) * 100 + row * 10 + col)
+                    };
+                    row_indices.push(items.len());
+                    items.push(item_at(
+                        &text,
+                        50.0 + col as f32 * 72.0 + offset,
+                        y,
+                        8.0,
+                        10.0,
+                    ));
+                }
+                rows.push(row_indices);
+            }
+            section_rows.push(rows);
+            if section + 1 < section_ys.len() {
+                items.push(item_at(
+                    &format!("Section {}", section + 1),
+                    50.0,
+                    section_ys[section] + 50.0,
+                    488.0,
+                    10.0,
+                ));
+            }
+        }
+
+        let all: Vec<usize> = (0..items.len()).collect();
+        let bbox = xy_root_bbox(&items, 612.0, 792.0);
+        let median_h = xy_median_line_height(&items, &all);
+        let mut root_tabular = false;
+        assert!(xy_find_column_cut(&items, &all, &bbox, median_h, &mut root_tabular).is_none());
+        assert!(
+            root_tabular,
+            "the synthetic root must receive the tabular verdict"
+        );
+
+        let first_section_idxs: Vec<usize> = section_rows[0].iter().flatten().copied().collect();
+        let mut child_tabular = false;
+        assert!(
+            xy_find_column_cut(
+                &items,
+                &first_section_idxs,
+                &bbox,
+                median_h,
+                &mut child_tabular
+            )
+            .is_none()
+        );
+        assert!(
+            !child_tabular,
+            "the short section must not independently receive a tabular verdict"
+        );
+        let banner = xy_find_banner_cut(&items, &all, &bbox, median_h)
+            .expect("the first section should be separated by a banner cut");
+        assert_eq!(banner.axis, CutAxis::Horizontal);
+        assert!(banner.position > 134.0 && banner.position < 150.0);
+        let (first_section_bbox, _) = xy_split_bbox(&bbox, &banner);
+        assert!(
+            xy_find_best_cut(
+                &items,
+                &first_section_idxs,
+                &first_section_bbox,
+                CutAxis::Vertical,
+                median_h,
+                &[]
+            )
+            .is_some()
+        );
+
+        let region = xy_cut(&items, 612.0, 792.0, &[]);
+        assert!(matches!(
+            region.kind,
+            RegionKind::Split {
+                axis: CutAxis::Horizontal,
+                ..
+            }
+        ));
+        let mut leaves = Vec::new();
+        xy_walk_leaves(&region, &mut Vec::new(), &mut leaves);
+        let mut leaf_for_item = vec![None; items.len()];
+        for (leaf_idx, (_, item_indices)) in leaves.iter().enumerate() {
+            for &item_idx in item_indices {
+                leaf_for_item[item_idx] = Some(leaf_idx);
+            }
+        }
+        for (section, rows) in section_rows.iter().enumerate() {
+            for (row, item_indices) in rows.iter().enumerate() {
+                let leaf = leaf_for_item[item_indices[0]];
+                assert!(
+                    leaf.is_some()
+                        && item_indices
+                            .iter()
+                            .all(|&item_idx| leaf_for_item[item_idx] == leaf),
+                    "section {section} row {row} was split across leaves"
+                );
+            }
+        }
     }
 
     fn has_vertical_split(region: &Region) -> bool {

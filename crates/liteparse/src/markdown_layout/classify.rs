@@ -21,6 +21,50 @@ use super::paragraphs::{
 use super::repetition::is_header_or_footer;
 use super::tables::{detect_ruled_tables, detect_tables_banded, merge_table_runs};
 
+fn table_column_count(block: &Block) -> usize {
+    match block {
+        Block::Table { header, rows } => header
+            .as_ref()
+            .map(|h| h.len())
+            .or_else(|| rows.first().map(Vec::len))
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn filled_cell_count(block: &Block) -> usize {
+    match block {
+        Block::Table { header, rows } => header
+            .iter()
+            .flat_map(|row| row.iter())
+            .chain(rows.iter().flat_map(|row| row.iter()))
+            .filter(|cell| !cell.text.trim().is_empty())
+            .count(),
+        _ => 0,
+    }
+}
+
+fn numeric_filled_cell_count(block: &Block) -> usize {
+    match block {
+        Block::Table { header, rows } => header
+            .iter()
+            .flat_map(|row| row.iter())
+            .chain(rows.iter().flat_map(|row| row.iter()))
+            .filter(|cell| cell.text.bytes().any(|byte| byte.is_ascii_digit()))
+            .count(),
+        _ => 0,
+    }
+}
+
+fn table_covers_global(local: &Block, global: &Block) -> bool {
+    let global_numeric = numeric_filled_cell_count(global);
+    if global_numeric == 0 {
+        filled_cell_count(local) as f32 >= 0.6 * filled_cell_count(global) as f32
+    } else {
+        numeric_filled_cell_count(local) as f32 >= 0.6 * global_numeric as f32
+    }
+}
+
 /// A document-order page interruption that breaks the normal text flow: either
 /// a horizontal rule (from vector graphics) or a figure injection (a raster
 /// image ref). Collected into one y-sorted stream so the two kinds interleave
@@ -185,30 +229,30 @@ pub fn classify_page_with_filters(
         if groups.len() < 2 {
             continue;
         }
-        // If any single leaf's share of these lines already forms a table
-        // on its own, the per-region path handles this content — don't
-        // override (a decorative frame can span a data table plus surrounding
-        // prose; the data region tables cleanly by itself, while the frame
-        // would fuse prose into garbage cells).
-        // The leaf must also hold a material share of the run. A leaf with a
-        // handful of the lines - a landscape slide's title band sitting above
-        // the table, which tables "successfully" on its own as a row of
-        // gutter-split title fragments - is not evidence that the per-region
-        // path has this content covered; vetoing on it drops the whole table
-        // and spills its body rows into prose.
+        // A local table vetoes the global run only when it has at least two
+        // columns, a material share of the lines, and at least 60% of the
+        // global run's numeric cells. Newmark p91's local label grid has 20/29
+        // filled cells but almost none of the values, which sit around
+        // x=500–530 outside its x=72–500 grid. A true data-region table still
+        // vetoes; a prose-fused decorative frame has few numbers to compare.
+        // If the global run has no numbers, retain the filled-cell fallback.
         let already_handled = groups.values().any(|idxs| {
             if idxs.len() < 2 || idxs.len() * 4 < consumed.len() {
                 return false;
             }
             let sub: Vec<ProjectedLine> = idxs.iter().map(|&i| lines[i].clone()).collect();
-            !super::tables::detect_ruled_tables(
+            let covers_global = |block: &Block| table_covers_global(block, &run.block);
+            super::tables::detect_ruled_tables(
                 &sub,
                 &rule_segments,
                 page.page_width,
                 page.page_height,
             )
-            .is_empty()
-                || !super::tables::detect_tables(&sub).is_empty()
+            .iter()
+            .any(|r| table_column_count(&r.block) >= 2 && covers_global(&r.block))
+                || super::tables::detect_tables(&sub)
+                    .iter()
+                    .any(|r| table_column_count(&r.block) >= 2 && covers_global(&r.block))
         });
         if already_handled {
             continue;
@@ -220,15 +264,8 @@ pub fn classify_page_with_filters(
         // region is a framed text box, never tabular. Word-count gating can't
         // be used here: genuine scattered description grids have equally long
         // cells.
-        if let Block::Table { header, rows } = &run.block {
-            let cols = header
-                .as_ref()
-                .map(|h| h.len())
-                .or_else(|| rows.first().map(Vec::len))
-                .unwrap_or(0);
-            if cols < 2 {
-                continue;
-            }
+        if table_column_count(&run.block) < 2 {
+            continue;
         }
         let top_y = consumed
             .iter()
@@ -1235,7 +1272,8 @@ mod tests {
     use super::super::headings::{build_heading_map, compute_body_size};
     use super::super::repetition::compute_header_footer_set;
     use super::super::test_helpers::{
-        header_footer_page, line, mono_line, page, page_with_graphics, stroke, styled_line,
+        header_footer_page, line, line_with_spans, mono_line, page, page_with_graphics, stroke,
+        styled_line,
     };
     use super::*;
     use crate::types::TextItem;
@@ -1460,7 +1498,6 @@ mod tests {
 
     #[test]
     fn detects_simple_borderless_table() {
-        use super::super::test_helpers::line_with_spans;
         let lines = vec![
             line_with_spans(
                 &[("Name", 50.0), ("Age", 150.0), ("City", 250.0)],
@@ -1489,6 +1526,243 @@ mod tests {
                 assert_eq!(rows[1][2], "NYC");
             }
             other => panic!("expected table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn global_ruled_table_survives_single_column_leaf_veto() {
+        let rows = [
+            ("Account", "2024", "2023"),
+            ("Cash", "$1,000", "$900"),
+            ("Debt", "$500", "$600"),
+            ("Equity", "$500", "$300"),
+        ];
+        let mut label_lines = Vec::new();
+        let mut current_value_lines = Vec::new();
+        let mut prior_value_lines = Vec::new();
+        for (row_idx, (label, current, prior)) in rows.iter().enumerate() {
+            let y = 100.0 + row_idx as f32 * 25.0;
+            let mut label_line = line_with_spans(&[(*label, 100.0)], y, 10.0);
+            label_line.region_path = vec![0];
+            label_lines.push(label_line);
+
+            let mut current_value = line_with_spans(&[(*current, 323.0)], y, 8.0);
+            current_value.region_path = vec![1];
+            current_value_lines.push(current_value);
+
+            let mut prior_value = line_with_spans(&[(*prior, 354.0)], y, 8.0);
+            prior_value.region_path = vec![2];
+            prior_value_lines.push(prior_value);
+        }
+        label_lines.extend(current_value_lines);
+        label_lines.extend(prior_value_lines);
+
+        let mut graphics = Vec::new();
+        for y in [90.0, 115.0, 140.0, 165.0, 190.0] {
+            graphics.push(stroke(80.0, y, 380.0, y, 0.5));
+        }
+        for x in [80.0, 320.0, 350.0, 380.0] {
+            graphics.push(stroke(x, 90.0, x, 190.0, 0.5));
+        }
+        let page = page_with_graphics(label_lines, graphics);
+        let rule_segments = super::super::tables::extract_rule_segments(&page.graphics);
+        let label_leaf = &page.projected_lines[..rows.len()];
+        let label_runs = detect_ruled_tables(
+            label_leaf,
+            &rule_segments,
+            page.page_width,
+            page.page_height,
+        );
+        assert!(
+            label_runs
+                .iter()
+                .any(|run| table_column_count(&run.block) == 1),
+            "the label leaf should independently form a single-column ruled run: {label_runs:?}"
+        );
+        assert!(super::super::tables::detect_tables(label_leaf).is_empty());
+
+        let blocks = classify_page(&page, &[]);
+        let table = blocks
+            .iter()
+            .find_map(|block| match &block.block {
+                Block::Table { header, rows } => Some((header, rows)),
+                _ => None,
+            })
+            .expect("the global ruled pass should emit the scattered table");
+
+        let (header, rows) = table;
+        let col_count = header
+            .as_ref()
+            .map(Vec::len)
+            .or_else(|| rows.first().map(Vec::len))
+            .unwrap_or(0);
+        assert!(col_count >= 2, "expected multiple columns, got {table:?}");
+        let cells = header
+            .iter()
+            .flat_map(|cells| cells.iter())
+            .chain(rows.iter().flat_map(|row| row.iter()))
+            .map(|cell| cell.text.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            cells.contains(&"$1,000"),
+            "missing current value: {cells:?}"
+        );
+        assert!(cells.contains(&"$900"), "missing prior value: {cells:?}");
+    }
+
+    #[test]
+    fn global_veto_uses_filled_cells_when_numeric_count_is_zero() {
+        let local = Block::Table {
+            header: None,
+            rows: vec![vec!["Label".into(), "Description".into()]],
+        };
+        let global = Block::Table {
+            header: None,
+            rows: vec![vec!["Label".into(), "Current".into(), "Prior".into()]],
+        };
+        assert_eq!(numeric_filled_cell_count(&global), 0);
+        assert!(table_covers_global(&local, &global));
+
+        let sparse_local = Block::Table {
+            header: None,
+            rows: vec![vec!["Label".into(), "".into()]],
+        };
+        assert!(!table_covers_global(&sparse_local, &global));
+    }
+
+    #[test]
+    fn global_veto_numeric_coverage_distinguishes_data_from_prose_frame() {
+        let global = Block::Table {
+            header: None,
+            rows: vec![vec![
+                "Asset".into(),
+                "100".into(),
+                "200".into(),
+                "300".into(),
+                "400".into(),
+                "500".into(),
+            ]],
+        };
+        let data_region = Block::Table {
+            header: None,
+            rows: vec![vec!["100".into(), "200".into(), "300".into()]],
+        };
+        let prose_frame = Block::Table {
+            header: None,
+            rows: vec![vec![
+                "Narrative".into(),
+                "1".into(),
+                "Additional prose".into(),
+                "Footer".into(),
+            ]],
+        };
+
+        assert!(table_covers_global(&data_region, &global));
+        assert!(filled_cell_count(&prose_frame) as f32 >= 0.6 * filled_cell_count(&global) as f32);
+        assert!(!table_covers_global(&prose_frame, &global));
+    }
+
+    #[test]
+    fn global_ruled_table_survives_sparse_two_column_leaf_veto() {
+        let rows = [
+            ("Account", "Current Period", Some("$900"), None, None),
+            ("Cash", "Cash Position", Some("$1,000"), None, None),
+            ("Debt", "Long-Term Debt", None, None, Some("$600")),
+            ("Equity", "1", None, None, Some("$100")),
+        ];
+        let mut label_lines = Vec::new();
+        let mut middle_value_lines = Vec::new();
+        let mut last_value_lines = Vec::new();
+        for (row_idx, (label, first, second, third, fourth)) in rows.iter().enumerate() {
+            let y = 100.0 + row_idx as f32 * 25.0;
+            let mut label_line = line_with_spans(&[(*label, 100.0), (*first, 160.0)], y, 10.0);
+            label_line.region_path = vec![0];
+            label_lines.push(label_line);
+
+            let middle_spans: Vec<(&str, f32)> = [(*second, 230.0), (*third, 300.0)]
+                .into_iter()
+                .filter_map(|(text, x)| text.map(|text| (text, x)))
+                .collect();
+            if !middle_spans.is_empty() {
+                let mut middle_values = line_with_spans(&middle_spans, y, 8.0);
+                middle_values.region_path = vec![1];
+                middle_value_lines.push(middle_values);
+            }
+
+            if let Some(text) = fourth {
+                let mut last_value = line_with_spans(&[(*text, 370.0)], y, 8.0);
+                last_value.region_path = vec![2];
+                last_value_lines.push(last_value);
+            }
+        }
+        label_lines.extend(middle_value_lines);
+        label_lines.extend(last_value_lines);
+
+        let mut graphics = Vec::new();
+        for y in [90.0, 115.0, 140.0, 165.0, 190.0] {
+            graphics.push(stroke(80.0, y, 430.0, y, 0.5));
+        }
+        for x in [80.0, 150.0, 220.0, 290.0, 360.0, 430.0] {
+            graphics.push(stroke(x, 90.0, x, 190.0, 0.5));
+        }
+        let page = page_with_graphics(label_lines, graphics);
+        let label_leaf = &page.projected_lines[..rows.len()];
+        let label_runs = super::super::tables::detect_tables(label_leaf);
+        let label_run = label_runs
+            .iter()
+            .find(|run| table_column_count(&run.block) == 2)
+            .expect("the label leaf should independently form a two-column table");
+        assert_eq!(filled_cell_count(&label_run.block), 8);
+        assert_eq!(numeric_filled_cell_count(&label_run.block), 1);
+
+        let rule_segments = super::super::tables::extract_rule_segments(&page.graphics);
+        let global_run = super::super::tables::detect_ruled_tables_global(
+            &page.projected_lines,
+            &rule_segments,
+            page.page_width,
+            page.page_height,
+        )
+        .into_iter()
+        .find(|(run, _)| table_column_count(&run.block) == 5)
+        .expect("the page-wide detector should find the five-column table")
+        .0;
+        assert!(
+            filled_cell_count(&label_run.block) as f32
+                >= 0.6 * filled_cell_count(&global_run.block) as f32,
+            "the old filled-cell criterion would veto this global run"
+        );
+        assert!(
+            (numeric_filled_cell_count(&label_run.block) as f32)
+                < 0.6 * numeric_filled_cell_count(&global_run.block) as f32,
+            "the label-side table should not cover the global numeric cells"
+        );
+
+        let blocks = classify_page(&page, &[]);
+        let table = blocks
+            .iter()
+            .find_map(|block| match &block.block {
+                Block::Table { header, rows } => Some((header, rows)),
+                _ => None,
+            })
+            .expect("the global ruled pass should emit the fuller scattered table");
+        let (header, rows) = table;
+        let col_count = header
+            .as_ref()
+            .map(Vec::len)
+            .or_else(|| rows.first().map(Vec::len))
+            .unwrap_or(0);
+        assert_eq!(col_count, 5, "expected the label and four value columns");
+        let cells = header
+            .iter()
+            .flat_map(|cells| cells.iter())
+            .chain(rows.iter().flat_map(|row| row.iter()))
+            .map(|cell| cell.text.as_str())
+            .collect::<Vec<_>>();
+        for value in ["$900", "$1,000", "$600", "$100"] {
+            assert!(
+                cells.iter().any(|cell| cell.contains(value)),
+                "missing {value}: {cells:?}"
+            );
         }
     }
 

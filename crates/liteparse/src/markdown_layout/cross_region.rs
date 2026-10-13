@@ -283,7 +283,8 @@ fn fuse_cluster(cluster: &Cluster, path: &[u16]) -> ProjectedLine {
 /// Validation A: the fused zone re-classifies as a table via the standard
 /// detectors, covering most of its lines.
 fn validate_via_detectors(merged: &[ProjectedLine]) -> Option<Vec<TableRun>> {
-    let runs = detect_tables(merged);
+    let mut runs = detect_tables(merged);
+    super::tables::absorb_cross_region_headers(merged, &mut runs);
     let covered: usize = runs
         .iter()
         .filter(|r| match &r.block {
@@ -508,6 +509,16 @@ pub(super) fn find_cross_region_table_merge(lines: &[ProjectedLine]) -> Option<C
             // stacked leaves on the other side; the extension below pulls the
             // rest in, so the band must cover both sides fully.
             let band = (left.y0.min(right.y0) - 2.0, left.y1.max(right.y1) + 2.0);
+            let stays_on_one_side = |leaf: &Leaf| {
+                let width = (leaf.x1 - leaf.x0).max(1.0);
+                let center = (leaf.x0 + leaf.x1) * 0.5;
+                let overhang = if center < cut_x {
+                    (leaf.x1 - cut_x).max(0.0)
+                } else {
+                    (cut_x - leaf.x0).max(0.0)
+                };
+                overhang <= CR_SIBLING_MAX_X_OVERLAP_FRAC * width
+            };
 
             // Extend the pair to every leaf living inside the overlap band and
             // entirely on one side of the cut (a side may itself be H-cut into
@@ -522,14 +533,7 @@ pub(super) fn find_cross_region_table_merge(lines: &[ProjectedLine]) -> Option<C
                 // The leaf must sit predominantly on one side of the cut:
                 // its overhang across the cut stays within the straddle
                 // allowance (widened slices), measured against its own width.
-                let width = (leaf.x1 - leaf.x0).max(1.0);
-                let center = (leaf.x0 + leaf.x1) * 0.5;
-                let overhang = if center < cut_x {
-                    (leaf.x1 - cut_x).max(0.0)
-                } else {
-                    (cut_x - leaf.x0).max(0.0)
-                };
-                if overhang <= CR_SIBLING_MAX_X_OVERLAP_FRAC * width {
+                if stays_on_one_side(leaf) {
                     set_leaves.push(k);
                 }
             }
@@ -537,11 +541,46 @@ pub(super) fn find_cross_region_table_merge(lines: &[ProjectedLine]) -> Option<C
                 continue;
             }
 
-            // The set's line ranges must tile a contiguous range — a foreign
-            // leaf interleaved in reading order means this isn't a clean
-            // sliced zone.
-            let lo = set_leaves.iter().map(|&k| leaves[k].start).min().unwrap();
-            let hi = set_leaves.iter().map(|&k| leaves[k].end).max().unwrap();
+            // Close over interleaved leaves inside the selected line range.
+            // Do not extend the y-band here: only the original candidate set
+            // uses that test, while closure admits intervening leaves that
+            // remain predominantly on one side of the same cut.
+            let mut lo = set_leaves.iter().map(|&k| leaves[k].start).min().unwrap();
+            let mut hi = set_leaves.iter().map(|&k| leaves[k].end).max().unwrap();
+            loop {
+                let covered: usize = set_leaves
+                    .iter()
+                    .map(|&k| leaves[k].end - leaves[k].start)
+                    .sum();
+                if covered == hi - lo {
+                    break;
+                }
+                let additions: Vec<usize> = leaves
+                    .iter()
+                    .enumerate()
+                    .filter(|(k, leaf)| {
+                        !set_leaves.contains(k)
+                            && leaf.start >= lo
+                            && leaf.end <= hi
+                            && stays_on_one_side(leaf)
+                    })
+                    .map(|(k, _)| k)
+                    .collect();
+                if additions.is_empty() {
+                    break;
+                }
+                if debug {
+                    for &k in &additions {
+                        eprintln!(
+                            "[cross-region] close cut@{cut_x:.1}: add leaf {k} lines [{},{})",
+                            leaves[k].start, leaves[k].end
+                        );
+                    }
+                }
+                set_leaves.extend(additions);
+                lo = set_leaves.iter().map(|&k| leaves[k].start).min().unwrap();
+                hi = set_leaves.iter().map(|&k| leaves[k].end).max().unwrap();
+            }
             let covered: usize = set_leaves
                 .iter()
                 .map(|&k| leaves[k].end - leaves[k].start)
@@ -709,6 +748,224 @@ mod tests {
         assert!(m.merged[0].text.contains("MANILA"));
         assert!(m.merged[0].text.contains("2454"));
         assert!(m.merged[0].text.contains("6125"));
+    }
+
+    fn interleaved_three_column_table(wide_top_prose: bool) -> Vec<ProjectedLine> {
+        let columns = [
+            (
+                50.0,
+                ["Trading", "Projections"],
+                ["Rooms Revenue", "Rooms Occupied", "Average Rate", "RevPAR"],
+            ),
+            (
+                200.0,
+                ["Year One", "Year Two"],
+                ["1,644,143", "1,650,000", "123.45", "87.65"],
+            ),
+            (
+                280.0,
+                ["% of TR", "% of TR"],
+                ["71.0%", "70.5%", "—", "50.2%"],
+            ),
+        ];
+        let mut lines = Vec::new();
+        for (column, (x, top, body)) in columns.iter().enumerate() {
+            for (row, text) in top.iter().enumerate() {
+                let line = if wide_top_prose && column == 2 && row == 0 {
+                    line(&"a ".repeat(80), -200.0, 100.0, 10.0, 10.0)
+                } else {
+                    line_with_spans(&[(text, *x)], 100.0 + row as f32 * 12.0, 10.0)
+                };
+                lines.push(at_region(line, &[column as u16, 0]));
+            }
+            for (row, text) in body.iter().enumerate() {
+                lines.push(at_region(
+                    line_with_spans(&[(text, *x)], 200.0 + row as f32 * 20.0, 10.0),
+                    &[column as u16, 1],
+                ));
+            }
+        }
+        lines
+    }
+
+    #[test]
+    fn interleaved_h_cut_leaves_close_into_a_table() {
+        let lines = interleaved_three_column_table(false);
+        let m =
+            find_cross_region_table_merge(&lines).expect("should close over interleaved leaves");
+        assert_eq!(m.merged.len(), 6);
+        assert!(m.merged[2].text.contains("Rooms Revenue"));
+        assert!(m.merged[2].text.contains("1,644,143"));
+        assert!(m.merged[2].text.contains("71.0%"));
+        let has_complete_row = m.runs.iter().any(|run| match &run.block {
+            Block::Table { header, rows } => header.iter().chain(rows.iter()).any(|row| {
+                let text = row
+                    .iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>();
+                text.contains("Rooms Revenue")
+                    && text.contains("1,644,143")
+                    && text.contains("71.0%")
+            }),
+            _ => false,
+        });
+        assert!(
+            has_complete_row,
+            "table rows should retain labels and both values"
+        );
+    }
+
+    #[test]
+    fn interleaved_table_headers_align_with_merged_body_columns() {
+        let columns = [
+            (
+                50.0,
+                ["Trading", "Projections"],
+                ["Rooms Revenue", "Rooms Occupied", "Average Rate", "RevPAR"],
+            ),
+            (
+                200.0,
+                ["Year One", "Year Two"],
+                ["1,644,143", "1,650,000", "123.45", "87.65"],
+            ),
+            (
+                280.0,
+                ["% of TR", "% of TR"],
+                ["71.0%", "70.5%", "—", "50.2%"],
+            ),
+        ];
+        let mut lines = Vec::new();
+        for (column, (x, top, body)) in columns.iter().enumerate() {
+            for (row, text) in top.iter().enumerate() {
+                lines.push(at_region(
+                    line_with_spans(&[(*text, *x)], 160.0 + row as f32 * 12.0, 10.0),
+                    &[column as u16, 0],
+                ));
+            }
+            if column == 0 {
+                lines.push(at_region(
+                    line_with_spans(&[("Revenue", *x)], 188.0, 10.0),
+                    &[column as u16, 1],
+                ));
+            }
+            for (row, text) in body.iter().enumerate() {
+                lines.push(at_region(
+                    line_with_spans(&[(*text, *x)], 200.0 + row as f32 * 20.0, 10.0),
+                    &[column as u16, 1],
+                ));
+            }
+        }
+
+        let m = find_cross_region_table_merge(&lines).expect("should merge");
+        let header = m
+            .runs
+            .iter()
+            .find_map(|run| match &run.block {
+                Block::Table {
+                    header: Some(header),
+                    ..
+                } => Some(header),
+                _ => None,
+            })
+            .expect("aligned year labels should be absorbed as the table header");
+        let header_text = header
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(header_text.contains("Year One"));
+        assert!(header_text.contains("Year Two"));
+        let body_text = m
+            .runs
+            .iter()
+            .flat_map(|run| match &run.block {
+                Block::Table { rows, .. } => rows
+                    .iter()
+                    .flat_map(|row| row.iter().map(|cell| cell.text.as_str()))
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(body_text.contains("1,644,143"));
+        assert!(body_text.contains("71.0%"));
+    }
+
+    #[test]
+    fn cross_region_header_absorption_skips_one_section_label() {
+        let lines = vec![
+            line_with_spans(&[("Year One", 794.4), ("Total", 875.6)], 100.0, 10.0),
+            line_with_spans(&[("Year Two", 794.4), ("Total", 875.6)], 110.0, 10.0),
+            line_with_spans(&[("Revenue", 50.0)], 120.0, 10.0),
+            line_with_spans(
+                &[("Rooms Revenue", 50.0), ("1,644,143", 794.4)],
+                140.0,
+                10.0,
+            ),
+            line_with_spans(
+                &[("Rooms Occupied", 50.0), ("1,650,000", 794.4)],
+                160.0,
+                10.0,
+            ),
+        ];
+        let located_cell = |text: &str, x: f32| {
+            Cell::located(
+                text,
+                Rect {
+                    x,
+                    y: 140.0,
+                    width: 20.0,
+                    height: 10.0,
+                },
+            )
+        };
+        let mut runs = vec![TableRun {
+            start: 3,
+            end: 5,
+            body_start: 3,
+            bbox: None,
+            block: Block::Table {
+                header: None,
+                rows: vec![
+                    vec![
+                        located_cell("Rooms Revenue", 50.0),
+                        located_cell("1,644,143", 794.4),
+                        Cell::default(),
+                        located_cell("2,000,000", 853.8),
+                    ],
+                    vec![
+                        located_cell("Rooms Occupied", 50.0),
+                        located_cell("1,650,000", 794.4),
+                        Cell::default(),
+                        located_cell("2,100,000", 853.8),
+                    ],
+                ],
+            },
+            interstitials: Vec::new(),
+        }];
+
+        super::super::tables::absorb_cross_region_headers(&lines, &mut runs);
+
+        let run = &runs[0];
+        assert_eq!(run.start, 0);
+        assert_eq!(run.interstitials[0].text, "Revenue");
+        let Block::Table {
+            header: Some(header),
+            ..
+        } = &run.block
+        else {
+            panic!("aligned year labels should become the table header");
+        };
+        assert!(header[1].text.contains("Year One"));
+        assert!(header[1].text.contains("Year Two"));
+        assert!(header[2].text.is_empty());
+        assert!(header[3].text.contains("Total"));
+    }
+
+    #[test]
+    fn interleaved_wide_prose_leaf_prevents_closure() {
+        let lines = interleaved_three_column_table(true);
+        assert!(find_cross_region_table_merge(&lines).is_none());
     }
 
     /// Two side-by-side prose columns with coincidentally aligned baselines
