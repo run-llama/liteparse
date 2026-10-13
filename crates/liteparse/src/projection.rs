@@ -5203,6 +5203,9 @@ fn build_one_line(
         all_mono: majority(mono_chars),
         all_strike: false,
         spans,
+        // `items` is flattened 1:1 into `ParsedPage::text_items`, so these
+        // are the public item indices.
+        span_item_indices: sorted,
         region_path,
         mcid,
         in_figure,
@@ -5927,5 +5930,49 @@ mod tests {
         // including angles near (but not within tolerance of) 360°.
         assert_eq!(canonical_rotation(45.0), 45);
         assert_eq!(canonical_rotation(357.0), 357);
+    }
+
+    #[test]
+    fn lines_index_the_returned_text_items() {
+        let mut text_items = Vec::new();
+        for row in 0..5 {
+            let y = 100.0 + row as f32 * 14.0;
+            for (text, x) in [(format!("left{row}"), 50.0), (format!("right{row}"), 350.0)] {
+                text_items.push(TextItem {
+                    text,
+                    x,
+                    y,
+                    width: 200.0,
+                    height: 10.0,
+                    ..Default::default()
+                });
+            }
+        }
+        let page = Page {
+            page_number: 1,
+            page_label: None,
+            page_width: 612.0,
+            page_height: 792.0,
+            content_bounds: None,
+            text_items,
+            graphics: Vec::new(),
+            vector_graphics: None,
+            struct_nodes: Vec::new(),
+            image_refs: Vec::new(),
+            annotations: None,
+            form_fields: None,
+            structure_tree: None,
+        };
+        let page = project_pages_to_grid(vec![page]).remove(0);
+        let mut seen = Vec::new();
+        for line in &page.projected_lines {
+            assert_eq!(line.spans.len(), line.span_item_indices.len());
+            for (span, &i) in line.spans.iter().zip(&line.span_item_indices) {
+                assert_eq!(page.text_items[i].text, span.text);
+                seen.push(i);
+            }
+        }
+        seen.sort_unstable();
+        assert_eq!(seen, (0..page.text_items.len()).collect::<Vec<_>>());
     }
 }

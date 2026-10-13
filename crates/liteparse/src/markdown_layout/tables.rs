@@ -90,6 +90,9 @@ pub(super) struct SpanPiece<'a> {
     /// were verified to reconstruct `text` exactly. Empty otherwise, so a
     /// consumer can treat non-empty as "real geometry for every word here".
     pub(super) words: Vec<&'a crate::types::WordBox>,
+    /// Index of `span` in the page's `text_items`; `None` when the piece was
+    /// built without its line.
+    pub(super) item_index: Option<usize>,
 }
 
 /// A run's own word boxes, in reading order, but only when they reconstruct the
@@ -145,6 +148,7 @@ pub(super) fn split_span_at_gutters(span: &TextItem) -> Vec<SpanPiece<'_>> {
             text: collapse_whitespace(span.text.trim()),
             span,
             words: words.clone(),
+            item_index: None,
         }]
     };
     // Two words give exactly one gap, which is trivially "the largest": no
@@ -223,6 +227,7 @@ fn piece_from_words<'a>(words: &[&'a crate::types::WordBox], span: &'a TextItem)
         ),
         span,
         words: words.to_vec(),
+        item_index: None,
     }
 }
 
@@ -232,8 +237,15 @@ pub(super) fn line_pieces(line: &ProjectedLine) -> Vec<SpanPiece<'_>> {
     let mut pieces: Vec<SpanPiece<'_>> = line
         .spans
         .iter()
-        .filter(|s| !s.text.trim().is_empty())
-        .flat_map(split_span_at_gutters)
+        .enumerate()
+        .filter(|(_, s)| !s.text.trim().is_empty())
+        .flat_map(|(i, s)| {
+            let item_index = line.span_item_indices.get(i).copied();
+            split_span_at_gutters(s).into_iter().map(move |mut piece| {
+                piece.item_index = item_index;
+                piece
+            })
+        })
         .collect();
     pieces.sort_by(|a, b| a.x.total_cmp(&b.x));
     pieces
@@ -258,6 +270,8 @@ pub(super) struct TableCell {
     pub(super) end_x: f32,
     pub(super) text: String,
     pub(super) bold: bool,
+    /// Source items of the spans aggregated into the cell, in reading order.
+    pub(super) text_item_indices: Vec<usize>,
 }
 
 /// A contiguous tabular run: line indices `[start, end)` plus the detected
@@ -283,6 +297,9 @@ pub(super) struct TableRun {
     /// consumed. `None` when the run was built without geometry (tests, and
     /// synthetic merges with nothing to measure).
     pub(super) bbox: Option<Rect>,
+    /// Source items of a `GridFallback` run (the lines it renders). A
+    /// `Table` run's items are on its cells.
+    pub(super) item_indices: Vec<usize>,
 }
 
 /// Union of the boxes of `lines[start..end]` — the region a table run covers
@@ -310,7 +327,31 @@ fn cell_rect(cell: &TableCell, line: &ProjectedLine) -> Rect {
 
 /// Build a located `Cell` from a `TableCell` and its owning line.
 fn located_cell(cell: &TableCell, line: &ProjectedLine) -> Cell {
-    Cell::located(cell.text.clone(), cell_rect(cell, line))
+    Cell::sourced(
+        cell.text.clone(),
+        cell_rect(cell, line),
+        cell.text_item_indices.clone(),
+    )
+}
+
+/// A line's source items in the order its `text` reads them. `spans` (and
+/// so `span_item_indices`) run x-ascending, which a right-to-left line reads
+/// backwards.
+pub(super) fn line_items_in_reading_order(line: &ProjectedLine) -> Vec<usize> {
+    let mut items = line.span_item_indices.clone();
+    if line.rtl {
+        items.reverse();
+    }
+    items
+}
+
+/// A whole line as one located cell.
+fn line_cell(line: &ProjectedLine) -> Cell {
+    Cell::sourced(
+        line.text.trim().to_string(),
+        line.bbox.clone(),
+        line_items_in_reading_order(line),
+    )
 }
 
 /// Split a `ProjectedLine`'s spans into cells. A gap larger than
@@ -319,12 +360,14 @@ fn located_cell(cell: &TableCell, line: &ProjectedLine) -> Cell {
 pub(super) fn split_cells(line: &ProjectedLine) -> Vec<TableCell> {
     // Skip whitespace-only spans before computing gaps — leading/trailing
     // empty items would otherwise add spurious cell boundaries.
-    let mut spans: Vec<&TextItem> = line
+    let mut spans: Vec<(&TextItem, Option<usize>)> = line
         .spans
         .iter()
-        .filter(|s| !s.text.trim().is_empty())
+        .enumerate()
+        .filter(|(_, s)| !s.text.trim().is_empty())
+        .map(|(i, s)| (s, line.span_item_indices.get(i).copied()))
         .collect();
-    spans.sort_by(|a, b| a.x.total_cmp(&b.x));
+    spans.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
     if spans.is_empty() {
         return Vec::new();
     }
@@ -337,12 +380,13 @@ pub(super) fn split_cells(line: &ProjectedLine) -> Vec<TableCell> {
 
     let mut cells: Vec<TableCell> = Vec::new();
     let mut current_text = String::new();
-    let mut current_start = spans[0].x;
+    let mut current_start = spans[0].0.x;
     let mut current_bold_chars: usize = 0;
     let mut current_total_chars: usize = 0;
-    let mut prev_right = spans[0].x;
+    let mut current_items: Vec<usize> = Vec::new();
+    let mut prev_right = spans[0].0.x;
 
-    for (i, span) in spans.iter().enumerate() {
+    for (i, &(span, item_index)) in spans.iter().enumerate() {
         let gap = span.x - prev_right;
         let break_cell = i > 0 && gap > gap_threshold;
         if break_cell {
@@ -352,6 +396,7 @@ pub(super) fn split_cells(line: &ProjectedLine) -> Vec<TableCell> {
                 end_x: prev_right,
                 text: collapse_whitespace(current_text.trim()),
                 bold,
+                text_item_indices: std::mem::take(&mut current_items),
             });
             current_text.clear();
             current_start = span.x;
@@ -362,6 +407,7 @@ pub(super) fn split_cells(line: &ProjectedLine) -> Vec<TableCell> {
             current_text.push(' ');
         }
         current_text.push_str(&span.text);
+        current_items.extend(item_index);
         let n = span.text.chars().count();
         current_total_chars += n;
         if is_bold_item(span) {
@@ -376,6 +422,7 @@ pub(super) fn split_cells(line: &ProjectedLine) -> Vec<TableCell> {
             end_x: prev_right,
             text: collapse_whitespace(current_text.trim()),
             bold,
+            text_item_indices: current_items,
         });
     }
     cells
@@ -447,6 +494,7 @@ fn recover_merged_cell(mut cells: Vec<TableCell>, tracks: &[f32]) -> Option<Vec<
                 end_x,
                 text: piece.clone(),
                 bold: cell.bold,
+                text_item_indices: cell.text_item_indices.clone(),
             });
         }
         cells.remove(i);
@@ -683,6 +731,7 @@ fn cells_from_pieces(
             end_x: t,
             text: String::new(),
             bold: false,
+            text_item_indices: Vec::new(),
         })
         .collect();
     let push_text = |dst: &mut String, src: &str| {
@@ -722,6 +771,7 @@ fn cells_from_pieces(
                 let idx = covered[0];
                 push_text(&mut cells[idx].text, &span.text);
                 cells[idx].end_x = cells[idx].end_x.max(x1);
+                cells[idx].text_item_indices.extend(span.item_index);
                 if is_bold_item(span.span) {
                     cells[idx].bold = true;
                 }
@@ -739,6 +789,7 @@ fn cells_from_pieces(
                         return None;
                     }
                     push_text(&mut cells[*idx].text, piece);
+                    cells[*idx].text_item_indices.extend(span.item_index);
                     if bold {
                         cells[*idx].bold = true;
                     }
@@ -977,6 +1028,7 @@ fn finalize_table_run(
             rows: body_rows,
         },
         interstitials,
+        item_indices: Vec::new(),
     })
 }
 
@@ -1334,6 +1386,7 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> 
                             end_x: tracks[i],
                             text: String::new(),
                             bold: false,
+                            text_item_indices: Vec::new(),
                         })
                         .collect();
                     for (c, &idx) in cells.iter().zip(&mapping) {
@@ -1353,6 +1406,9 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> 
                         prev_cells[idx].text.push(' ');
                     }
                     prev_cells[idx].text.push_str(&c.text);
+                    prev_cells[idx]
+                        .text_item_indices
+                        .extend_from_slice(&c.text_item_indices);
                 }
                 j += 1;
                 continue;
@@ -1423,6 +1479,10 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> 
             .iter()
             .map(|(_, line, _)| line.text.trim_end().to_string())
             .collect();
+        let item_indices = rows
+            .iter()
+            .flat_map(|(_, line, _)| line.span_item_indices.iter().copied())
+            .collect();
         return Some(TableRun {
             start: start_idx,
             end,
@@ -1430,6 +1490,7 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> 
             bbox: lines_bbox(lines, start_idx, end),
             block: Block::GridFallback { lines: raw },
             interstitials: Vec::new(),
+            item_indices,
         });
     }
 
@@ -1568,10 +1629,7 @@ fn absorb_header_lines(
     // normally. Each committed skip is handed back as owned text + box so the
     // consumer can emit it as a paragraph (the line index lands inside the
     // run span, where the classifier never looks).
-    let interstitials: Vec<Cell> = skipped
-        .iter()
-        .map(|&idx| Cell::located(lines[idx].text.trim().to_string(), lines[idx].bbox.clone()))
-        .collect();
+    let interstitials: Vec<Cell> = skipped.iter().map(|&idx| line_cell(&lines[idx])).collect();
     // Collected bottom-up; reverse so text reads top-to-bottom per column.
     absorbed.reverse();
     let mut header = vec![Cell::default(); column_count];
@@ -1585,6 +1643,9 @@ fn absorb_header_lines(
             }
             header[idx].text.push_str(&c.text);
             Rect::extend(&mut header[idx].bbox, &cell_rect(c, &lines[*line_idx]));
+            header[idx]
+                .text_item_indices
+                .extend_from_slice(&c.text_item_indices);
         }
     }
     // A header reached via a skip is held to a coverage bar: it must name at
@@ -2131,6 +2192,8 @@ fn try_detect_description_list(lines: &[ProjectedLine], start_idx: usize) -> Opt
                     // cell, so it grows that cell's box rather than starting a
                     // new one.
                     Rect::extend(&mut tail.bbox, &cell_rect(cell, &lines[j]));
+                    tail.text_item_indices
+                        .extend_from_slice(&cell.text_item_indices);
                     j += 1;
                     continue;
                 }
@@ -2144,8 +2207,14 @@ fn try_detect_description_list(lines: &[ProjectedLine], start_idx: usize) -> Opt
                 {
                     // Split position is a linear estimate inside one merged
                     // span, not an observed boundary — the halves carry text
-                    // only rather than a fabricated rect.
-                    rows.push((j, left.into(), right.into()));
+                    // only rather than a fabricated rect; both carry the
+                    // merged span's items.
+                    let half = |text: String| Cell {
+                        text,
+                        bbox: None,
+                        text_item_indices: cell.text_item_indices.clone(),
+                    };
+                    rows.push((j, half(left), half(right)));
                     j += 1;
                     continue;
                 }
@@ -2211,6 +2280,7 @@ fn try_detect_description_list(lines: &[ProjectedLine], start_idx: usize) -> Opt
             rows: body,
         },
         interstitials: Vec::new(),
+        item_indices: Vec::new(),
     })
 }
 
@@ -2570,17 +2640,19 @@ fn union_header_from_above(
         if !table_rows_adjacent(&lines[cand], &lines[j]) {
             break;
         }
-        let spans: Vec<&TextItem> = lines[cand]
+        let spans: Vec<(&TextItem, Option<usize>)> = lines[cand]
             .spans
             .iter()
-            .filter(|s| !s.text.trim().is_empty())
+            .enumerate()
+            .filter(|(_, s)| !s.text.trim().is_empty())
+            .map(|(i, s)| (s, lines[cand].span_item_indices.get(i).copied()))
             .collect();
         if spans.len() < 2 {
             break;
         }
         let mut layer = vec![Cell::default(); tracks.len()];
         let mut ok = true;
-        for s in &spans {
+        for &(s, item_index) in &spans {
             let x0 = s.x;
             let x1 = s.x + s.width.max(0.0);
             let covered: Vec<usize> = tracks
@@ -2612,6 +2684,7 @@ fn union_header_from_above(
                 }
                 dst.text.push_str(s.text.trim());
                 Rect::extend(&mut dst.bbox, &span_rect);
+                dst.text_item_indices.extend(item_index);
             }
         }
         if !ok || layer.iter().filter(|t| !t.text.is_empty()).count() < 2 {
@@ -2628,11 +2701,13 @@ fn union_header_from_above(
         .map(|col| {
             let mut parts: Vec<&str> = Vec::new();
             let mut bbox: Option<Rect> = None;
+            let mut text_item_indices = Vec::new();
             for layer in &layers {
                 let s = layer[col].as_str();
                 if let Some(r) = &layer[col].bbox {
                     Rect::extend(&mut bbox, r);
                 }
+                text_item_indices.extend_from_slice(&layer[col].text_item_indices);
                 if s.is_empty() || parts.last() == Some(&s) {
                     continue;
                 }
@@ -2641,6 +2716,7 @@ fn union_header_from_above(
             Cell {
                 text: parts.join(" "),
                 bbox,
+                text_item_indices,
             }
         })
         .collect();
@@ -2750,7 +2826,11 @@ fn build_union_table(
                 // Unbinnable line kept whole in column 0; it occupies the
                 // entire line, so that is the cell's box.
                 let mut row = vec![Cell::default(); tracks.len()];
-                row[0] = Cell::located(collapse_whitespace(text), line.bbox.clone());
+                row[0] = Cell::sourced(
+                    collapse_whitespace(text),
+                    line.bbox.clone(),
+                    line_items_in_reading_order(line),
+                );
                 rows.push(row);
             }
         }
@@ -2780,6 +2860,7 @@ fn build_union_table(
         // stops at prose, so any stepped-over line lands outside the new span
         // and is classified normally — preserved as a paragraph, not dropped.
         interstitials: Vec::new(),
+        item_indices: Vec::new(),
         bbox: lines_bbox(lines, start, window_end),
         block: Block::Table { header, rows },
     })
@@ -2953,10 +3034,7 @@ fn try_merge_pair(a: &TableRun, b: &TableRun, lines: &[ProjectedLine]) -> Option
         if !slice.iter().all(is_absorbable_interstitial) {
             return None;
         }
-        slice
-            .iter()
-            .map(|l| Cell::located(l.text.trim().to_string(), l.bbox.clone()))
-            .collect()
+        slice.iter().map(line_cell).collect()
     };
     let (a_header, a_rows) = match &a.block {
         Block::Table { header, rows } => (header.clone(), rows.clone()),
@@ -3024,6 +3102,7 @@ fn try_merge_pair(a: &TableRun, b: &TableRun, lines: &[ProjectedLine]) -> Option
                 .chain(&b.interstitials)
                 .cloned()
                 .collect(),
+            item_indices: Vec::new(),
         });
     }
 
@@ -3049,6 +3128,7 @@ fn try_merge_pair(a: &TableRun, b: &TableRun, lines: &[ProjectedLine]) -> Option
             .map(|col| {
                 let mut parts: Vec<String> = Vec::new();
                 let mut bbox: Option<Rect> = None;
+                let mut text_item_indices = Vec::new();
                 for layer in &header_layers {
                     let Some(cell) = layer.get(col) else {
                         continue;
@@ -3059,6 +3139,7 @@ fn try_merge_pair(a: &TableRun, b: &TableRun, lines: &[ProjectedLine]) -> Option
                     if let Some(r) = &cell.bbox {
                         Rect::extend(&mut bbox, r);
                     }
+                    text_item_indices.extend_from_slice(&cell.text_item_indices);
                     let s = cell.as_str();
                     if s.is_empty() || parts.last().map(|p| p.as_str()) == Some(s) {
                         continue;
@@ -3068,6 +3149,7 @@ fn try_merge_pair(a: &TableRun, b: &TableRun, lines: &[ProjectedLine]) -> Option
                 Cell {
                     text: parts.join(" "),
                     bbox,
+                    text_item_indices,
                 }
             })
             .collect();
@@ -3096,6 +3178,7 @@ fn try_merge_pair(a: &TableRun, b: &TableRun, lines: &[ProjectedLine]) -> Option
                 .chain(&b.interstitials)
                 .cloned()
                 .collect(),
+            item_indices: Vec::new(),
         });
     }
 
@@ -3423,6 +3506,21 @@ fn filter_by<T>(items: Vec<T>, keep: &[bool]) -> Vec<T> {
         .collect()
 }
 
+/// Append trimmed text and its source items to `cell`, space-separated.
+/// Returns whether anything was appended.
+fn push_cell_text(cell: &mut Cell, txt: &str, items: &[usize]) -> bool {
+    let txt = txt.trim();
+    if txt.is_empty() {
+        return false;
+    }
+    if !cell.text.is_empty() {
+        cell.text.push(' ');
+    }
+    cell.text.push_str(txt);
+    cell.text_item_indices.extend_from_slice(items);
+    true
+}
+
 /// The per-cell grids `build_ruled_table` fills, collapses, and reads as one
 /// unit. Bundling them lets the row/column-collapse passes filter every layer
 /// through a single `retain_rows`/`retain_cols` call instead of five parallel
@@ -3441,8 +3539,9 @@ struct CellGrid {
     /// its FULL text into every covered cell instead of being split. Consulted
     /// only for header-band flattening — a group header like "North America"
     /// centered over its sub-columns must replicate, while the same geometry in
-    /// a data row is a merged run that should split.
-    repl: Vec<Vec<String>>,
+    /// a data row is a merged run that should split. Cells here carry text
+    /// and source items only, never a box.
+    repl: Vec<Vec<Cell>>,
     /// Per-row flag: the row contains an alpha-dominant multi-column span (a
     /// group-header label, as opposed to a mostly-digit merged data run).
     row_alpha_spanner: Vec<bool>,
@@ -3476,6 +3575,7 @@ impl CellGrid {
                             width: xs[c + 1] - xs[c],
                             height: ys[r + 1] - ys[r],
                         }),
+                        text_item_indices: Vec::new(),
                     })
                     .collect()
             })
@@ -3484,7 +3584,7 @@ impl CellGrid {
             text,
             is_bold: vec![vec![true; n_cols]; n_rows],
             has_text: vec![vec![false; n_cols]; n_rows],
-            repl: vec![vec![String::new(); n_cols]; n_rows],
+            repl: vec![vec![Cell::default(); n_cols]; n_rows],
             row_alpha_spanner: vec![false; n_rows],
             spanned: vec![vec![false; n_cols]; n_rows],
             straddle_frac: 0.0,
@@ -3499,32 +3599,18 @@ impl CellGrid {
         self.text.first().map(|r| r.len()).unwrap_or(0)
     }
 
-    /// Append trimmed text to a cell, marking it as text-bearing. No-op for
-    /// blank input.
-    fn push_text(&mut self, row: usize, col: usize, txt: &str) {
-        let txt = txt.trim();
-        if txt.is_empty() {
-            return;
+    /// Append trimmed text (and its source items) to a cell, marking it as
+    /// text-bearing. No-op for blank input.
+    fn push_text(&mut self, row: usize, col: usize, txt: &str, items: &[usize]) {
+        if push_cell_text(&mut self.text[row][col], txt, items) {
+            self.has_text[row][col] = true;
         }
-        if !self.text[row][col].text.is_empty() {
-            self.text[row][col].text.push(' ');
-        }
-        self.text[row][col].text.push_str(txt);
-        self.has_text[row][col] = true;
     }
 
-    /// Append trimmed text to the colspan-semantics (`repl`) cell. No-op for
-    /// blank input.
-    fn push_repl(&mut self, row: usize, col: usize, txt: &str) {
-        let txt = txt.trim();
-        if txt.is_empty() {
-            return;
-        }
-        let dst = &mut self.repl[row][col];
-        if !dst.is_empty() {
-            dst.push(' ');
-        }
-        dst.push_str(txt);
+    /// Append trimmed text (and its source items) to the colspan-semantics
+    /// (`repl`) cell. No-op for blank input.
+    fn push_repl(&mut self, row: usize, col: usize, txt: &str, items: &[usize]) {
+        push_cell_text(&mut self.repl[row][col], txt, items);
     }
 
     /// Keep only rows `r` where `keep[r]`; every layer filters identically.
@@ -3704,19 +3790,22 @@ fn assign_cells(
             continue;
         }
 
-        let mut text_spans: Vec<&TextItem> = line
+        let mut text_spans: Vec<(&TextItem, Option<usize>)> = line
             .spans
             .iter()
-            .filter(|s| !s.text.trim().is_empty())
+            .enumerate()
+            .filter(|(_, s)| !s.text.trim().is_empty())
+            .map(|(i, s)| (s, line.span_item_indices.get(i).copied()))
             .collect();
-        text_spans.sort_by(|a, b| a.x.total_cmp(&b.x));
+        text_spans.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
 
         if text_spans.is_empty() {
             // No raw text spans (synthetic/OCR lines): old whole-line centroid path.
             let cx = line.bbox.x + line.bbox.width * 0.5;
             if let Some(col) = find_bucket(xs, cx.clamp(xs[0], xs[n_cols])) {
-                grid.push_text(row, col, &line.text);
-                grid.push_repl(row, col, &line.text);
+                let items = line_items_in_reading_order(line);
+                grid.push_text(row, col, &line.text, &items);
+                grid.push_repl(row, col, &line.text, &items);
                 if !line.all_bold {
                     grid.is_bold[row][col] = false;
                 }
@@ -3725,7 +3814,8 @@ fn assign_cells(
             continue;
         }
 
-        for span in text_spans {
+        for (span, item_index) in text_spans {
+            let items = item_index.as_slice();
             // Per-span row: a span carries its own baseline y, which may sit
             // in a different ruled row than the line centroid.
             let span_cy = span.y + span.height * 0.5;
@@ -3743,8 +3833,8 @@ fn assign_cells(
                 }
             }
             if c_lo == c_hi {
-                grid.push_text(row, c_lo, &span.text);
-                grid.push_repl(row, c_lo, &span.text);
+                grid.push_text(row, c_lo, &span.text, items);
+                grid.push_repl(row, c_lo, &span.text, items);
                 if !line.all_bold {
                     grid.is_bold[row][c_lo] = false;
                 }
@@ -3755,7 +3845,7 @@ fn assign_cells(
             // label is alpha-dominant (group headers are words; merged data
             // runs are mostly digits).
             for col in c_lo..=c_hi {
-                grid.push_repl(row, col, &span.text);
+                grid.push_repl(row, col, &span.text, items);
             }
             if is_alpha_dominant(&span.text) {
                 grid.row_alpha_spanner[row] = true;
@@ -3770,14 +3860,14 @@ fn assign_cells(
             // font it can cut a word or two off from the true boundary.
             if let Some(by_word) = bucket_words_into_columns(span, xs) {
                 for (col, text) in by_word {
-                    grid.push_text(row, col, &text);
+                    grid.push_text(row, col, &text, items);
                     if !line.all_bold {
                         grid.is_bold[row][col] = false;
                     }
                 }
             } else if let Some(pieces) = split_span_at_anchors(span, &covered, xs) {
                 for (k, piece) in pieces.iter().enumerate() {
-                    grid.push_text(row, c_lo + k, piece);
+                    grid.push_text(row, c_lo + k, piece, items);
                     if !line.all_bold {
                         grid.is_bold[row][c_lo + k] = false;
                     }
@@ -3786,7 +3876,7 @@ fn assign_cells(
                 // No whitespace to split on — assign whole span by center.
                 let cx = (span.x + span.width * 0.5).clamp(xs[0], xs[n_cols]);
                 if let Some(col) = find_bucket(xs, cx) {
-                    grid.push_text(row, col, &span.text);
+                    grid.push_text(row, col, &span.text, items);
                     if !line.all_bold {
                         grid.is_bold[row][col] = false;
                     }
@@ -3832,7 +3922,7 @@ fn assign_cells(
 fn flatten_header_band(
     cells: &[Vec<Cell>],
     cell_has_text: &[Vec<bool>],
-    cells_repl: &[Vec<String>],
+    cells_repl: &[Vec<Cell>],
     row_alpha_spanner: &[bool],
     n_rows: usize,
     n_cols: usize,
@@ -3869,8 +3959,10 @@ fn flatten_header_band(
             let header: Vec<Cell> = (0..n_cols)
                 .map(|c| {
                     let mut parts: Vec<&str> = Vec::new();
+                    let mut text_item_indices = Vec::new();
                     for row in cells_repl.iter().take(b + 1) {
                         let s = row[c].as_str();
+                        text_item_indices.extend_from_slice(&row[c].text_item_indices);
                         if s.is_empty() || parts.last() == Some(&s) {
                             continue;
                         }
@@ -3885,6 +3977,7 @@ fn flatten_header_band(
                     Cell {
                         text: parts.join(" "),
                         bbox,
+                        text_item_indices,
                     }
                 })
                 .collect();
@@ -3964,6 +4057,9 @@ fn merge_stacked_header(
                     merged_row[c].text.push(' ');
                 }
                 merged_row[c].text.push_str(cells[r][c].as_str());
+                merged_row[c]
+                    .text_item_indices
+                    .extend_from_slice(&cells[r][c].text_item_indices);
                 merged_has[c] = true;
                 if !cell_is_bold[r][c] {
                     merged_bold[c] = false;
@@ -4613,6 +4709,7 @@ fn build_ruled_table_from(
             end,
             body_start: start,
             interstitials: Vec::new(),
+            item_indices: Vec::new(),
             // A ruled table's region is the grid the generator actually drew.
             bbox: Some(bbox),
             block: Block::Table {
@@ -5089,6 +5186,9 @@ fn merge_continuation_rows(rows: &mut Vec<Vec<Cell>>) {
                     if let Some(r) = &cell.bbox {
                         Rect::extend(&mut prev[i].bbox, r);
                     }
+                    prev[i]
+                        .text_item_indices
+                        .extend_from_slice(&cell.text_item_indices);
                 }
                 continue;
             }
@@ -5620,12 +5720,14 @@ mod tests {
                 end_x: 160.0,
                 text: "MEMORYBANK 5.00".into(),
                 bold: false,
+                text_item_indices: vec![],
             },
             TableCell {
                 start_x: 250.0,
                 end_x: 280.0,
                 text: "4.77".into(),
                 bold: false,
+                text_item_indices: vec![],
             },
         ];
         let tracks = vec![50.0, 150.0, 250.0];
@@ -5646,12 +5748,14 @@ mod tests {
                 end_x: 260.0,
                 text: "MEMORYBANK 13.18 10.03".into(),
                 bold: false,
+                text_item_indices: vec![],
             },
             TableCell {
                 start_x: 350.0,
                 end_x: 380.0,
                 text: "7.61".into(),
                 bold: false,
+                text_item_indices: vec![],
             },
         ];
         let tracks = vec![50.0, 150.0, 250.0, 350.0];
@@ -5672,6 +5776,7 @@ mod tests {
             end_x: 200.0,
             text: "ABC-DEF-GHI".into(),
             bold: false,
+            text_item_indices: vec![],
         }];
         let tracks = vec![50.0, 150.0];
         assert!(recover_merged_cell(row, &tracks).is_none());
@@ -6041,6 +6146,7 @@ mod tests {
     fn merge_prefers_ruled_when_overlapping() {
         let ruled = vec![TableRun {
             interstitials: Vec::new(),
+            item_indices: Vec::new(),
             start: 5,
             end: 10,
             body_start: 5,
@@ -6052,6 +6158,7 @@ mod tests {
         }];
         let borderless = vec![TableRun {
             interstitials: Vec::new(),
+            item_indices: Vec::new(),
             start: 6,
             end: 11,
             body_start: 6,
@@ -6105,6 +6212,7 @@ mod tests {
         ];
         let a = TableRun {
             interstitials: Vec::new(),
+            item_indices: Vec::new(),
             start: 0,
             end: 2,
             body_start: 0,
@@ -6116,6 +6224,7 @@ mod tests {
         };
         let b = TableRun {
             interstitials: Vec::new(),
+            item_indices: Vec::new(),
             start: 2,
             end: 5,
             body_start: 2,
@@ -6157,6 +6266,7 @@ mod tests {
         ];
         let a = TableRun {
             interstitials: Vec::new(),
+            item_indices: Vec::new(),
             start: 0,
             end: 2,
             body_start: 0,
@@ -6171,6 +6281,7 @@ mod tests {
         };
         let b = TableRun {
             interstitials: Vec::new(),
+            item_indices: Vec::new(),
             start: 2,
             end: 5,
             body_start: 2,
@@ -6213,6 +6324,7 @@ mod tests {
         ];
         let a = TableRun {
             interstitials: Vec::new(),
+            item_indices: Vec::new(),
             start: 0,
             end: 2,
             body_start: 0,
@@ -6224,6 +6336,7 @@ mod tests {
         };
         let b = TableRun {
             interstitials: Vec::new(),
+            item_indices: Vec::new(),
             start: 2,
             end: 4,
             body_start: 2,
@@ -6250,6 +6363,7 @@ mod tests {
             .collect();
         let a = TableRun {
             interstitials: Vec::new(),
+            item_indices: Vec::new(),
             start: 0,
             end: 10,
             body_start: 0,
@@ -6263,6 +6377,7 @@ mod tests {
         };
         let b = TableRun {
             interstitials: Vec::new(),
+            item_indices: Vec::new(),
             start: 10,
             end: 13,
             body_start: 10,
@@ -6310,6 +6425,7 @@ mod tests {
         ];
         let a = TableRun {
             interstitials: Vec::new(),
+            item_indices: Vec::new(),
             start: 0,
             end: 2,
             body_start: 0,
@@ -6324,6 +6440,7 @@ mod tests {
         };
         let b = TableRun {
             interstitials: Vec::new(),
+            item_indices: Vec::new(),
             start: 2,
             end: 4,
             body_start: 2,
@@ -6349,6 +6466,7 @@ mod tests {
         ];
         let a = TableRun {
             interstitials: Vec::new(),
+            item_indices: Vec::new(),
             start: 0,
             end: 2,
             body_start: 0,
@@ -6363,6 +6481,7 @@ mod tests {
         };
         let b = TableRun {
             interstitials: Vec::new(),
+            item_indices: Vec::new(),
             start: 2,
             end: 3,
             body_start: 2,
@@ -6397,6 +6516,7 @@ mod tests {
         ];
         let a = TableRun {
             interstitials: Vec::new(),
+            item_indices: Vec::new(),
             start: 0,
             end: 2,
             body_start: 0,
@@ -6408,6 +6528,7 @@ mod tests {
         };
         let b = TableRun {
             interstitials: Vec::new(),
+            item_indices: Vec::new(),
             start: 3,
             end: 5,
             body_start: 3,
@@ -6439,6 +6560,7 @@ mod tests {
         ];
         let a = TableRun {
             interstitials: Vec::new(),
+            item_indices: Vec::new(),
             start: 0,
             end: 2,
             body_start: 0,
@@ -6453,6 +6575,7 @@ mod tests {
         };
         let b = TableRun {
             interstitials: Vec::new(),
+            item_indices: Vec::new(),
             start: 3,
             end: 6,
             body_start: 3,
@@ -6531,5 +6654,183 @@ mod tests {
             try_detect_description_list(&lines, 0).is_none(),
             "lettered list must not be detected as a description-list table"
         );
+    }
+
+    fn grid_2x2() -> Vec<GraphicPrimitive> {
+        let mut graphics = Vec::new();
+        for y in [100.0_f32, 140.0, 180.0] {
+            graphics.push(stroke(50.0, y, 250.0, y, 0.5));
+        }
+        for x in [50.0_f32, 150.0, 250.0] {
+            graphics.push(stroke(x, 100.0, x, 180.0, 0.5));
+        }
+        graphics
+    }
+
+    #[test]
+    fn ruled_table_cells_carry_their_items() {
+        let mut lines = vec![
+            line_with_spans(&[("a", 90.0), ("b", 190.0)], 115.0, 10.0),
+            line_with_spans(&[("c", 90.0), ("d", 190.0)], 155.0, 10.0),
+        ];
+        lines[0].span_item_indices = vec![10, 11];
+        lines[1].span_item_indices = vec![12, 13];
+        let runs = detect_ruled_tables(&lines, &extract_rule_segments(&grid_2x2()), 612.0, 792.0);
+        assert_eq!(runs.len(), 1);
+        let Block::Table { rows, .. } = &runs[0].block else {
+            panic!("expected Block::Table");
+        };
+        assert_eq!(rows[0][0].text_item_indices, vec![10]);
+        assert_eq!(rows[0][1].text_item_indices, vec![11]);
+        assert_eq!(rows[1][0].text_item_indices, vec![12]);
+        assert_eq!(rows[1][1].text_item_indices, vec![13]);
+    }
+
+    #[test]
+    fn ruled_straddle_split_attributes_both_cells() {
+        // Row 1's single span crosses the column boundary at x=150, so both
+        // halves come from the same item.
+        let mut lines = vec![
+            line_with_spans(&[("a", 90.0), ("b", 190.0)], 115.0, 10.0),
+            line_with_spans(
+                &[("aaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbb", 55.0)],
+                155.0,
+                10.0,
+            ),
+        ];
+        lines[0].span_item_indices = vec![0, 1];
+        lines[1].span_item_indices = vec![2];
+        let runs = detect_ruled_tables(&lines, &extract_rule_segments(&grid_2x2()), 612.0, 792.0);
+        let Block::Table { rows, .. } = &runs[0].block else {
+            panic!("expected Block::Table");
+        };
+        assert!(!rows[1][0].text.is_empty() && !rows[1][1].text.is_empty());
+        assert_eq!(rows[1][0].text_item_indices, vec![2]);
+        assert_eq!(rows[1][1].text_item_indices, vec![2]);
+    }
+
+    #[test]
+    fn union_header_fold_carries_span_items() {
+        // A spanning group header replicates into both columns it covers.
+        let mut header =
+            line_with_spans(&[("Region", 50.0), ("GroupGroupGroup", 145.0)], 100.0, 20.0);
+        header.span_item_indices = vec![7, 8];
+        let mut body = line_with_spans(&[("x", 50.0), ("1", 150.0), ("2", 250.0)], 125.0, 10.0);
+        body.span_item_indices = vec![9, 10, 11];
+        let (start, header) = union_header_from_above(&[header, body], 1, 0, &[50.0, 150.0, 250.0])
+            .expect("header should absorb");
+        assert_eq!(start, 0);
+        assert_eq!(header[0].text_item_indices, vec![7]);
+        assert_eq!(header[1].text_item_indices, vec![8]);
+        assert_eq!(header[2].text_item_indices, vec![8]);
+    }
+
+    #[test]
+    fn union_header_fold_attributes_deduplicated_layers() {
+        // Two header layers repeat "Rated" from different items: the text
+        // folds to one, the items to both.
+        let mut top = line_with_spans(&[("Rated", 50.0), ("Voltage", 150.0)], 100.0, 10.0);
+        top.span_item_indices = vec![1, 2];
+        let mut bottom = line_with_spans(&[("Rated", 50.0), ("(VDC)", 150.0)], 115.0, 10.0);
+        bottom.span_item_indices = vec![3, 4];
+        let mut body = line_with_spans(&[("x", 50.0), ("1", 150.0)], 130.0, 10.0);
+        body.span_item_indices = vec![5, 6];
+        let (_, header) = union_header_from_above(&[top, bottom, body], 2, 0, &[50.0, 150.0])
+            .expect("header should absorb");
+        assert_eq!(header[0].text, "Rated");
+        assert_eq!(header[0].text_item_indices, vec![1, 3]);
+        assert_eq!(header[1].text, "Voltage (VDC)");
+        assert_eq!(header[1].text_item_indices, vec![2, 4]);
+    }
+
+    #[test]
+    fn borderless_table_cells_carry_their_items() {
+        let mut lines = vec![
+            line_with_spans(
+                &[("Name", 50.0), ("Qty", 150.0), ("Cost", 250.0)],
+                100.0,
+                10.0,
+            ),
+            line_with_spans(
+                &[("Bolt", 50.0), ("12", 150.0), ("3.50", 250.0)],
+                115.0,
+                10.0,
+            ),
+            line_with_spans(
+                &[("Nut", 50.0), ("40", 150.0), ("1.25", 250.0)],
+                130.0,
+                10.0,
+            ),
+        ];
+        for (r, l) in lines.iter_mut().enumerate() {
+            l.span_item_indices = (r * 3..r * 3 + 3).collect();
+        }
+        let runs = detect_tables(&lines);
+        assert_eq!(runs.len(), 1, "expected 1 borderless table, got {runs:?}");
+        let Block::Table { header, rows } = &runs[0].block else {
+            panic!("expected Block::Table");
+        };
+        assert!(header.is_none());
+        for (r, row) in rows.iter().enumerate() {
+            for (c, cell) in row.iter().enumerate() {
+                assert_eq!(cell.text_item_indices, vec![r * 3 + c], "cell ({r},{c})");
+            }
+        }
+    }
+
+    #[test]
+    fn whole_line_cell_items_follow_reading_order() {
+        let mut l = line_with_spans(&[("עולם", 50.0), ("שלום", 100.0)], 100.0, 10.0);
+        l.rtl = true;
+        l.text = "שלום עולם".into();
+        l.span_item_indices = vec![4, 5];
+        assert_eq!(line_cell(&l).text_item_indices, vec![5, 4]);
+    }
+
+    #[test]
+    fn merged_span_split_attributes_each_cell() {
+        let l = line_with_spans(&[("aaaaaaaaaa bbbbbbbbbb", 50.0)], 100.0, 10.0);
+        let pieces = line_pieces(&l);
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(pieces[0].item_index, Some(0));
+        let cells = cells_from_pieces(&pieces, &[50.0, 150.0], true).expect("split should succeed");
+        assert_eq!(cells[0].text, "aaaaaaaaaa");
+        assert_eq!(cells[1].text, "bbbbbbbbbb");
+        assert_eq!(cells[0].text_item_indices, vec![0]);
+        assert_eq!(cells[1].text_item_indices, vec![0]);
+    }
+
+    #[test]
+    fn empty_track_cells_carry_no_items() {
+        let l = line_with_spans(&[("alpha", 50.0), ("beta", 150.0)], 100.0, 10.0);
+        let cells = cells_from_pieces(&line_pieces(&l), &[50.0, 150.0, 250.0], false)
+            .expect("bin should succeed");
+        assert_eq!(cells[0].text_item_indices, vec![0]);
+        assert_eq!(cells[1].text_item_indices, vec![1]);
+        assert!(cells[2].text.is_empty());
+        assert!(cells[2].text_item_indices.is_empty());
+    }
+
+    #[test]
+    fn split_cells_groups_items_with_their_cells() {
+        let l = line_with_spans(&[("a", 50.0), ("b", 58.0), ("c", 250.0)], 100.0, 10.0);
+        let cells = split_cells(&l);
+        assert_eq!(cells.len(), 2);
+        assert_eq!(cells[0].text_item_indices, vec![0, 1]);
+        assert_eq!(cells[1].text_item_indices, vec![2]);
+    }
+
+    #[test]
+    fn continuation_row_merge_folds_items() {
+        let mut r = rows(&[
+            &["Knowledge", "To understand the meaning of reducing"],
+            &["", "and how they connect"],
+        ]);
+        r[0][0].text_item_indices = vec![0];
+        r[0][1].text_item_indices = vec![1];
+        r[1][1].text_item_indices = vec![2];
+        merge_continuation_rows(&mut r);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0][1].text_item_indices, vec![1, 2]);
     }
 }

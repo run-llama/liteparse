@@ -234,7 +234,10 @@ pub fn classify_page_with_filters(
             .iter()
             .map(|&i| lines[i].bbox.y)
             .fold(f32::INFINITY, f32::min);
-        global_ruled_tables.push((top_y, PositionedBlock::new(run.block, run.bbox)));
+        global_ruled_tables.push((
+            top_y,
+            PositionedBlock::sourced(run.block, run.bbox, run.item_indices),
+        ));
         global_ruled_consumed.extend(consumed);
     }
     let global_ruled_owned: Option<Vec<ProjectedLine>> = if global_ruled_consumed.is_empty() {
@@ -425,7 +428,7 @@ fn positioned_interruption(kind: Interruption) -> PositionedBlock {
 #[derive(Default)]
 struct FlowState {
     paragraph: Option<ParaAccum>,
-    code: Option<(Vec<String>, Option<Rect>)>,
+    code: Option<(Vec<String>, Option<Rect>, Vec<usize>)>,
     list_base_indent: Option<f32>,
     last_list_item_idx: Option<usize>,
     last_list_line: Option<usize>,
@@ -442,21 +445,30 @@ impl FlowState {
 
     /// Emit the active paragraph (if it has non-blank content) and clear it.
     fn flush_paragraph(&mut self, blocks: &mut Vec<PositionedBlock>) {
-        if let Some(acc) = self.paragraph.take()
+        if let Some(mut acc) = self.paragraph.take()
             && !acc.raw.trim().is_empty()
         {
             let bbox = acc.bbox.clone();
-            blocks.push(PositionedBlock::new(paragraph_from_accum(acc), bbox));
+            let items = std::mem::take(&mut acc.item_indices);
+            blocks.push(PositionedBlock::sourced(
+                paragraph_from_accum(acc),
+                bbox,
+                items,
+            ));
         }
     }
 
     /// Emit the active code run (if non-empty) and clear it.
     fn flush_code(&mut self, blocks: &mut Vec<PositionedBlock>) {
-        if let Some((lines, bbox)) = self.code.take()
+        if let Some((lines, bbox, items)) = self.code.take()
             && !lines.is_empty()
         {
             let lang = detect_code_language(&lines);
-            blocks.push(PositionedBlock::new(Block::CodeBlock { lines, lang }, bbox));
+            blocks.push(PositionedBlock::sourced(
+                Block::CodeBlock { lines, lang },
+                bbox,
+                items,
+            ));
         }
     }
 
@@ -576,16 +588,21 @@ fn classify_region(
                 if note.text.is_empty() {
                     continue;
                 }
-                blocks.push(PositionedBlock::new(
+                blocks.push(PositionedBlock::sourced(
                     Block::Paragraph {
                         text: note.text,
                         bold: false,
                         italic: false,
                     },
                     note.bbox,
+                    note.text_item_indices,
                 ));
             }
-            blocks.push(PositionedBlock::new(run.block, run.bbox));
+            blocks.push(PositionedBlock::sourced(
+                run.block,
+                run.bbox,
+                run.item_indices,
+            ));
             idx = run.end;
             continue;
         }
@@ -626,6 +643,7 @@ fn classify_region(
             let code = state.code.get_or_insert_with(Default::default);
             code.0.push(line.text.trim_end().to_string());
             Rect::extend(&mut code.1, &line.bbox);
+            code.2.extend_from_slice(&line.span_item_indices);
             continue;
         }
         // Any non-mono line ends the current code block (if any).
@@ -639,9 +657,10 @@ fn classify_region(
             state.reset_list();
             heading_run = None;
             if is_rule {
-                blocks.push(PositionedBlock::new(
+                blocks.push(PositionedBlock::sourced(
                     Block::HorizontalRule,
                     Some(line.bbox.clone()),
+                    line.span_item_indices.clone(),
                 ));
             }
             if debug {
@@ -781,7 +800,7 @@ fn classify_region(
                         text: htext,
                     },
                 bbox: heading_bbox,
-                ..
+                text_item_indices: heading_items,
             }) = blocks.last_mut()
             && *last_level == *run_level
         {
@@ -802,6 +821,7 @@ fn classify_region(
                     );
                 }
                 append_inline_continuation(htext, text, &collapse_whitespace(text));
+                heading_items.extend_from_slice(&line.span_item_indices);
                 heading_run = Some((run_level, line_idx));
                 continue;
             }
@@ -821,6 +841,7 @@ fn classify_region(
                             level: last_level,
                             text: htext,
                         },
+                    text_item_indices: heading_items,
                     ..
                 }) = blocks.last_mut()
                 && *last_level == level
@@ -837,6 +858,7 @@ fn classify_region(
                 let combined_chars = htext.chars().count() + 1 + text.chars().count();
                 if combined_chars > HEADING_MAX_TEXT_CHARS {
                     let demoted = std::mem::take(htext);
+                    let item_indices = std::mem::take(heading_items);
                     blocks.pop();
                     state.paragraph = Some(ParaAccum {
                         raw: demoted.clone(),
@@ -844,11 +866,13 @@ fn classify_region(
                         last: lines[*run_idx].clone(),
                         uniform: None,
                         bbox: Some(lines[*run_idx].bbox.clone()),
+                        item_indices,
                     });
                     heading_run = None;
                     demoted_heading = true;
                 } else {
                     append_inline_continuation(htext, text, &collapse_whitespace(text));
+                    heading_items.extend_from_slice(&line.span_item_indices);
                     heading_run = Some((level, line_idx));
                     continue;
                 }
@@ -865,12 +889,13 @@ fn classify_region(
                         line.dominant_font_size,
                     );
                 }
-                blocks.push(PositionedBlock::new(
+                blocks.push(PositionedBlock::sourced(
                     Block::Heading {
                         level,
                         text: collapse_whitespace(text),
                     },
                     Some(line.bbox.clone()),
+                    line.span_item_indices.clone(),
                 ));
                 heading_run = Some((level, line_idx));
                 continue;
@@ -913,12 +938,13 @@ fn classify_region(
                 state.flush_paragraph(&mut blocks);
                 state.reset_list();
                 let level = (heading_map.len() as u8 + 1).clamp(1, MAX_HEADING_LEVELS as u8);
-                blocks.push(PositionedBlock::new(
+                blocks.push(PositionedBlock::sourced(
                     Block::Heading {
                         level,
                         text: collapse_whitespace(text),
                     },
                     Some(line.bbox.clone()),
+                    line.span_item_indices.clone(),
                 ));
                 continue;
             }
@@ -935,7 +961,7 @@ fn classify_region(
             // which still contain the marker span — render the line and then
             // peel the marker off the front of the rendered string.
             let item_text = render_list_item_text(line, &marker, rest);
-            blocks.push(PositionedBlock::new(
+            blocks.push(PositionedBlock::sourced(
                 Block::ListItem {
                     ordered,
                     marker,
@@ -945,6 +971,7 @@ fn classify_region(
                     italic: false,
                 },
                 Some(line.bbox.clone()),
+                line.span_item_indices.clone(),
             ));
             continue;
         }
@@ -967,6 +994,8 @@ fn classify_region(
             append_inline_continuation(prev_text, text, &cont_inline);
             // The wrapped line belongs to the same item, so it grows its box.
             Rect::extend(&mut item.bbox, &line.bbox);
+            item.text_item_indices
+                .extend_from_slice(&line.span_item_indices);
             state.last_list_line = Some(line_idx);
             continue;
         }
@@ -998,12 +1027,13 @@ fn classify_region(
                     line.dominant_font_size,
                 );
             }
-            blocks.push(PositionedBlock::new(
+            blocks.push(PositionedBlock::sourced(
                 Block::Heading {
                     level,
                     text: collapse_whitespace(text),
                 },
                 Some(line.bbox.clone()),
+                line.span_item_indices.clone(),
             ));
             // Arm the heading_run so a wrapped continuation on the next line
             // merges into this heading instead of emitting as a second one.
@@ -1032,6 +1062,7 @@ fn classify_region(
                     bbox: Some(line.bbox.clone()),
                     last: line.clone(),
                     uniform,
+                    item_indices: line.span_item_indices.clone(),
                 });
             }
         }
@@ -1209,6 +1240,8 @@ fn stitch_regions(blocks: Vec<PositionedBlock>, region_starts: &[usize]) -> Vec<
                 prev_text.pop(); // the '-'
                 prev_text.push_str(cur_text.trim_start());
                 prev.bbox = merged_bbox;
+                prev.text_item_indices
+                    .extend_from_slice(&block.text_item_indices);
                 continue;
             }
             let ends_open = !prev_trim.ends_with(|c: char| {
@@ -1221,6 +1254,8 @@ fn stitch_regions(blocks: Vec<PositionedBlock>, region_starts: &[usize]) -> Vec<
                 prev_text.push(' ');
                 prev_text.push_str(cur_text.trim_start());
                 prev.bbox = merged_bbox;
+                prev.text_item_indices
+                    .extend_from_slice(&block.text_item_indices);
                 continue;
             }
         }
@@ -1587,5 +1622,103 @@ mod tests {
         // HR must land between the two paragraphs, not before/after both.
         let pos = has_hr.unwrap();
         assert!(pos > 0 && pos < blocks.len() - 1);
+    }
+
+    fn tag(mut l: crate::types::ProjectedLine, idx: usize) -> crate::types::ProjectedLine {
+        l.span_item_indices = vec![idx];
+        l
+    }
+
+    #[test]
+    fn blocks_carry_the_items_they_were_read_from() {
+        let p = page(vec![
+            tag(
+                line("Title of the document goes here", 50.0, 50.0, 18.0, 18.0),
+                0,
+            ),
+            tag(
+                line("First sentence of the para-", 50.0, 80.0, 10.0, 10.0),
+                1,
+            ),
+            tag(line("graph continues here.", 50.0, 92.0, 10.0, 10.0), 2),
+            tag(line("Another paragraph.", 50.0, 130.0, 10.0, 10.0), 3),
+        ]);
+        let pages = vec![p];
+        let body = compute_body_size(&pages);
+        let map = build_heading_map(&pages, body);
+        let blocks = classify_page(&pages[0], &map);
+        assert_eq!(blocks.len(), 3);
+        assert!(matches!(blocks[0].block, Block::Heading { .. }));
+        assert_eq!(blocks[0].text_item_indices, vec![0]);
+        assert_eq!(blocks[1].text_item_indices, vec![1, 2]);
+        assert_eq!(blocks[2].text_item_indices, vec![3]);
+    }
+
+    #[test]
+    fn demoted_heading_keeps_its_items() {
+        // A heading-sized first line under the length cap, then a
+        // continuation that tips the run over `HEADING_MAX_TEXT_CHARS`: the
+        // heading demotes to a paragraph that must carry both lines' items.
+        let long_a = "A rather long citation-style opening line that scores as a heading on its own because it stays just under the cap";
+        let long_b = "But the continuation line pushes the combined run far over the limit";
+        assert!(long_a.chars().count() <= HEADING_MAX_TEXT_CHARS);
+        assert!(long_a.chars().count() + 1 + long_b.chars().count() > HEADING_MAX_TEXT_CHARS);
+        let mut lines_v = vec![
+            tag(line(long_a, 50.0, 50.0, 14.0, 14.0), 0),
+            tag(line(long_b, 50.0, 66.0, 14.0, 14.0), 1),
+        ];
+        for i in 0..10 {
+            lines_v.push(tag(
+                line(
+                    "plain body text keeps the size map honest and body-dominant here.",
+                    50.0,
+                    300.0 + i as f32 * 12.0,
+                    10.0,
+                    10.0,
+                ),
+                2 + i,
+            ));
+        }
+        let pages = vec![page(lines_v.clone())];
+        let body = compute_body_size(&pages);
+        let map = build_heading_map(&pages, body);
+        let mut solo = lines_v;
+        solo.remove(1);
+        assert!(matches!(
+            classify_page(&page(solo), &map)[0].block,
+            Block::Heading { .. }
+        ));
+        let blocks = classify_page(&pages[0], &map);
+        assert!(matches!(blocks[0].block, Block::Paragraph { .. }));
+        assert_eq!(blocks[0].text_item_indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn list_continuation_extends_item_indices() {
+        let p = page(vec![
+            tag(line("Intro line.", 50.0, 50.0, 10.0, 10.0), 0),
+            tag(line("• bullet starts here and", 60.0, 80.0, 10.0, 10.0), 1),
+            tag(line("wraps onto a second line", 60.0, 92.0, 10.0, 10.0), 2),
+        ]);
+        let blocks = classify_page(&p, &[]);
+        let item = blocks
+            .iter()
+            .find(|b| matches!(b.block, Block::ListItem { .. }))
+            .expect("expected a list item");
+        assert_eq!(item.text_item_indices, vec![1, 2]);
+    }
+
+    #[test]
+    fn stitch_regions_unions_items_across_leaves() {
+        let mut a = tag(
+            line("The sentence continues without", 50.0, 700.0, 10.0, 10.0),
+            0,
+        );
+        a.region_path = vec![0];
+        let mut b = tag(line("ending punctuation here.", 320.0, 50.0, 10.0, 10.0), 1);
+        b.region_path = vec![1];
+        let blocks = classify_page(&page(vec![a, b]), &[]);
+        assert_eq!(blocks.len(), 1, "expected a single stitched paragraph");
+        assert_eq!(blocks[0].text_item_indices, vec![0, 1]);
     }
 }
