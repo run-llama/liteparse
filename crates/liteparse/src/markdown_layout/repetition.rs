@@ -1,4 +1,4 @@
-use crate::types::{ParsedPage, ProjectedLine};
+use crate::types::{ParsedPage, ProjectedLine, Rect};
 
 use super::paragraphs::collapse_whitespace;
 
@@ -28,6 +28,18 @@ const HEADER_FOOTER_MIN_PAGES: usize = 2;
 /// Lines matching a chrome pattern (`Page N of M`, URLs, © marks) are exempt
 /// from the cap — they strip regardless of how crowded the band is.
 const MAX_REPEATED_LINES_PER_BAND: usize = 3;
+
+/// Whether `bbox`'s centre lies inside any of `rects` (2pt slack). A line inside
+/// a drawn table grid is table content, so it can never be running chrome.
+fn centre_in_rects(bbox: &Rect, rects: &[Rect]) -> bool {
+    let (cx, cy) = (bbox.x + bbox.width * 0.5, bbox.y + bbox.height * 0.5);
+    rects.iter().any(|r| {
+        cx >= r.x - 2.0
+            && cx <= r.x + r.width + 2.0
+            && cy >= r.y - 2.0
+            && cy <= r.y + r.height + 2.0
+    })
+}
 
 /// Normalize a line for cross-page header/footer matching. Lowercases,
 /// collapses whitespace, and replaces every run of ASCII digits with `#` so
@@ -79,13 +91,29 @@ pub fn compute_header_footer_set(pages: &[ParsedPage]) -> std::collections::Hash
     }
     // Two counters keyed by `(band, normalized_text)` — band is `'h'` or `'f'`.
     let mut counts: HashMap<(char, String), KeyStats> = HashMap::new();
+    let dbg = *super::flags::DEBUG_MD;
     for page in pages {
         let header_cutoff = page.page_height * HEADER_BAND_FRACTION;
         let footer_cutoff = page.page_height * (1.0 - FOOTER_BAND_FRACTION);
+        // Ruled-table regions of this page, computed only if a banded line needs them.
+        let mut table_rects: Option<Vec<Rect>> = None;
         for line in &page.projected_lines {
             let text = line.text.trim();
             if text.is_empty() {
                 continue;
+            }
+            if line.bbox.y <= header_cutoff || line.bbox.y + line.bbox.height >= footer_cutoff {
+                let rects = table_rects
+                    .get_or_insert_with(|| super::tables::ruled_table_bounds(&page.graphics));
+                if centre_in_rects(&line.bbox, rects) {
+                    if dbg {
+                        eprintln!(
+                            "[hf] page {}: not counted as running chrome (inside a ruled table): {text:?}",
+                            page.page_number
+                        );
+                    }
+                    continue;
+                }
             }
             let norm = normalize_for_repetition(text);
             if norm.is_empty() {
@@ -129,6 +157,9 @@ pub fn compute_header_footer_set(pages: &[ParsedPage]) -> std::collections::Hash
         let letterhead = non_pattern > MAX_REPEATED_LINES_PER_BAND;
         for (norm, is_pattern) in keys {
             if is_pattern || !letterhead {
+                if dbg {
+                    eprintln!("[hf] running header/footer set += {norm:?}");
+                }
                 set.insert(norm);
             }
         }
@@ -426,7 +457,30 @@ pub(super) fn is_header_or_footer(
         return false;
     }
     let norm = normalize_for_repetition(line.text.trim());
-    header_footer.contains(&norm)
+    if !header_footer.contains(&norm) {
+        return false;
+    }
+    // Table content is never chrome, even when the same header row repeats on
+    // every page of a multi-page table.
+    let rects = super::tables::ruled_table_bounds(&page.graphics);
+    if centre_in_rects(&line.bbox, &rects) {
+        if *super::flags::DEBUG_MD {
+            eprintln!(
+                "[hf] page {}: KEPT (inside a ruled table): {:?}",
+                page.page_number,
+                line.text.trim()
+            );
+        }
+        return false;
+    }
+    if *super::flags::DEBUG_MD {
+        eprintln!(
+            "[hf] page {}: stripped: {:?}",
+            page.page_number,
+            line.text.trim()
+        );
+    }
+    true
 }
 
 #[cfg(test)]
