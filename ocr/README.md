@@ -6,20 +6,21 @@ These servers allow you to use alternative OCR engines instead of the built-in T
 
 ## Why Use an External OCR Server?
 
-| Feature | Tesseract.js (built-in) | EasyOCR | PaddleOCR | Surya |
-|---------|-------------------------|---------|-----------|-------|
-| Setup | Zero (included) | uv | uv | uv |
-| Speed | Moderate | Moderate | Fast (2-3x) | Moderate (GPU recommended) |
-| Accuracy (Latin) | Good | Good | Good | Excellent |
-| Accuracy (CJK) | Fair | Good | Excellent | Excellent |
-| Languages | 100+ | 80+ | 80+ | 91 |
-| Memory | In-process | Separate | Separate | Separate |
+| Feature | Tesseract.js (built-in) | EasyOCR | PaddleOCR | Surya | Indra |
+|---------|-------------------------|---------|-----------|-------|-------|
+| Setup | Zero (included) | uv | uv | uv | uv |
+| Speed | Moderate | Moderate | Fast (2-3x) | Moderate (GPU recommended) | Fast (CPU only) |
+| Accuracy (Latin) | Good | Good | Good | Excellent | Very good |
+| Accuracy (CJK) | Fair | Good | Excellent | Excellent | Good (Chinese only) |
+| Languages | 100+ | 80+ | 80+ | 91 | ~55 (Latin, Cyrillic, Greek, Devanagari, Bengali, Chinese) |
+| Memory | In-process | Separate | Separate | Separate | Separate |
 
 **Recommendations:**
 - **Quick start**: Use built-in Tesseract (no setup)
 - **Asian languages**: Use PaddleOCR (best CJK support)
 - **Multilingual / broad scripts**: Use Surya (strong multilingual accuracy)
 - **General use**: EasyOCR (good balance)
+- **Fast CPU OCR / scans**: Use Indra (no GPU; check the model-weights license)
 
 ## Available Servers
 
@@ -41,6 +42,13 @@ FastAPI server wrapping Surya OCR 2.
 - Multilingual foundation model (90+ languages)
 - Block-level output; GPU recommended
 
+### [indraocr/](./indraocr/)
+FastAPI server wrapping Indra OCR.
+- Port: **8831**
+- Small CPU-only model (ONNX Runtime, no GPU)
+- Line-level output; straightens skewed and sideways pages
+- Model weights are under a modified OpenRAIL-M license (see its README)
+
 ## Quick Start
 
 ```bash
@@ -54,6 +62,10 @@ uv run server.py
 
 # OR start Surya OCR server
 cd ocr/suryaocr
+uv run server.py
+
+# OR start Indra OCR server
+cd ocr/indraocr
 uv run server.py
 ```
 
