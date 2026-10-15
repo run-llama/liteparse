@@ -8,7 +8,8 @@ use super::headings::{
 };
 use super::hr::detect_horizontal_rules;
 use super::inline::{
-    append_inline_continuation, line_uniform_style, render_line_inline, render_list_item_text,
+    append_inline_continuation, escape_inline, line_uniform_style, render_line_inline,
+    render_list_item_text,
 };
 use super::lists::{
     LIST_INDENT_STEP_PT, detect_ordered_list_lines, parse_list_marker,
@@ -571,14 +572,15 @@ fn classify_region(
             // Prose lines the run stepped over between its header and body
             // sit inside `[run.start, run.end)`, which this loop skips — emit
             // each as its own paragraph ahead of the table so the text isn't
-            // dropped.
+            // dropped. Interstitials carry raw text, like table cells, so they
+            // get the escaping a plain paragraph gets.
             for note in run.interstitials {
                 if note.text.is_empty() {
                     continue;
                 }
                 blocks.push(PositionedBlock::new(
                     Block::Paragraph {
-                        text: note.text,
+                        text: escape_inline(&collapse_whitespace(&note.text)),
                         bold: false,
                         italic: false,
                     },
@@ -770,8 +772,12 @@ fn classify_region(
         // contains a mid-sentence period — both are unambiguous prose signals
         // and never appear inside a real wrapped heading.
         let cont_looks_like_heading = parse_list_marker(text).is_none() && !text.contains(". ");
+        // The heading is only "directly above" when no paragraph is pending:
+        // `blocks.last()` stays the heading while a paragraph accumulates.
+        let heading_directly_above = state.paragraph.is_none();
         if level.is_none()
             && cont_looks_like_heading
+            && heading_directly_above
             && let Some((run_level, run_idx)) = heading_run.as_ref()
             && continues_heading(&lines[*run_idx], line)
             && let Some(PositionedBlock {
@@ -812,7 +818,10 @@ fn classify_region(
             // emitted block, and the line continues the paragraph. A real
             // section heading is followed by body text (which breaks the run),
             // so only a genuinely multi-line heading/caption merges here.
-            if let Some((run_level, run_idx)) = heading_run.as_ref()
+            // Without `heading_directly_above`, demotion below would overwrite
+            // the pending paragraph and drop its text.
+            if heading_directly_above
+                && let Some((run_level, run_idx)) = heading_run.as_ref()
                 && *run_level == level
                 && continues_heading(&lines[*run_idx], line)
                 && let Some(PositionedBlock {
@@ -1587,5 +1596,31 @@ mod tests {
         // HR must land between the two paragraphs, not before/after both.
         let pos = has_hr.unwrap();
         assert!(pos > 0 && pos < blocks.len() - 1);
+    }
+
+    #[test]
+    fn heading_demotion_keeps_the_paragraph_below_it() {
+        // A 14pt heading, a body line, then a 14pt line that continues the
+        // heading's geometry and would push it past HEADING_MAX_TEXT_CHARS.
+        // The body line is a pending paragraph, not yet a block, so the
+        // heading is not the block directly above: demoting it must not
+        // overwrite the paragraph, and the 14pt line must not merge above it.
+        let heading = "Referral from the clinic with the history and a list of current medications for review";
+        let second = "Follow-up visit is requested within two weeks of the date";
+        assert!(heading.len() <= HEADING_MAX_TEXT_CHARS);
+        assert!(heading.len() + 1 + second.len() > HEADING_MAX_TEXT_CHARS);
+        let p = page(vec![
+            line(heading, 50.0, 100.0, 14.0, 14.0),
+            line("Patient reports mild symptoms.", 50.0, 118.0, 10.0, 10.0),
+            line(second, 50.0, 130.0, 14.0, 14.0),
+        ]);
+        let md = render_blocks(&classify_page(&p, &[(14.0, 2)]));
+        let body = md
+            .find("Patient reports mild symptoms.")
+            .expect("paragraph dropped");
+        let follow = md
+            .find("Follow-up visit")
+            .expect("second heading line dropped");
+        assert!(body < follow, "reading order lost: {md:?}");
     }
 }
