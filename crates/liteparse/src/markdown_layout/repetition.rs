@@ -68,18 +68,35 @@ pub(super) fn normalize_for_repetition(s: &str) -> String {
 /// page) and those lines are kept everywhere. Pattern-matched lines still
 /// strip.
 pub fn compute_header_footer_set(pages: &[ParsedPage]) -> std::collections::HashSet<String> {
-    use std::collections::{HashMap, HashSet};
-    let mut set: HashSet<String> = HashSet::new();
-    if pages.len() < HEADER_FOOTER_MIN_PAGES {
-        return set;
-    }
-    struct KeyStats {
-        pages_seen: std::collections::HashSet<usize>,
-        is_chrome_pattern: bool,
-    }
-    // Two counters keyed by `(band, normalized_text)` — band is `'h'` or `'f'`.
-    let mut counts: HashMap<(char, String), KeyStats> = HashMap::new();
+    let mut acc = HeaderFooterAccumulator::default();
     for page in pages {
+        acc.add_page(page);
+    }
+    acc.finish()
+}
+
+/// The cross-page band counts behind [`compute_header_footer_set`], fed one
+/// page at a time so a caller parsing a document in page batches can find the
+/// document's running headers/footers without holding every page in memory.
+/// Only lines inside the header/footer bands are kept. Feeding every page in
+/// order gives exactly what [`compute_header_footer_set`] returns for the same
+/// pages.
+#[derive(Debug, Clone, Default)]
+pub struct HeaderFooterAccumulator {
+    pages: usize,
+    /// Keyed by `(band, normalized_text)` — band is `'h'` or `'f'`.
+    counts: std::collections::HashMap<(char, String), BandKeyStats>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct BandKeyStats {
+    pages_seen: std::collections::HashSet<usize>,
+    is_chrome_pattern: bool,
+}
+
+impl HeaderFooterAccumulator {
+    pub fn add_page(&mut self, page: &ParsedPage) {
+        self.pages += 1;
         let header_cutoff = page.page_height * HEADER_BAND_FRACTION;
         let footer_cutoff = page.page_height * (1.0 - FOOTER_BAND_FRACTION);
         for line in &page.projected_lines {
@@ -87,53 +104,62 @@ pub fn compute_header_footer_set(pages: &[ParsedPage]) -> std::collections::Hash
             if text.is_empty() {
                 continue;
             }
+            let line_bottom = line.bbox.y + line.bbox.height;
+            let bands = [
+                // Header band: top of line within the top band.
+                ('h', line.bbox.y <= header_cutoff),
+                // Footer band: bottom of line at or below the footer cutoff.
+                ('f', line_bottom >= footer_cutoff),
+            ];
+            if !bands.iter().any(|(_, in_band)| *in_band) {
+                continue;
+            }
             let norm = normalize_for_repetition(text);
             if norm.is_empty() {
                 continue;
             }
             let is_pattern = matches_chrome_pattern(text);
-            let line_bottom = line.bbox.y + line.bbox.height;
-            for (band, in_band) in [
-                // Header band: top of line within the top band.
-                ('h', line.bbox.y <= header_cutoff),
-                // Footer band: bottom of line at or below the footer cutoff.
-                ('f', line_bottom >= footer_cutoff),
-            ] {
+            for (band, in_band) in bands {
                 if !in_band {
                     continue;
                 }
-                let stats = counts.entry((band, norm.clone())).or_insert(KeyStats {
-                    pages_seen: HashSet::new(),
-                    is_chrome_pattern: false,
-                });
+                let stats = self.counts.entry((band, norm.clone())).or_default();
                 stats.pages_seen.insert(page.page_number);
                 stats.is_chrome_pattern |= is_pattern;
             }
         }
     }
-    let threshold = (pages.len() as f32 * HEADER_FOOTER_MIN_FRACTION)
-        .ceil()
-        .max(HEADER_FOOTER_MIN_PAGES as f32) as usize;
-    // Qualify keys per band, then apply the letterhead guard per band.
-    let mut qualified: HashMap<char, Vec<(String, bool)>> = HashMap::new();
-    for ((band, norm), stats) in counts {
-        if stats.pages_seen.len() >= threshold {
-            qualified
-                .entry(band)
-                .or_default()
-                .push((norm, stats.is_chrome_pattern));
+
+    pub fn finish(&self) -> std::collections::HashSet<String> {
+        use std::collections::{HashMap, HashSet};
+        let mut set: HashSet<String> = HashSet::new();
+        if self.pages < HEADER_FOOTER_MIN_PAGES {
+            return set;
         }
-    }
-    for keys in qualified.into_values() {
-        let non_pattern = keys.iter().filter(|(_, pat)| !pat).count();
-        let letterhead = non_pattern > MAX_REPEATED_LINES_PER_BAND;
-        for (norm, is_pattern) in keys {
-            if is_pattern || !letterhead {
-                set.insert(norm);
+        let threshold = (self.pages as f32 * HEADER_FOOTER_MIN_FRACTION)
+            .ceil()
+            .max(HEADER_FOOTER_MIN_PAGES as f32) as usize;
+        // Qualify keys per band, then apply the letterhead guard per band.
+        let mut qualified: HashMap<char, Vec<(&String, bool)>> = HashMap::new();
+        for ((band, norm), stats) in &self.counts {
+            if stats.pages_seen.len() >= threshold {
+                qualified
+                    .entry(*band)
+                    .or_default()
+                    .push((norm, stats.is_chrome_pattern));
             }
         }
+        for keys in qualified.into_values() {
+            let non_pattern = keys.iter().filter(|(_, pat)| !pat).count();
+            let letterhead = non_pattern > MAX_REPEATED_LINES_PER_BAND;
+            for (norm, is_pattern) in keys {
+                if is_pattern || !letterhead {
+                    set.insert(norm.clone());
+                }
+            }
+        }
+        set
     }
-    set
 }
 
 /// Fraction of page height treated as the top band for the single-page

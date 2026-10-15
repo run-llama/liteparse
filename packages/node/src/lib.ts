@@ -808,10 +808,12 @@ export class LiteParse {
    * file is released when iteration ends — including an early `break` or
    * `throw`, which run the generator's cleanup.
    *
-   * Cross-page passes see only the pages in their own batch, so repeated
-   * header/footer removal and image deduplication are batch-local and the
-   * output can differ from `parse()`. Prefer `parse()` unless the size of the
-   * materialized result is the problem.
+   * Markdown heading levels and repeated header/footer removal are computed
+   * over the whole document, so they match `parse()`: before the first batch
+   * is returned, a prepass extracts and projects every page (one batch at a
+   * time) to collect those signals. OCR is not repeated; the prepass's
+   * results are reused. Image deduplication is batch-local, so image
+   * references can differ from `parse()`.
    *
    * As with any async generator, work starts on the first `next()` call, so
    * errors (an unreadable file, or a parser configured with `targetPages` —

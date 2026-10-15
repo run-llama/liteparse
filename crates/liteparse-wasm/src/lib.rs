@@ -1397,8 +1397,9 @@ impl LiteParse {
     /// Rust-side result and the JS objects built from it — the wasm heap has a
     /// hard ceiling, so a large document parsed whole can exhaust it.
     ///
-    /// Cross-page passes (repeated header/footer removal, image deduplication)
-    /// see only the pages in their own batch, so output can differ from a
+    /// Heading levels and repeated header/footer removal use document-wide
+    /// signals, computed by a prepass before the first batch; image
+    /// deduplication is batch-local, so image references can differ from a
     /// whole-document `parse()`.
     #[wasm_bindgen(js_name = openBatchSession)]
     pub async fn open_batch_session(

@@ -7,6 +7,8 @@
 //! directly, or a caller sequencing the stages themselves could no longer
 //! reproduce `parse()`. `tests/stages_compose.rs` asserts that equivalence.
 
+use std::collections::HashMap;
+
 use crate::config::{LiteParseConfig, parse_target_pages};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::conversion;
@@ -200,21 +202,33 @@ pub struct LiteParse {
 /// Classification is the expensive part of the markdown pipeline, so the two
 /// consumers share a single pass rather than each triggering their own. Returns
 /// the joined document markdown when that is the output format.
+///
+/// `signals` are the document-wide signals when the caller already has them
+/// (a batched parse computes them over the whole document up front); `None`
+/// computes them over `parsed_pages`.
 fn apply_layout(
     parser: &LiteParse,
     parsed_pages: &mut [ParsedPage],
     outline: &[OutlineTarget],
+    signals: Option<&stages::DocumentSignals>,
 ) -> Option<String> {
     let config = &parser.config;
     let wants_markdown = config.output_format == crate::config::OutputFormat::Markdown;
-    if !wants_markdown && !config.extract_blocks {
+    if !parser.needs_document_signals() {
         return None;
     }
-    let signals = stages::document_signals(parsed_pages, config.keep_headers_footers);
+    let local_signals;
+    let signals = match signals {
+        Some(signals) => signals,
+        None => {
+            local_signals = stages::document_signals(parsed_pages, config.keep_headers_footers);
+            &local_signals
+        }
+    };
     let block_options = parser.block_options(outline);
     let mut page_md = Vec::with_capacity(parsed_pages.len());
     for page in parsed_pages.iter_mut() {
-        let blocks = stages::extract_blocks(page, &signals, &block_options);
+        let blocks = stages::extract_blocks(page, signals, &block_options);
         if config.extract_blocks {
             // A page with no structural decomposition reports an empty list,
             // not `None` — extraction *was* enabled, there was just nothing to
@@ -581,6 +595,8 @@ impl LiteParse {
             target_pages.as_deref(),
             self.config.max_pages,
             None,
+            None,
+            None,
         )
         .await
     }
@@ -614,12 +630,19 @@ impl LiteParse {
     /// entry, which costs several times more than opening the document, so a
     /// batch parse that recomputed it per batch would spend most of its
     /// overhead there.
+    ///
+    /// `signals` and `ocr_replay` come from a [`ParseSession`]'s signals
+    /// prepass: the document-wide markdown signals to classify this batch
+    /// against, and the OCR outcomes the prepass already recognized, which
+    /// are merged (and removed) instead of recognizing the pages again.
     async fn parse_resolved(
         &self,
         resolved: &ResolvedInput,
         target_pages: Option<&[u32]>,
         max_pages: usize,
         outline: Option<Vec<OutlineTarget>>,
+        signals: Option<&stages::DocumentSignals>,
+        ocr_replay: Option<&mut HashMap<usize, stages::PageOcrOutcome>>,
     ) -> Result<ParseResult, LiteParseError> {
         let log = |msg: &str| {
             if !self.config.quiet {
@@ -795,47 +818,26 @@ impl LiteParse {
         let t1 = web_time::Instant::now();
 
         if let Some(engine) = ocr_engine {
-            let render_options = ocr_render_options;
-            let ocr_input = repaired_input.as_ref().unwrap_or(validated_input);
-            let mut scan_start = 0usize;
-            let mut ocr_tasks =
-                stages::OcrWindow::new(engine, &self.config.ocr_language, self.config.num_workers);
-            loop {
-                // Reap completions before deciding whether to render so every
-                // available slot can be refilled immediately.
-                ocr_tasks.complete_ready();
-
-                if scan_start >= pages.len() || ocr_tasks.available_capacity() == 0 {
-                    if !ocr_tasks.complete_one().await {
-                        break;
-                    }
-                    continue;
+            let outcomes = match ocr_replay {
+                Some(outcomes) => pages
+                    .iter()
+                    .filter_map(|page| outcomes.remove(&page.page_number))
+                    .collect(),
+                None => {
+                    let ocr_input = repaired_input.as_ref().unwrap_or(validated_input);
+                    self.recognize_pages(engine, &pages, ocr_input, &ocr_render_options)
+                        .await?
                 }
-
-                // Open the document for one render round that fills the available
-                // slots. Drop the document and library before awaiting OCR.
-                // On native targets, this releases the process-wide PDFium lock.
-                let (rendered, next_start) = {
-                    let lib = Library::init();
-                    let document = self.open_document(&lib, ocr_input, password)?;
-                    ocr_tasks.render_next(&document, &pages, scan_start, &render_options)?
-                };
-                scan_start = next_start;
-                for raster in rendered {
-                    ocr_tasks.submit(raster).await;
-                }
-            }
-
+            };
             // Merge once, after every page has been recognized:
             // `ocr_failure_fatal` only applies when *every* OCR task failed,
             // which can't be decided from a single page's outcome.
-            ocr_tasks
-                .finish_and_merge(
-                    &mut pages,
-                    self.config.ocr_failure_fatal,
-                    self.config.effective_emit_word_boxes(),
-                )
-                .await?;
+            stages::merge_ocr(
+                &mut pages,
+                outcomes,
+                self.config.ocr_failure_fatal,
+                self.config.effective_emit_word_boxes(),
+            )?;
         }
         let t_ocr = web_time::Instant::now();
         log(&format!(
@@ -870,7 +872,7 @@ impl LiteParse {
             t2.duration_since(t_ocr).as_secs_f64() * 1000.0
         ));
 
-        let laid_out = apply_layout(self, &mut parsed_pages, &outline);
+        let laid_out = apply_layout(self, &mut parsed_pages, &outline, signals);
         let mut full_text = if let Some(md) = laid_out {
             let t3 = web_time::Instant::now();
             log(&format!(
@@ -916,6 +918,115 @@ impl LiteParse {
         })
     }
 
+    /// Whether the configured output runs block classification, and so needs
+    /// [`stages::DocumentSignals`].
+    fn needs_document_signals(&self) -> bool {
+        self.config.output_format == crate::config::OutputFormat::Markdown
+            || self.config.extract_blocks
+    }
+
+    /// Render and recognize every page of `pages` that needs OCR, keeping at
+    /// most `num_workers` recognitions in flight. Returns the outcomes in
+    /// page order, unmerged.
+    async fn recognize_pages(
+        &self,
+        engine: std::sync::Arc<dyn OcrEngine>,
+        pages: &[Page],
+        ocr_input: &PdfInput,
+        render_options: &stages::OcrRenderOptions,
+    ) -> Result<Vec<stages::PageOcrOutcome>, LiteParseError> {
+        let password = self.config.password.as_deref();
+        let mut scan_start = 0usize;
+        let mut ocr_tasks =
+            stages::OcrWindow::new(engine, &self.config.ocr_language, self.config.num_workers);
+        loop {
+            // Reap completions before deciding whether to render so every
+            // available slot can be refilled immediately.
+            ocr_tasks.complete_ready();
+
+            if scan_start >= pages.len() || ocr_tasks.available_capacity() == 0 {
+                if !ocr_tasks.complete_one().await {
+                    break;
+                }
+                continue;
+            }
+
+            // Open the document for one render round that fills the available
+            // slots. Drop the document and library before awaiting OCR.
+            // On native targets, this releases the process-wide PDFium lock.
+            let (rendered, next_start) = {
+                let lib = Library::init();
+                let document = self.open_document(&lib, ocr_input, password)?;
+                ocr_tasks.render_next(&document, pages, scan_start, render_options)?
+            };
+            scan_start = next_start;
+            for raster in rendered {
+                ocr_tasks.submit(raster).await;
+            }
+        }
+        Ok(ocr_tasks.finish().await)
+    }
+
+    /// The signals prepass of a [`ParseSession`]: run one batch through
+    /// extraction, OCR, content filters and projection exactly as
+    /// [`LiteParse::parse_resolved`] does, and return the projected pages.
+    /// Everything that does not feed [`stages::DocumentSignals`] —
+    /// complexity, screenshots, document facts, image output, block
+    /// classification — is skipped.
+    ///
+    /// The OCR outcomes are inserted into `ocr_outcomes` so the batch's real
+    /// parse can merge them instead of recognizing the pages a second time.
+    async fn project_for_signals(
+        &self,
+        resolved: &ResolvedInput,
+        target_pages: &[u32],
+        ocr_outcomes: &mut HashMap<usize, stages::PageOcrOutcome>,
+    ) -> Result<Vec<ParsedPage>, LiteParseError> {
+        let password = self.config.password.as_deref();
+        let validated_input = &resolved.input;
+        let ocr_engine = self.ocr_engine()?;
+        let ocr_grayscale = ocr_engine.as_ref().is_some_and(|e| e.prefers_grayscale());
+
+        let (mut pages, ocr_render_options, repaired_input) = {
+            let lib = Library::init();
+            #[cfg(not(target_arch = "wasm32"))]
+            let repaired_input = self
+                .config
+                .extract_form_fields
+                .then(|| stages::repair_acroform(&lib, validated_input, password))
+                .flatten();
+            #[cfg(target_arch = "wasm32")]
+            let repaired_input: Option<PdfInput> = None;
+            let document_input = repaired_input.as_ref().unwrap_or(validated_input);
+            let document = self.open_document(&lib, document_input, password)?;
+            let extracted = stages::extract(
+                &document,
+                &self.extract_request(Some(target_pages), target_pages.len()),
+            )?;
+            let ocr_render_options = self.ocr_render_options(ocr_grayscale, &extracted);
+            (extracted.pages, ocr_render_options, repaired_input)
+        };
+
+        if let Some(engine) = ocr_engine {
+            let ocr_input = repaired_input.as_ref().unwrap_or(validated_input);
+            let outcomes = self
+                .recognize_pages(engine, &pages, ocr_input, &ocr_render_options)
+                .await?;
+            for outcome in &outcomes {
+                ocr_outcomes.insert(outcome.page_number, outcome.clone());
+            }
+            stages::merge_ocr(
+                &mut pages,
+                outcomes,
+                self.config.ocr_failure_fatal,
+                self.config.effective_emit_word_boxes(),
+            )?;
+        }
+
+        stages::apply_content_filters(&mut pages, &self.content_filters());
+        Ok(stages::project(pages))
+    }
+
     /// Parse from pre-extracted pages, skipping PDFium text extraction.
     ///
     /// The caller supplies `Page`s already populated with text items (and,
@@ -928,7 +1039,7 @@ impl LiteParse {
         let total_pages = pages.len().min(u32::MAX as usize) as u32;
         let mut parsed_pages = stages::project(pages);
 
-        let full_text = if let Some(md) = apply_layout(self, &mut parsed_pages, &outline) {
+        let full_text = if let Some(md) = apply_layout(self, &mut parsed_pages, &outline, None) {
             md
         } else {
             parsed_pages
@@ -1164,6 +1275,8 @@ impl LiteParse {
             outline,
             next_page: 1,
             batch_size,
+            signals: None,
+            ocr_outcomes: HashMap::new(),
         })
     }
 }
@@ -1181,6 +1294,17 @@ pub struct ParseSession {
     /// Next source page to parse, 1-based.
     next_page: u32,
     batch_size: usize,
+    /// Document-wide markdown signals (body size, heading-size → level map,
+    /// running headers/footers), computed by a prepass over every batch
+    /// before the first batch is returned, so heading levels are ranked
+    /// against the whole document rather than drifting between batches.
+    /// `None` until the prepass ran, and always when the output runs no
+    /// block classification.
+    signals: Option<stages::DocumentSignals>,
+    /// OCR outcomes the prepass recognized, keyed by page number. Each
+    /// batch merges and removes its own pages' outcomes instead of running
+    /// OCR again, so this shrinks as the session advances.
+    ocr_outcomes: HashMap<usize, stages::PageOcrOutcome>,
 }
 
 /// One batch of pages from a [`ParseSession`].
@@ -1201,14 +1325,22 @@ impl ParseSession {
 
     /// Parse and return the next batch, or `None` once every page within
     /// `max_pages` has been yielded.
+    ///
+    /// When the output runs block classification (Markdown, or
+    /// `extract_blocks`), the first call first makes a signals prepass over
+    /// the whole document, one batch at a time, so every batch ranks its
+    /// headings against the same document-wide heading map and suppresses
+    /// the same running headers/footers that a whole-document `parse()`
+    /// would. The prepass extracts and projects each page an extra time;
+    /// OCR is not repeated.
     pub async fn next_batch(&mut self) -> Result<Option<ParseBatch>, LiteParseError> {
         if self.next_page > self.page_limit {
             return Ok(None);
         }
-        let start_page = self.next_page;
-        let end_page = start_page
-            .saturating_add(self.batch_size.min(u32::MAX as usize) as u32 - 1)
-            .min(self.page_limit);
+        if self.signals.is_none() && self.parser.needs_document_signals() {
+            self.signals = Some(self.compute_document_signals().await?);
+        }
+        let (start_page, end_page) = self.batch_range(self.next_page);
         let targets: Vec<u32> = (start_page..=end_page).collect();
 
         let result = self
@@ -1218,6 +1350,8 @@ impl ParseSession {
                 Some(&targets),
                 targets.len(),
                 Some(self.outline.clone()),
+                self.signals.as_ref(),
+                self.signals.is_some().then_some(&mut self.ocr_outcomes),
             )
             .await?;
 
@@ -1227,6 +1361,38 @@ impl ParseSession {
             end_page,
             result,
         }))
+    }
+
+    /// The batch starting at `start_page`, as an inclusive page range.
+    fn batch_range(&self, start_page: u32) -> (u32, u32) {
+        let end_page = start_page
+            .saturating_add(self.batch_size.min(u32::MAX as usize) as u32 - 1)
+            .min(self.page_limit);
+        (start_page, end_page)
+    }
+
+    /// Fold every batch's projected pages into one [`stages::DocumentSignals`],
+    /// holding a single batch of pages at a time. Uses the same batch ranges
+    /// as [`next_batch`](Self::next_batch), so each batch's OCR merge sees
+    /// the same outcomes in both passes.
+    async fn compute_document_signals(
+        &mut self,
+    ) -> Result<stages::DocumentSignals, LiteParseError> {
+        let mut builder =
+            stages::DocumentSignalsBuilder::new(self.parser.config.keep_headers_footers);
+        self.ocr_outcomes.clear();
+        let mut start_page = 1;
+        while start_page <= self.page_limit {
+            let (start, end) = self.batch_range(start_page);
+            let targets: Vec<u32> = (start..=end).collect();
+            let pages = self
+                .parser
+                .project_for_signals(&self.input, &targets, &mut self.ocr_outcomes)
+                .await?;
+            builder.add_pages(&pages);
+            start_page = end.saturating_add(1);
+        }
+        Ok(builder.finish())
     }
 }
 

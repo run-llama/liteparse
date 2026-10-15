@@ -805,10 +805,12 @@ class LiteParse:
         not retain batches never holds more than one batch of pages in memory.
         A non-PDF source is converted once, not once per batch.
 
-        Cross-page passes see only the pages in their own batch, so repeated
-        header/footer removal and image deduplication are batch-local and the
-        output can differ from :meth:`parse`. Prefer :meth:`parse` unless the
-        size of the materialized result is the problem.
+        Markdown heading levels and repeated header/footer removal are
+        computed over the whole document, so they match :meth:`parse`: before
+        the first batch is returned, a prepass extracts and projects every
+        page (one batch at a time) to collect those signals. OCR is not
+        repeated; the prepass's results are reused. Image deduplication is
+        batch-local, so image references can differ from :meth:`parse`.
 
         Args:
             file_data: Path to the document file, or raw PDF bytes.
