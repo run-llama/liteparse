@@ -101,9 +101,15 @@ impl SignatureApi {
     }
 }
 
-/// The page-editing entry points [`Document::widget_appearance_copy`] needs,
-/// resolved together so a build missing any of them degrades to "no widget
-/// text" rather than failing the whole pdfium load.
+/// The `/Subtype` an overlay copy gives the widgets it keeps: no annotation
+/// type PDFium knows, so it generates no appearance and attaches no popup.
+const RETYPED_WIDGET: &str = "LiteParseOverlay";
+
+/// The page-editing entry points [`Document::widget_appearance_copy`] and
+/// [`Document::annotation_overlay_copy`] need, resolved together so a build
+/// missing any of them degrades to "no widget text" or "no overlay" rather
+/// than failing the whole pdfium load. Only the overlay retypes widgets, so
+/// `set_string` alone is optional: without it the widget text still works.
 struct PageEditApi {
     create: unsafe extern "C" fn() -> pdfium_sys::FPDF_DOCUMENT,
     import: unsafe extern "C" fn(
@@ -125,6 +131,13 @@ struct PageEditApi {
         pdfium_sys::FPDF_ANNOTATION,
         std::os::raw::c_int,
     ) -> pdfium_sys::FPDF_BOOL,
+    set_string: Option<
+        unsafe extern "C" fn(
+            pdfium_sys::FPDF_ANNOTATION,
+            pdfium_sys::FPDF_BYTESTRING,
+            pdfium_sys::FPDF_WIDESTRING,
+        ) -> pdfium_sys::FPDF_BOOL,
+    >,
 }
 
 impl PageEditApi {
@@ -139,6 +152,7 @@ impl PageEditApi {
             generate_content: bindings.FPDFPage_GenerateContent?,
             flatten: bindings.FPDFPage_Flatten?,
             set_flags: bindings.FPDFAnnot_SetFlags?,
+            set_string: bindings.FPDFAnnot_SetStringValue,
         })
     }
 
@@ -152,6 +166,7 @@ impl PageEditApi {
             generate_content: pdfium_sys::FPDFPage_GenerateContent,
             flatten: pdfium_sys::FPDFPage_Flatten,
             set_flags: pdfium_sys::FPDFAnnot_SetFlags,
+            set_string: Some(pdfium_sys::FPDFAnnot_SetStringValue),
         })
     }
 }
@@ -178,6 +193,15 @@ impl<'lib> Document<'lib> {
         if self.form_type() == 0 {
             return None;
         }
+        self.appearance_environment()
+    }
+
+    /// A form-fill environment even for a document without a form. Loading a
+    /// page into one (see [`Page::load_form_widgets`]) is what makes PDFium
+    /// write the appearance streams it generates — for widgets saved without
+    /// one, and for Square, Ink and other markup saved without `/AP` — before
+    /// anything is rendered. `None` if PDFium cannot create it.
+    pub fn appearance_environment(&self) -> Option<FormEnvironment<'_, 'lib>> {
         let mut callbacks = Box::new(pdfium_sys::FPDF_FORMFILLINFO::default());
         callbacks.version = 1;
         let handle = unsafe {
@@ -256,7 +280,44 @@ impl<'lib> Document<'lib> {
     /// step fails; the caller keeps the page text it already has. Load page 0 of
     /// the result fresh: a page handle open across a flatten keeps its old text.
     pub fn widget_appearance_copy(&self, index: i32) -> Option<Document<'lib>> {
+        self.annotation_only_copy(index, true, |_, is_widget, visible| is_widget && visible)
+    }
+
+    /// A private one-page document whose page 0 holds only the visible
+    /// annotations at `annot_indices` on page `index`, over an empty page.
+    ///
+    /// `FPDF_RenderPageBitmap` never paints widget annotations — only the
+    /// form-fill layer does, and only for widgets its field tree knows. Here
+    /// the kept widgets are retyped so the ordinary annotation render paints
+    /// their appearance like any other annotation, so rendering page 0 with
+    /// `FPDF_ANNOT` over a raster of the same page draws them in `/Annots`
+    /// order, together with any annotations stacked above them (see
+    /// [`Page::annotations_above`]), with PDFium's own placement: `/NoRotate`
+    /// compensation, QuadPoints-based markup, appearance matrices. Every other
+    /// annotation is hidden. `None` under the same conditions as
+    /// [`Self::widget_appearance_copy`].
+    pub fn annotation_overlay_copy(
+        &self,
+        index: i32,
+        annot_indices: &[i32],
+    ) -> Option<Document<'lib>> {
+        self.annotation_only_copy(index, false, |annot_index, _, visible| {
+            visible && annot_indices.contains(&annot_index)
+        })
+    }
+
+    /// Import page `index` into a fresh document, hide every annotation for
+    /// which `keep(annot_index, is_widget, is_visible)` is false, and drop the
+    /// page content. With `flatten`, flatten what remains into page content;
+    /// otherwise retype the kept widgets so the annotation render paints them.
+    fn annotation_only_copy(
+        &self,
+        index: i32,
+        flatten: bool,
+        keep: impl Fn(i32, bool, bool) -> bool,
+    ) -> Option<Document<'lib>> {
         let api = PageEditApi::load()?;
+        let set_string = if flatten { None } else { Some(api.set_string?) };
         let handle = unsafe { (api.create)() };
         if handle.is_null() {
             return None;
@@ -274,6 +335,10 @@ impl<'lib> Document<'lib> {
             return None;
         }
         let page = copy.page(0).ok()?;
+        let retyped: Vec<u16> = RETYPED_WIDGET
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let annot_count = unsafe { ffi!(FPDFPage_GetAnnotCount(page.handle)) };
         for annot_index in 0..annot_count {
             let annot = unsafe { ffi!(FPDFPage_GetAnnot(page.handle, annot_index)) };
@@ -281,16 +346,25 @@ impl<'lib> Document<'lib> {
                 return None;
             }
             let flags = unsafe { ffi!(FPDFAnnot_GetFlags(annot)) };
-            let suppressed = (pdfium_sys::FPDF_ANNOT_FLAG_INVISIBLE
-                | pdfium_sys::FPDF_ANNOT_FLAG_HIDDEN
-                | pdfium_sys::FPDF_ANNOT_FLAG_NOVIEW) as i32;
-            let visible_widget = unsafe { ffi!(FPDFAnnot_GetSubtype(annot)) }
-                == pdfium_sys::FPDF_ANNOT_WIDGET as i32
-                && flags & suppressed == 0;
-            let ok = visible_widget
-                || unsafe {
-                    (api.set_flags)(annot, flags | pdfium_sys::FPDF_ANNOT_FLAG_HIDDEN as i32)
-                } != 0;
+            // Each mode keeps what PDFium itself would draw: flattening for
+            // display also drops Invisible annotations, the render does not.
+            let suppressed = if flatten {
+                crate::page::SCREEN_HIDDEN | pdfium_sys::FPDF_ANNOT_FLAG_INVISIBLE as i32
+            } else {
+                crate::page::SCREEN_HIDDEN
+            };
+            let is_widget = unsafe { ffi!(FPDFAnnot_GetSubtype(annot)) }
+                == pdfium_sys::FPDF_ANNOT_WIDGET as i32;
+            let ok = if !keep(annot_index, is_widget, flags & suppressed == 0) {
+                let hidden = flags | pdfium_sys::FPDF_ANNOT_FLAG_HIDDEN as i32;
+                unsafe { (api.set_flags)(annot, hidden) != 0 }
+            } else if let Some(set_string) = set_string.filter(|_| is_widget) {
+                // `CPDF_AnnotList` skips widgets unless the form layer draws;
+                // under any other subtype their appearance draws as is.
+                unsafe { set_string(annot, c"Subtype".as_ptr(), retyped.as_ptr()) != 0 }
+            } else {
+                true
+            };
             unsafe { ffi!(FPDFPage_CloseAnnot(annot)) };
             if !ok {
                 return None;
@@ -304,8 +378,9 @@ impl<'lib> Document<'lib> {
             unsafe { (api.destroy_object)(object) };
         }
         if unsafe { (api.generate_content)(page.handle) } == 0
-            || unsafe { (api.flatten)(page.handle, pdfium_sys::FLAT_NORMALDISPLAY as i32) }
-                != pdfium_sys::FLATTEN_SUCCESS as i32
+            || flatten
+                && unsafe { (api.flatten)(page.handle, pdfium_sys::FLAT_NORMALDISPLAY as i32) }
+                    != pdfium_sys::FLATTEN_SUCCESS as i32
         {
             return None;
         }

@@ -233,6 +233,15 @@ pub struct PdfiumBindings {
         *mut FPDF_BOOL,
     ) -> FPDF_BOOL,
     pub FPDFFormObj_CountObjects: unsafe extern "C" fn(FPDF_PAGEOBJECT) -> std::os::raw::c_int,
+    pub FPDFPageObj_CountMarks: unsafe extern "C" fn(FPDF_PAGEOBJECT) -> std::os::raw::c_int,
+    pub FPDFPageObj_GetMark:
+        unsafe extern "C" fn(FPDF_PAGEOBJECT, std::os::raw::c_ulong) -> FPDF_PAGEOBJECTMARK,
+    pub FPDFPageObjMark_GetName: unsafe extern "C" fn(
+        FPDF_PAGEOBJECTMARK,
+        *mut FPDF_WCHAR,
+        std::os::raw::c_ulong,
+        *mut std::os::raw::c_ulong,
+    ) -> FPDF_BOOL,
     pub FPDFFormObj_GetObject:
         unsafe extern "C" fn(FPDF_PAGEOBJECT, std::os::raw::c_ulong) -> FPDF_PAGEOBJECT,
     pub FPDFPath_CountSegments: unsafe extern "C" fn(FPDF_PAGEOBJECT) -> std::os::raw::c_int,
@@ -458,6 +467,9 @@ pub struct PdfiumBindings {
     pub FPDFAnnot_GetFlags: unsafe extern "C" fn(FPDF_ANNOTATION) -> std::os::raw::c_int,
     pub FPDFAnnot_SetFlags:
         Option<unsafe extern "C" fn(FPDF_ANNOTATION, std::os::raw::c_int) -> FPDF_BOOL>,
+    pub FPDFAnnot_SetStringValue: Option<
+        unsafe extern "C" fn(FPDF_ANNOTATION, FPDF_BYTESTRING, FPDF_WIDESTRING) -> FPDF_BOOL,
+    >,
     pub FPDFAnnot_GetObjectCount: unsafe extern "C" fn(FPDF_ANNOTATION) -> std::os::raw::c_int,
     pub FPDFAnnot_GetObject:
         unsafe extern "C" fn(FPDF_ANNOTATION, std::os::raw::c_int) -> FPDF_PAGEOBJECT,
@@ -670,6 +682,9 @@ impl PdfiumBindings {
             FPDFPageObj_GetStrokeWidth: load_fn!(lib, "FPDFPageObj_GetStrokeWidth"),
             FPDFPath_GetDrawMode: load_fn!(lib, "FPDFPath_GetDrawMode"),
             FPDFFormObj_CountObjects: load_fn!(lib, "FPDFFormObj_CountObjects"),
+            FPDFPageObj_CountMarks: load_fn!(lib, "FPDFPageObj_CountMarks"),
+            FPDFPageObj_GetMark: load_fn!(lib, "FPDFPageObj_GetMark"),
+            FPDFPageObjMark_GetName: load_fn!(lib, "FPDFPageObjMark_GetName"),
             FPDFFormObj_GetObject: load_fn!(lib, "FPDFFormObj_GetObject"),
             FPDFPath_CountSegments: load_fn!(lib, "FPDFPath_CountSegments"),
             FPDFPath_GetPathSegment: load_fn!(lib, "FPDFPath_GetPathSegment"),
@@ -754,6 +769,7 @@ impl PdfiumBindings {
             FPDFAnnot_GetObjNum: load_fn!(lib, "FPDFAnnot_GetObjNum"),
             FPDFAnnot_GetFlags: load_fn!(lib, "FPDFAnnot_GetFlags"),
             FPDFAnnot_SetFlags: load_fn_opt!(lib, "FPDFAnnot_SetFlags"),
+            FPDFAnnot_SetStringValue: load_fn_opt!(lib, "FPDFAnnot_SetStringValue"),
             FPDFAnnot_GetObjectCount: load_fn!(lib, "FPDFAnnot_GetObjectCount"),
             FPDFAnnot_GetObject: load_fn!(lib, "FPDFAnnot_GetObject"),
             FPDFAnnot_GetFormFieldFlags: load_fn!(lib, "FPDFAnnot_GetFormFieldFlags"),
