@@ -2618,6 +2618,8 @@ struct ObjTextMeta {
     font_descent: Option<f32>,
     /// Vertical scale of the char matrix (font_height = font_size * scale_y).
     scale_y: Option<f32>,
+    /// Converts glyph advances from font units to page-space distances.
+    advance_scale: f32,
     /// Mirrors the pre-cache logic: only probed when the font has a base
     /// name, false otherwise.
     font_is_embedded: bool,
@@ -2759,11 +2761,13 @@ impl ObjMetaCache {
                 font_space_width = None;
             }
         }
-        let scale_y = if obj_ptr.is_some() {
-            ch.matrix().map(|m| decompose_scale(&m).1)
-        } else {
-            None
-        };
+        let matrix = if obj_ptr.is_some() { ch.matrix() } else { None };
+        let scale_y = matrix.as_ref().map(|m| decompose_scale(m).1);
+        let advance_scale = matrix
+            .as_ref()
+            .map(|m| m.a.hypot(m.b))
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .unwrap_or(1.0);
         let stroke_color = ch.stroke_color().map(|c| self.hex(&c));
         let fill_color = ch.fill_color().map(|c| self.hex(&c));
         ObjTextMeta {
@@ -2774,6 +2778,7 @@ impl ObjMetaCache {
             font_ascent,
             font_descent,
             scale_y,
+            advance_scale,
             font_is_embedded,
             font_name_is_buggy,
             font,
@@ -3036,6 +3041,7 @@ struct SegmentBuilder {
     font: Option<Font>,
     rotation_deg: f32,
     text_width: f32,
+    advance_scale: f32,
     mcid: Option<i32>,
     fill_color: Option<String>,
     stroke_color: Option<String>,
@@ -3088,6 +3094,7 @@ impl SegmentBuilder {
             font: None,
             rotation_deg: 0.0,
             text_width: 0.0,
+            advance_scale: 1.0,
             mcid: None,
             fill_color: None,
             stroke_color: None,
@@ -3201,7 +3208,7 @@ impl SegmentBuilder {
             return 5.0;
         }
         if self.text_width > 0.0 {
-            self.text_width / self.char_count as f32
+            self.text_width * self.advance_scale / self.char_count as f32
         } else {
             (self.vp_right - self.vp_left) / self.char_count as f32
         }
@@ -3321,6 +3328,7 @@ impl SegmentBuilder {
         if let Some(sy) = meta.scale_y {
             self.font_height = Some(self.font_size * sy);
         }
+        self.advance_scale = meta.advance_scale;
 
         // Colors from first glyph
         self.stroke_color = meta.stroke_color.clone();
@@ -3862,6 +3870,23 @@ mod tests {
                     .iter()
                     .all(|item| item.x + item.width <= page.page_width + 0.1)
             );
+        }
+    }
+
+    #[test]
+    fn text_matrix_scaling_preserves_word_spaces() {
+        // Equivalent baselines use Tf, uniform/nonuniform Tm scaling, and a rotated page.
+        let input =
+            PdfInput::Bytes(include_bytes!("../tests/fixtures/scaled_text_matrix.pdf").to_vec());
+        let pages = extract_pages_from_input(&input, None, usize::MAX, None).unwrap();
+        assert_eq!(pages.len(), 4);
+        for (index, page) in pages.iter().enumerate() {
+            let text: String = page
+                .text_items
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect();
+            assert_eq!(text, "110 SE 6th Street, Suite 2800", "page {}", index + 1);
         }
     }
 
