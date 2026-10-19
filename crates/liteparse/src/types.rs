@@ -110,10 +110,9 @@ pub struct TextItem {
     /// represented by a real space glyph in the PDF content stream.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub trailing_space_generated: bool,
-    /// A space glyph from the content stream followed the last glyph of this
-    /// left-to-right item. Projection keeps it when it rejoins the item with
-    /// an abutting neighbour, so a split at a word space is never undone as a
-    /// silent concatenation.
+    /// A space (a glyph, or one PDFium synthesized from the glyph gap) followed
+    /// the last glyph of this left-to-right item. Projection keeps it when it
+    /// rejoins the item with an abutting neighbour.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub followed_by_space: bool,
     /// OCR confidence score (0.0–1.0). None for native PDF text.

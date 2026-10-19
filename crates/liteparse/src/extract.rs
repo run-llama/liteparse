@@ -3006,8 +3006,6 @@ struct SegmentBuilder {
     pending_space_generated: bool,
     has_content: bool,
     pending_space: bool,
-    /// The pending space includes a real space glyph from the content stream.
-    pending_space_in_source: bool,
     // Per-word sub-boxes, finalized at each inter-word space break. The
     // currently-open word is accumulated in the `word_*` fields below and
     // flushed into `words` by `break_word`.
@@ -3060,7 +3058,6 @@ impl SegmentBuilder {
             pending_space_generated: false,
             has_content: false,
             pending_space: false,
-            pending_space_in_source: false,
             words: Vec::new(),
             cur_word: String::new(),
             word_left: f32::MAX,
@@ -3206,7 +3203,6 @@ impl SegmentBuilder {
         };
         self.has_content = true;
         self.pending_space = false;
-        self.pending_space_in_source = false;
         if self.extract_text_metadata {
             self.pending_space_char_codes.clear();
         }
@@ -3372,7 +3368,6 @@ impl SegmentBuilder {
     fn mark_pending_space(&mut self, is_generated: bool, char_code: u32) {
         if self.has_content {
             self.pending_space = true;
-            self.pending_space_in_source |= !is_generated;
             if self.extract_text_metadata {
                 self.pending_space_generated = is_generated;
                 self.pending_space_char_codes.push(char_code);
@@ -3389,7 +3384,6 @@ impl SegmentBuilder {
                 self.char_codes.append(&mut self.pending_space_char_codes);
             }
             self.pending_space = false;
-            self.pending_space_in_source = false;
             self.pending_space_generated = false;
         }
     }
@@ -3441,7 +3435,7 @@ impl SegmentBuilder {
                 stroke_color: self.stroke_color.clone(),
                 char_codes: std::mem::take(&mut self.char_codes),
                 trailing_space_generated: self.pending_space_generated,
-                followed_by_space: self.pending_space_in_source && self.dir_rtl != Some(true),
+                followed_by_space: self.pending_space && self.dir_rtl != Some(true),
                 confidence: None,
                 link: None,
                 strike: false,
@@ -3530,12 +3524,13 @@ mod tests {
     /// Text drawn at `1 Tf` and sized by a sheared text matrix (a synthetic
     /// oblique), with the tight TJ kerning some report generators emit. The
     /// shear widens each glyph's loose box until neighbouring words touch
-    /// across their source spaces.
+    /// across their spaces, whether a space glyph or a TJ displacement
+    /// (`(Lauderdale,) -278 (Florida )`).
     fn sheared_text_matrix_pdf() -> Vec<u8> {
         let content = b"BT /F1 1 Tf 7.125 0 1.5145 7.125 20 60 Tm \
 [(110 ) -28 (SE ) -28 (6th ) -28 (Str) 18 (eet, ) -28 (Suite ) -28 (2800)] TJ ET\n\
 BT /F1 1 Tf 7.125 0 1.5145 7.125 20 40 Tm \
-[(Fort ) -28 (Lauderdale, ) -28 (Florida ) -28 (33301)] TJ ET";
+[(Fort ) -28 (Lauderdale,) -278 (Florida ) -28 (33301)] TJ ET";
         let objects: Vec<Vec<u8>> = vec![
             b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
             b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
