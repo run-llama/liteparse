@@ -2580,8 +2580,6 @@ struct ObjTextMeta {
     font_descent: Option<f32>,
     /// Vertical scale of the char matrix (font_height = font_size * scale_y).
     scale_y: Option<f32>,
-    /// Converts glyph advances from font units to page-space distances.
-    advance_scale: f32,
     /// Mirrors the pre-cache logic: only probed when the font has a base
     /// name, false otherwise.
     font_is_embedded: bool,
@@ -2723,13 +2721,11 @@ impl ObjMetaCache {
                 font_space_width = None;
             }
         }
-        let matrix = if obj_ptr.is_some() { ch.matrix() } else { None };
-        let scale_y = matrix.as_ref().map(|m| decompose_scale(m).1);
-        let advance_scale = matrix
-            .as_ref()
-            .map(|m| m.a.hypot(m.b))
-            .filter(|s| s.is_finite() && *s > 0.0)
-            .unwrap_or(1.0);
+        let scale_y = if obj_ptr.is_some() {
+            ch.matrix().map(|m| decompose_scale(&m).1)
+        } else {
+            None
+        };
         let stroke_color = ch.stroke_color().map(|c| self.hex(&c));
         let fill_color = ch.fill_color().map(|c| self.hex(&c));
         ObjTextMeta {
@@ -2740,7 +2736,6 @@ impl ObjMetaCache {
             font_ascent,
             font_descent,
             scale_y,
-            advance_scale,
             font_is_embedded,
             font_name_is_buggy,
             font,
@@ -3003,7 +2998,6 @@ struct SegmentBuilder {
     font: Option<Font>,
     rotation_deg: f32,
     text_width: f32,
-    advance_scale: f32,
     mcid: Option<i32>,
     fill_color: Option<String>,
     stroke_color: Option<String>,
@@ -3012,6 +3006,8 @@ struct SegmentBuilder {
     pending_space_generated: bool,
     has_content: bool,
     pending_space: bool,
+    /// The pending space includes a real space glyph from the content stream.
+    pending_space_in_source: bool,
     // Per-word sub-boxes, finalized at each inter-word space break. The
     // currently-open word is accumulated in the `word_*` fields below and
     // flushed into `words` by `break_word`.
@@ -3056,7 +3052,6 @@ impl SegmentBuilder {
             font: None,
             rotation_deg: 0.0,
             text_width: 0.0,
-            advance_scale: 1.0,
             mcid: None,
             fill_color: None,
             stroke_color: None,
@@ -3065,6 +3060,7 @@ impl SegmentBuilder {
             pending_space_generated: false,
             has_content: false,
             pending_space: false,
+            pending_space_in_source: false,
             words: Vec::new(),
             cur_word: String::new(),
             word_left: f32::MAX,
@@ -3170,7 +3166,7 @@ impl SegmentBuilder {
             return 5.0;
         }
         if self.text_width > 0.0 {
-            self.text_width * self.advance_scale / self.char_count as f32
+            self.text_width / self.char_count as f32
         } else {
             (self.vp_right - self.vp_left) / self.char_count as f32
         }
@@ -3210,6 +3206,7 @@ impl SegmentBuilder {
         };
         self.has_content = true;
         self.pending_space = false;
+        self.pending_space_in_source = false;
         if self.extract_text_metadata {
             self.pending_space_char_codes.clear();
         }
@@ -3290,7 +3287,6 @@ impl SegmentBuilder {
         if let Some(sy) = meta.scale_y {
             self.font_height = Some(self.font_size * sy);
         }
-        self.advance_scale = meta.advance_scale;
 
         // Colors from first glyph
         self.stroke_color = meta.stroke_color.clone();
@@ -3376,6 +3372,7 @@ impl SegmentBuilder {
     fn mark_pending_space(&mut self, is_generated: bool, char_code: u32) {
         if self.has_content {
             self.pending_space = true;
+            self.pending_space_in_source |= !is_generated;
             if self.extract_text_metadata {
                 self.pending_space_generated = is_generated;
                 self.pending_space_char_codes.push(char_code);
@@ -3392,6 +3389,7 @@ impl SegmentBuilder {
                 self.char_codes.append(&mut self.pending_space_char_codes);
             }
             self.pending_space = false;
+            self.pending_space_in_source = false;
             self.pending_space_generated = false;
         }
     }
@@ -3443,6 +3441,7 @@ impl SegmentBuilder {
                 stroke_color: self.stroke_color.clone(),
                 char_codes: std::mem::take(&mut self.char_codes),
                 trailing_space_generated: self.pending_space_generated,
+                followed_by_space: self.pending_space_in_source && self.dir_rtl != Some(true),
                 confidence: None,
                 link: None,
                 strike: false,
@@ -3526,6 +3525,75 @@ mod tests {
             .as_bytes(),
         );
         pdf
+    }
+
+    /// Text drawn at `1 Tf` and sized by a sheared text matrix (a synthetic
+    /// oblique), with the tight TJ kerning some report generators emit. The
+    /// shear widens each glyph's loose box until neighbouring words touch
+    /// across their source spaces.
+    fn sheared_text_matrix_pdf() -> Vec<u8> {
+        let content = b"BT /F1 1 Tf 7.125 0 1.5145 7.125 20 60 Tm \
+[(110 ) -28 (SE ) -28 (6th ) -28 (Str) 18 (eet, ) -28 (Suite ) -28 (2800)] TJ ET\n\
+BT /F1 1 Tf 7.125 0 1.5145 7.125 20 40 Tm \
+[(Fort ) -28 (Lauderdale, ) -28 (Florida ) -28 (33301)] TJ ET";
+        let objects: Vec<Vec<u8>> = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+            [
+                format!("<< /Length {} >>\nstream\n", content.len()).as_bytes(),
+                content,
+                b"\nendstream",
+            ]
+            .concat(),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        ];
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::with_capacity(objects.len());
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+            pdf.extend_from_slice(object);
+            pdf.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    #[test]
+    fn sheared_text_matrix_keeps_word_spaces_through_projection() {
+        let pages = extract_pages_from_input(
+            &PdfInput::Bytes(sheared_text_matrix_pdf()),
+            None,
+            usize::MAX,
+            None,
+        )
+        .unwrap();
+        let text = &crate::projection::project_pages_to_grid(pages)[0].text;
+        let lines: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "110 SE 6th Street, Suite 2800",
+                "Fort Lauderdale, Florida 33301"
+            ]
+        );
     }
 
     /// One normal page plus a `/UserUnit 36` page whose text is written at
@@ -3657,23 +3725,6 @@ mod tests {
                     .iter()
                     .all(|item| item.x + item.width <= page.page_width + 0.1)
             );
-        }
-    }
-
-    #[test]
-    fn text_matrix_scaling_preserves_word_spaces() {
-        // Equivalent baselines use Tf, uniform/nonuniform Tm scaling, and a rotated page.
-        let input =
-            PdfInput::Bytes(include_bytes!("../tests/fixtures/scaled_text_matrix.pdf").to_vec());
-        let pages = extract_pages_from_input(&input, None, usize::MAX, None).unwrap();
-        assert_eq!(pages.len(), 4);
-        for (index, page) in pages.iter().enumerate() {
-            let text: String = page
-                .text_items
-                .iter()
-                .map(|item| item.text.as_str())
-                .collect();
-            assert_eq!(text, "110 SE 6th Street, Suite 2800", "page {}", index + 1);
         }
     }
 
