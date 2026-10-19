@@ -4,6 +4,7 @@ import { program } from "commander";
 import { LiteParse, type LiteParseConfig } from "./lib.js";
 import { parseResultToCliJson } from "./cli-json.js";
 import { formatText } from "./cli-text.js";
+import { parsePositiveInt, parsePositiveNumber, parseTargetPages } from "./cli-args.js";
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join, relative, parse as parsePath } from "node:path";
 
@@ -93,7 +94,7 @@ program
   )
   .option("--no-ocr", "Disable OCR")
   .option("--ocr-language <lang>", "OCR language (default: eng)")
-  .option("--max-pages <n>", "Max pages to parse", parseInt)
+  .option("--max-pages <n>", "Max pages to parse", parsePositiveInt)
   .option(
     "--target-pages <pages>",
     'Pages to parse (e.g., "1-5,10,15-20")',
@@ -102,7 +103,7 @@ program
     "--continue-on-page-error",
     "Continue after page-level extraction errors and report them in JSON",
   )
-  .option("--dpi <dpi>", "Rendering DPI", parseFloat)
+  .option("--dpi <dpi>", "Rendering DPI", parsePositiveNumber)
   .option("--preserve-small-text", "Keep very small text")
   .option(
     "--extract-text-metadata",
@@ -111,7 +112,7 @@ program
   .option("--password <password>", "Password for encrypted documents")
   .option("--config <file>", "JSON config file path")
   .option("-q, --quiet", "Suppress progress output")
-  .option("--num-workers <n>", "Number of concurrent OCR workers", parseInt)
+  .option("--num-workers <n>", "Number of concurrent OCR workers", parsePositiveInt)
   .option(
     "--complexity",
     "Include per-page complexity signals in JSON output",
@@ -213,7 +214,7 @@ program
   )
   .argument("<file>", "Path to the document file")
   .option("--compact", "Emit dense, whitespace-free JSON instead of pretty")
-  .option("--max-pages <n>", "Max pages to parse", parseInt)
+  .option("--max-pages <n>", "Max pages to parse", parsePositiveInt)
   .option(
     "--target-pages <pages>",
     'Pages to check (e.g., "1-5,10,15-20")',
@@ -281,7 +282,7 @@ program
     "--target-pages <pages>",
     'Pages to screenshot (e.g., "1,3,5" or "1-5")',
   )
-  .option("--dpi <dpi>", "Rendering DPI", parseFloat)
+  .option("--dpi <dpi>", "Rendering DPI", parsePositiveNumber)
   .option("--password <password>", "Password for encrypted documents")
   .option("-q, --quiet", "Suppress progress output")
   .action(async (file: string, opts: Record<string, unknown>) => {
@@ -294,18 +295,15 @@ program
 
       const parser = new LiteParse(config);
 
-      // Parse target pages into number array
+      // Validate and expand --target-pages with the same rules as `parse`
       let pageNumbers: number[] | undefined;
       if (opts.targetPages) {
-        pageNumbers = [];
-        for (const part of (opts.targetPages as string).split(",")) {
-          const trimmed = part.trim();
-          if (trimmed.includes("-")) {
-            const [start, end] = trimmed.split("-").map(Number);
-            for (let i = start; i <= end; i++) pageNumbers.push(i);
-          } else {
-            pageNumbers.push(Number(trimmed));
-          }
+        try {
+          pageNumbers = parseTargetPages(opts.targetPages as string);
+        } catch (err) {
+          throw new Error(
+            `invalid --target-pages: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
       }
 
@@ -345,13 +343,13 @@ program
     'Extra header for OCR server requests, "Name: Value" (repeatable)',
     collectHeader,
   )
-  .option("--max-pages <n>", "Max pages to parse per file", parseInt)
-  .option("--dpi <dpi>", "Rendering DPI", parseFloat)
+  .option("--max-pages <n>", "Max pages to parse per file", parsePositiveInt)
+  .option("--dpi <dpi>", "Rendering DPI", parsePositiveNumber)
   .option("--recursive", "Recursively search input directory")
   .option("--extension <ext>", "Only process files with this extension")
   .option("--password <password>", "Password for encrypted documents")
   .option("-q, --quiet", "Suppress progress output")
-  .option("--num-workers <n>", "Number of concurrent OCR workers", parseInt)
+  .option("--num-workers <n>", "Number of concurrent OCR workers", parsePositiveInt)
   .option(
     "--extract-text-metadata",
     "Include rich PDF text metadata in text items and JSON output",
