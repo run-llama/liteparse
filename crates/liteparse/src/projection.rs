@@ -579,6 +579,16 @@ fn form_lines(
         prev.orig_height = y2 - y1;
     }
 
+    // Keeps the source space `prev` was split at; the result inherits
+    // `next`'s trailing-space state.
+    fn append_text(prev: &mut ProjectedTextItem, next: &ProjectedTextItem) {
+        if prev.item.followed_by_space && !prev.item.text.ends_with(' ') {
+            prev.item.text.push(' ');
+        }
+        prev.item.text.push_str(&next.item.text);
+        prev.item.followed_by_space = next.item.followed_by_space;
+    }
+
     // Merge continuous bbox items in a single linear pass.
     let merge_y_tolerance = 0.1;
     let merge_h_tolerance = 0.1;
@@ -593,7 +603,7 @@ fn form_lines(
         if should_merge {
             if let Some(prev) = merged_items.last_mut() {
                 let merged = merge_bbox(prev, &cur);
-                prev.item.text.push_str(&cur.item.text);
+                append_text(prev, &cur);
                 prev.item.words.append(&mut cur.item.words);
                 prev.item.x = merged.0;
                 prev.item.y = merged.1;
@@ -796,6 +806,7 @@ fn form_lines(
                 if is_decimal_continuation {
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
                     prev.item.text.push_str(&item.item.text);
+                    prev.item.followed_by_space = item.item.followed_by_space;
                     prev.item.words.append(&mut item.item.words);
                     merge_orig_bbox(prev, &item);
                     continue;
@@ -829,7 +840,7 @@ fn form_lines(
                     && delta_x <= MERGE_THRESHOLD
                 {
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
-                    prev.item.text.push_str(&item.item.text);
+                    append_text(prev, &item);
                     prev.item.words.append(&mut item.item.words);
                     merge_orig_bbox(prev, &item);
                     continue;
@@ -843,6 +854,7 @@ fn form_lines(
                         prev.item.text.push(' ');
                     }
                     prev.item.text.push_str(&item.item.text);
+                    prev.item.followed_by_space = item.item.followed_by_space;
                     prev.item.words.append(&mut item.item.words);
                     merge_orig_bbox(prev, &item);
                     continue;
