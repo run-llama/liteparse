@@ -930,6 +930,9 @@ impl JsDocumentAnnotation {
 pub struct JsLayoutCell {
     pub text: String,
     pub bbox: Option<JsAnnotationRect>,
+    /// Indices into the page's `textItems` of the items the cell was read
+    /// from, in reading order. Empty for padding cells.
+    pub text_item_indices: Vec<u32>,
 }
 
 /// A classified block plus where it sits on the page. Flat by design — `kind`
@@ -970,6 +973,14 @@ pub struct JsLayoutBlock {
     /// Region of the page this block occupies, in the same viewport space as
     /// `textItems`. Absent when the block has no page geometry behind it.
     pub bbox: Option<JsAnnotationRect>,
+    /// Indices into the page's `textItems` of every item the block was read
+    /// from, sorted. For tables, the union of the cells'. Empty for `figure`
+    /// and for a `rule` drawn as a stroke.
+    pub text_item_indices: Vec<u32>,
+}
+
+fn item_indices(indices: &[usize]) -> Vec<u32> {
+    indices.iter().map(|&i| i as u32).collect()
 }
 
 impl JsLayoutCell {
@@ -977,6 +988,7 @@ impl JsLayoutCell {
         Self {
             text: cell.text.clone(),
             bbox: cell.bbox.as_ref().map(JsAnnotationRect::from_rust),
+            text_item_indices: item_indices(&cell.text_item_indices),
         }
     }
 }
@@ -1002,6 +1014,7 @@ impl JsLayoutBlock {
             id: block.id.clone(),
             format: block.format.clone(),
             bbox: block.bbox.as_ref().map(JsAnnotationRect::from_rust),
+            text_item_indices: item_indices(&block.text_item_indices),
         }
     }
 }

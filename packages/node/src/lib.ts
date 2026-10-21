@@ -319,6 +319,11 @@ export interface LayoutCell {
    * a ragged grid, or halves of a merged run split at an estimated position.
    */
   bbox?: Rect;
+  /**
+   * Indices into the page's `textItems` of the items the cell was read from,
+   * in reading order. Empty for padding cells.
+   */
+  textItemIndices: number[];
 }
 
 /** A classified block of page content, discriminated by `kind`. */
@@ -356,6 +361,12 @@ export interface LayoutBlock {
    * `textItems`. The union of every source line that fed the block.
    */
   bbox?: Rect;
+  /**
+   * Indices into the page's `textItems` of every item the block was read
+   * from, sorted. For tables, the union of the cells'. Empty for `figure` and
+   * for a `rule` drawn as a stroke.
+   */
+  textItemIndices: number[];
 }
 
 export type StructureAttributeValue = boolean | number | string;

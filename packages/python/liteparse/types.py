@@ -69,6 +69,9 @@ class LayoutCell:
     """
     text: str
     bbox: Optional[AnnotationRect] = None
+    #: Indices into the page's ``text_items`` of the items the cell was read
+    #: from, in reading order. Empty for padding cells.
+    text_item_indices: List[int] = field(default_factory=list)
 
 
 @dataclass
@@ -102,6 +105,10 @@ class LayoutBlock:
     #: Region this block occupies, in the same top-left 72-DPI viewport space
     #: as ``text_items``. The union of every source line that fed the block.
     bbox: Optional[AnnotationRect] = None
+    #: Indices into the page's ``text_items`` of every item the block was read
+    #: from, sorted. For tables, the union of the cells'. Empty for ``figure``
+    #: and for a ``rule`` drawn as a stroke.
+    text_item_indices: List[int] = field(default_factory=list)
 
 
 @dataclass
