@@ -487,6 +487,9 @@ class LiteParseConfig:
     #: (0/90/180/270) its content appears rotated. Empty when none.
     page_orientation_corrections: List[Tuple[int, int]] = field(default_factory=list)
     extract_text_metadata: bool = False
+    #: How tables render in markdown output: ``"markdown"`` for GFM pipe
+    #: tables, ``"html"`` for ``<table>`` markup.
+    table_format: str = "markdown"
     #: Keep running headers/footers in markdown output instead of stripping
     #: repeated page-band lines and page chrome.
     keep_headers_footers: bool = False

@@ -48,7 +48,9 @@ use crate::types::{
 
 pub use crate::extract::{ExtractedPages, ExtractionOutputOptions};
 pub use crate::layout::{LayoutBlock, LayoutCell};
-pub use crate::markdown_layout::{Block, Cell, PositionedBlock, SpanCell, render_blocks};
+pub use crate::markdown_layout::{
+    Block, Cell, PositionedBlock, SpanCell, render_blocks, render_blocks_with,
+};
 pub use crate::ocr::OcrResult;
 pub use crate::ocr_merge::{
     ComplexityReason, LayoutComplexityReason, LayoutComplexityStats, OcrRaster, OcrRenderOptions,
@@ -487,9 +489,13 @@ pub fn extract_blocks(
 /// Render one page's markdown from its blocks. A page that classified to
 /// `None` renders its projection text inside a ```` ```text ```` fence so
 /// nothing is silently dropped.
-pub fn render_page_markdown(page: &ParsedPage, blocks: Option<&[PositionedBlock]>) -> String {
+pub fn render_page_markdown(
+    page: &ParsedPage,
+    blocks: Option<&[PositionedBlock]>,
+    table_format: crate::config::TableFormat,
+) -> String {
     match blocks {
-        Some(blocks) => render_blocks(blocks),
+        Some(blocks) => render_blocks_with(blocks, table_format),
         None => {
             let mut out = String::from("```text\n");
             out.push_str(&page.text);
@@ -622,6 +628,7 @@ pub fn screenshots(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::TableFormat;
     use crate::types::{Anchor, ProjectedLine, Rect, TextItem};
 
     fn line(text: &str, x: f32, y: f32, h: f32, size: f32) -> ProjectedLine {
@@ -690,7 +697,7 @@ mod tests {
             .iter()
             .map(|page| {
                 let blocks = extract_blocks(page, &signals, &options);
-                render_page_markdown(page, blocks.as_deref())
+                render_page_markdown(page, blocks.as_deref(), TableFormat::Markdown)
             })
             .collect()
     }

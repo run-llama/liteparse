@@ -143,8 +143,14 @@ pub struct LiteParseConfig {
     /// are not computed unless this is enabled.
     #[serde(default)]
     pub extract_text_metadata: bool,
+    /// How tables render in markdown output. Default `Markdown` (GFM pipe
+    /// tables; merged tables still fall back to HTML when their spans don't
+    /// fit the pipe model). `Html` emits `<table>` markup for every table —
+    /// for consumers whose pipeline handles HTML better than pipe syntax.
+    #[serde(default)]
+    pub table_format: TableFormat,
     /// Restrict output to a sub-region of every page. Each field is the
-    /// fraction of the page to crop away from that side (e.g. `left = 0.5`
+    /// fraction of the page to crop away from that side (e.g. `left = 0.5`,
     /// discards the left half). A text item is kept only when it lies
     /// *entirely* inside the surviving rectangle
     /// `[left·W, (1-right)·W] × [top·H, (1-bottom)·H]` (top-left origin).
@@ -234,6 +240,18 @@ pub enum ImageMode {
     Embed,
 }
 
+/// How tables render in markdown output.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TableFormat {
+    /// GFM pipe tables. Tables with real spans still render as HTML, since
+    /// the pipe model cannot express them.
+    #[default]
+    Markdown,
+    /// HTML `<table>` markup for every table.
+    Html,
+}
+
 /// Supported output formats.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -319,6 +337,7 @@ impl Default for LiteParseConfig {
             ocr_failure_fatal: true,
             ocr_hedge_delays_ms: Vec::new(),
             emit_word_boxes: false,
+            table_format: TableFormat::Markdown,
             extract_text_metadata: false,
             crop_box: None,
             skip_diagonal_text: false,
