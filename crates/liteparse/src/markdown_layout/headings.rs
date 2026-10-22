@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::types::{OutlineTarget, ParsedPage, ProjectedLine, StructNode};
 
 use super::classify::is_rotated_line;
@@ -576,9 +578,26 @@ pub(super) fn looks_like_numbered_bold_heading(
 const BODY_CODOMINANT_FRACTION: f32 = 0.5;
 
 pub fn compute_body_size(pages: &[ParsedPage]) -> f32 {
-    use std::collections::HashMap;
-    let mut weights: HashMap<u32, (f32, usize)> = HashMap::new();
+    let mut acc = BodySizeAccumulator::default();
     for page in pages {
+        acc.add_page(page);
+    }
+    acc.finish()
+}
+
+/// The char-weighted font-size histogram behind [`compute_body_size`], fed
+/// one page at a time so a caller parsing a document in page batches can
+/// compute the document's body size without holding every page in memory.
+/// Feeding every page in order and calling [`finish`](Self::finish) gives
+/// exactly what [`compute_body_size`] returns for the same pages.
+#[derive(Debug, Clone, Default)]
+pub struct BodySizeAccumulator {
+    /// `round(size * 100)` → (first size seen at that key, char weight).
+    weights: HashMap<u32, (f32, usize)>,
+}
+
+impl BodySizeAccumulator {
+    pub fn add_page(&mut self, page: &ParsedPage) {
         for line in &page.projected_lines {
             if is_rotated_line(line) {
                 continue;
@@ -589,32 +608,36 @@ pub fn compute_body_size(pages: &[ParsedPage]) -> f32 {
             }
             let chars = line.text.chars().count().max(1);
             let key = (size * 100.0).round() as u32;
-            let entry = weights.entry(key).or_insert((size, 0));
+            let entry = self.weights.entry(key).or_insert((size, 0));
             entry.1 += chars;
         }
     }
-    let max_weight = weights.values().map(|(_, n)| *n).max().unwrap_or(0);
-    if max_weight == 0 {
-        return 0.0;
+
+    pub fn finish(&self) -> f32 {
+        let weights = &self.weights;
+        let max_weight = weights.values().map(|(_, n)| *n).max().unwrap_or(0);
+        if max_weight == 0 {
+            return 0.0;
+        }
+        let threshold = (max_weight as f32 * BODY_CODOMINANT_FRACTION) as usize;
+        // Among sizes that are co-dominant with the heaviest size, pick the
+        // largest. This rescues the true body when a dense references/footnote
+        // block at a smaller size would otherwise win the raw char-weight vote.
+        let body = weights
+            .values()
+            .filter(|(_, n)| *n >= threshold)
+            .map(|(s, _)| *s)
+            .fold(0.0_f32, f32::max);
+        if std::env::var_os("LITEPARSE_DEBUG_MD").is_some() {
+            let mut w: Vec<_> = weights.values().copied().collect();
+            w.sort_by(|a, b| b.1.cmp(&a.1));
+            eprintln!(
+                "[MD body-size] body={body:.2} top weights={:?}",
+                &w[..w.len().min(6)]
+            );
+        }
+        body
     }
-    let threshold = (max_weight as f32 * BODY_CODOMINANT_FRACTION) as usize;
-    // Among sizes that are co-dominant with the heaviest size, pick the
-    // largest. This rescues the true body when a dense references/footnote
-    // block at a smaller size would otherwise win the raw char-weight vote.
-    let body = weights
-        .values()
-        .filter(|(_, n)| *n >= threshold)
-        .map(|(s, _)| *s)
-        .fold(0.0_f32, f32::max);
-    if std::env::var_os("LITEPARSE_DEBUG_MD").is_some() {
-        let mut w: Vec<_> = weights.values().copied().collect();
-        w.sort_by(|a, b| b.1.cmp(&a.1));
-        eprintln!(
-            "[MD body-size] body={body:.2} top weights={:?}",
-            &w[..w.len().min(6)]
-        );
-    }
-    body
 }
 
 /// Minimum total non-whitespace characters across all occurrences at a font
@@ -651,98 +674,148 @@ const MIN_HEADING_ALPHA_RATIO: f32 = 0.5;
 /// `MIN_HEADING_ALPHA_RATIO` (drop one-off equation / figure-label / legend
 /// artifacts), sorted descending, mapped to levels 1..=MAX_HEADING_LEVELS.
 pub fn build_heading_map(pages: &[ParsedPage], body_size: f32) -> Vec<(f32, u8)> {
-    use std::collections::HashMap;
-    let heading_margin = |line: &ProjectedLine| {
-        if line.font_size_is_estimated {
-            ESTIMATED_HEADING_SIZE_MARGIN
-        } else {
-            HEADING_SIZE_EPSILON
-        }
-    };
-    // First pass: frequency of each normalized candidate-line text. A string
-    // that recurs ≥ REPEATED_HEADING_LINE_MIN times is chart/figure label spam
-    // (e.g. repeated attention-plot labels at 23–28pt), not a heading.
-    let mut text_freq: HashMap<String, usize> = HashMap::new();
+    let mut acc = HeadingMapAccumulator::default();
     for page in pages {
-        for line in &page.projected_lines {
-            if is_rotated_line(line) || is_caption_line(&line.text) || line.in_figure {
-                continue;
-            }
-            if heading_size_of(line) > body_size + heading_margin(line) {
-                *text_freq
-                    .entry(normalize_repeat_key(&line.text))
-                    .or_insert(0) += 1;
-            }
-        }
+        acc.add_page(page);
     }
-    // (size_key → (size, line_count, total_chars, alpha_chars))
-    let mut sizes: HashMap<u32, (f32, usize, usize, usize)> = HashMap::new();
-    for page in pages {
+    acc.finish(body_size)
+}
+
+/// The per-line statistics behind [`build_heading_map`], fed one page at a
+/// time so a caller parsing a document in page batches can rank heading sizes
+/// against the whole document without holding every page in memory.
+///
+/// Which lines count depends on the body size, which is only known once every
+/// page has been seen, so lines are kept as compact groups — one per distinct
+/// `(size, size-is-estimated, normalized text)`, with the text reduced to a
+/// hash — and the map is built in [`finish`](Self::finish). Feeding every page
+/// in order gives exactly what [`build_heading_map`] returns for the same
+/// pages and body size.
+#[derive(Debug, Clone, Default)]
+pub struct HeadingMapAccumulator {
+    /// `(size bits, size is estimated, hash of normalize_repeat_key)` →
+    /// that group's counts.
+    groups: HashMap<(u32, bool, u64), HeadingLineGroup>,
+}
+
+/// Counts for one group of lines. `u32` keeps a group at 16 bytes, which
+/// matters because body lines are mostly distinct, so there is roughly one
+/// group per line of the document.
+#[derive(Debug, Clone, Copy)]
+struct HeadingLineGroup {
+    /// Creation order of the group, so the size that represents a rounded
+    /// size key is the first one seen in reading order, as in a single pass.
+    first_seen: u32,
+    lines: u32,
+    /// Non-whitespace characters across the group's lines.
+    chars: u32,
+    /// Alphabetic characters across the group's lines.
+    alpha: u32,
+}
+
+impl HeadingMapAccumulator {
+    pub fn add_page(&mut self, page: &ParsedPage) {
+        use std::hash::{DefaultHasher, Hash, Hasher};
         for line in &page.projected_lines {
-            if is_rotated_line(line) || line.in_figure {
-                continue;
-            }
             // Captions ("Figure 7", "Table 3.") often render slightly larger
             // than body and would otherwise inflate / hijack the heading map.
-            if is_caption_line(&line.text) {
+            if is_rotated_line(line) || line.in_figure || is_caption_line(&line.text) {
                 continue;
             }
-            // Exclude repeated chart/figure labels (per-line, so a repeated
-            // string sharing a size with real headings still leaves that level).
-            if text_freq
-                .get(&normalize_repeat_key(&line.text))
-                .copied()
-                .unwrap_or(0)
-                >= REPEATED_HEADING_LINE_MIN
-            {
-                continue;
-            }
-            let size = heading_size_of(line);
-            let margin = heading_margin(line);
-            if size > body_size + margin {
-                let key = (size * 100.0).round() as u32;
-                let entry = sizes.entry(key).or_insert((size, 0, 0, 0));
-                entry.1 += 1;
-                for c in line.text.chars() {
-                    if c.is_whitespace() {
-                        continue;
-                    }
-                    entry.2 += 1;
-                    if c.is_alphabetic() {
-                        entry.3 += 1;
-                    }
+            let mut hasher = DefaultHasher::new();
+            normalize_repeat_key(&line.text).hash(&mut hasher);
+            let key = (
+                heading_size_of(line).to_bits(),
+                line.font_size_is_estimated,
+                hasher.finish(),
+            );
+            let first_seen = self.groups.len() as u32;
+            let group = self.groups.entry(key).or_insert(HeadingLineGroup {
+                first_seen,
+                lines: 0,
+                chars: 0,
+                alpha: 0,
+            });
+            group.lines += 1;
+            for c in line.text.chars() {
+                if c.is_whitespace() {
+                    continue;
+                }
+                group.chars += 1;
+                if c.is_alphabetic() {
+                    group.alpha += 1;
                 }
             }
         }
     }
-    let all: Vec<(f32, usize, usize, usize)> = sizes.into_values().collect();
-    // Always apply quality filters: total-char floor, average-line cap, and
-    // alpha-ratio floor. The total-char floor (rather than a line-count one)
-    // lets one-off titles survive — a 31-char title on a single line passes —
-    // while still rejecting chart-legend tokens like "A-mem" + "Base" that
-    // total fewer chars across 4 occurrences than a single heading line does.
-    let mut kept: Vec<f32> = all
-        .iter()
-        .filter(|(_, lines, chars, alpha)| {
-            let alpha_ratio = if *chars == 0 {
-                0.0
-            } else {
-                (*alpha as f32) / (*chars as f32)
-            };
-            let avg_line_chars = *chars as f32 / (*lines).max(1) as f32;
-            *chars >= MIN_HEADING_TOTAL_CHARS
-                && (MIN_HEADING_AVG_LINE_CHARS..=MAX_HEADING_AVG_LINE_CHARS)
-                    .contains(&avg_line_chars)
-                && alpha_ratio >= MIN_HEADING_ALPHA_RATIO
-        })
-        .map(|(s, _, _, _)| *s)
-        .collect();
-    kept.sort_by(|a, b| b.total_cmp(a));
-    kept.truncate(MAX_HEADING_LEVELS);
-    kept.into_iter()
-        .enumerate()
-        .map(|(i, s)| (s, (i + 1) as u8))
-        .collect()
+
+    pub fn finish(&self, body_size: f32) -> Vec<(f32, u8)> {
+        // Only lines larger than the body can be headings; that is a small
+        // fraction of the groups, so filter before sorting.
+        let mut candidates: Vec<(f32, u64, HeadingLineGroup)> = self
+            .groups
+            .iter()
+            .filter_map(|(&(size_bits, estimated, repeat_key), group)| {
+                let size = f32::from_bits(size_bits);
+                let margin = if estimated {
+                    ESTIMATED_HEADING_SIZE_MARGIN
+                } else {
+                    HEADING_SIZE_EPSILON
+                };
+                (size > body_size + margin).then_some((size, repeat_key, *group))
+            })
+            .collect();
+        candidates.sort_by_key(|(_, _, group)| group.first_seen);
+        // Frequency of each normalized candidate-line text. A string that
+        // recurs ≥ REPEATED_HEADING_LINE_MIN times is chart/figure label spam
+        // (e.g. repeated attention-plot labels at 23–28pt), not a heading.
+        let mut text_freq: HashMap<u64, usize> = HashMap::new();
+        for (_, repeat_key, group) in &candidates {
+            *text_freq.entry(*repeat_key).or_insert(0) += group.lines as usize;
+        }
+        // (size_key → (size, line_count, total_chars, alpha_chars))
+        let mut sizes: HashMap<u32, (f32, usize, usize, usize)> = HashMap::new();
+        for (size, repeat_key, group) in &candidates {
+            // Exclude repeated chart/figure labels (per-line, so a repeated
+            // string sharing a size with real headings still leaves that level).
+            if text_freq.get(repeat_key).copied().unwrap_or(0) >= REPEATED_HEADING_LINE_MIN {
+                continue;
+            }
+            let key = (size * 100.0).round() as u32;
+            let entry = sizes.entry(key).or_insert((*size, 0, 0, 0));
+            entry.1 += group.lines as usize;
+            entry.2 += group.chars as usize;
+            entry.3 += group.alpha as usize;
+        }
+        let all: Vec<(f32, usize, usize, usize)> = sizes.into_values().collect();
+        // Always apply quality filters: total-char floor, average-line cap, and
+        // alpha-ratio floor. The total-char floor (rather than a line-count one)
+        // lets one-off titles survive — a 31-char title on a single line passes —
+        // while still rejecting chart-legend tokens like "A-mem" + "Base" that
+        // total fewer chars across 4 occurrences than a single heading line does.
+        let mut kept: Vec<f32> = all
+            .iter()
+            .filter(|(_, lines, chars, alpha)| {
+                let alpha_ratio = if *chars == 0 {
+                    0.0
+                } else {
+                    (*alpha as f32) / (*chars as f32)
+                };
+                let avg_line_chars = *chars as f32 / (*lines).max(1) as f32;
+                *chars >= MIN_HEADING_TOTAL_CHARS
+                    && (MIN_HEADING_AVG_LINE_CHARS..=MAX_HEADING_AVG_LINE_CHARS)
+                        .contains(&avg_line_chars)
+                    && alpha_ratio >= MIN_HEADING_ALPHA_RATIO
+            })
+            .map(|(s, _, _, _)| *s)
+            .collect();
+        kept.sort_by(|a, b| b.total_cmp(a));
+        kept.truncate(MAX_HEADING_LEVELS);
+        kept.into_iter()
+            .enumerate()
+            .map(|(i, s)| (s, (i + 1) as u8))
+            .collect()
+    }
 }
 
 /// Fraction of non-whitespace characters in `text` that are alphabetic.
