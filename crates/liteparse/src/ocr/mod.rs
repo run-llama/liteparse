@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod http_simple;
+#[cfg(target_os = "macos")]
+pub mod macos_vision;
 #[cfg(all(feature = "oar-ocr", not(target_arch = "wasm32")))]
 pub mod oar;
 #[cfg(all(feature = "tesseract", not(target_arch = "wasm32")))]

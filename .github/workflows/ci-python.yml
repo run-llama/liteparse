@@ -5,12 +5,14 @@ on:
     branches: [main]
     paths:
       - "crates/**"
+      - "integration_tests_data/macos_ocr.png"
       - "packages/python/**"
       - ".github/workflows/ci-python.yml"
   pull_request:
     branches: [main]
     paths:
       - "crates/**"
+      - "integration_tests_data/macos_ocr.png"
       - "packages/python/**"
       - ".github/workflows/ci-python.yml"
 
@@ -314,6 +316,13 @@ jobs:
           lit --version
           lit parse demo/docs/apple-10k-2024.pdf --no-ocr --max-pages 1 -q | head -5
           echo "CLI test passed"
+
+      - name: OCR backend integration tests
+        if: ${{ !matrix.use-container }}
+        run: |
+          pip install pytest
+          # Test the installed wheel without the source package shadowing it.
+          python -m pytest --import-mode=importlib packages/python/tests/test_macos_ocr.py -v
 
       - name: Test in musl container
         if: ${{ matrix.use-container }}

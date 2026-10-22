@@ -7,7 +7,7 @@
 //! directly, or a caller sequencing the stages themselves could no longer
 //! reproduce `parse()`. `tests/stages_compose.rs` asserts that equivalence.
 
-use crate::config::{LiteParseConfig, parse_target_pages};
+use crate::config::{LiteParseConfig, OcrBackend, parse_target_pages};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::conversion;
 use crate::error::LiteParseError;
@@ -182,7 +182,7 @@ impl ResolvedInput {
 pub struct LiteParse {
     config: LiteParseConfig,
     /// Optional caller-provided OCR engine. When set, this overrides the
-    /// built-in selection logic (HTTP OCR / Tesseract). This is the primary
+    /// configured built-in backend. This is the primary
     /// mechanism for plugging an OCR engine in environments without the
     /// built-ins (e.g. WASM, where the JS side supplies a callback engine).
     ocr_engine_override: Option<std::sync::Arc<dyn OcrEngine>>,
@@ -396,7 +396,7 @@ impl LiteParse {
     }
 
     /// The OCR engine a parse would use: the override when set, else the
-    /// HTTP engine for `ocr_server_url`, else built-in Tesseract. `None` when
+    /// configured built-in backend (`auto`: HTTP, else Tesseract). `None` when
     /// OCR is disabled; an error when it is enabled but nothing can serve it.
     pub fn ocr_engine(&self) -> Result<Option<std::sync::Arc<dyn OcrEngine>>, LiteParseError> {
         if !self.config.ocr_enabled {
@@ -404,6 +404,34 @@ impl LiteParse {
         }
         if let Some(engine) = self.ocr_engine_override.clone() {
             return Ok(Some(engine));
+        }
+        if !matches!(self.config.ocr_backend, OcrBackend::Auto | OcrBackend::Http)
+            && self.config.ocr_server_url.is_some()
+        {
+            return Err(LiteParseError::Config(format!(
+                "ocr_server_url cannot be used with OCR backend {}",
+                self.config.ocr_backend.as_str()
+            )));
+        }
+        if self.config.ocr_backend == OcrBackend::MacosVision {
+            #[cfg(target_os = "macos")]
+            {
+                return Ok(Some(std::sync::Arc::new(
+                    crate::ocr::macos_vision::MacOcrEngine::new(
+                        self.config.mac_ocr_languages.clone(),
+                        self.config.mac_ocr_recognition,
+                    )?,
+                )));
+            }
+            #[cfg(not(target_os = "macos"))]
+            return Err(LiteParseError::Config(
+                "the macos-vision OCR backend requires macOS 10.15 or later".into(),
+            ));
+        }
+        if self.config.ocr_backend == OcrBackend::Http && self.config.ocr_server_url.is_none() {
+            return Err(LiteParseError::Config(
+                "the http OCR backend requires ocr_server_url".into(),
+            ));
         }
         #[cfg(not(target_arch = "wasm32"))]
         {

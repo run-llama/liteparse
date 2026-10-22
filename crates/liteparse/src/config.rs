@@ -1,5 +1,78 @@
 use serde::{Deserialize, Serialize};
 
+/// Built-in OCR backend. `Auto` preserves the legacy selection: HTTP when
+/// `ocr_server_url` is set, otherwise Tesseract. Caller-supplied engines take
+/// precedence over this setting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OcrBackend {
+    #[default]
+    Auto,
+    Tesseract,
+    Http,
+    MacosVision,
+}
+
+impl OcrBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Tesseract => "tesseract",
+            Self::Http => "http",
+            Self::MacosVision => "macos-vision",
+        }
+    }
+}
+
+impl std::str::FromStr for OcrBackend {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "tesseract" => Ok(Self::Tesseract),
+            "http" => Ok(Self::Http),
+            "macos-vision" => Ok(Self::MacosVision),
+            _ => Err(format!(
+                "invalid OCR backend {value:?}; expected auto, tesseract, http or macos-vision"
+            )),
+        }
+    }
+}
+
+/// Apple Vision recognition level. Language availability depends on both
+/// this level and the running macOS version.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MacOcrRecognition {
+    #[default]
+    Accurate,
+    Fast,
+}
+
+impl MacOcrRecognition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Accurate => "accurate",
+            Self::Fast => "fast",
+        }
+    }
+}
+
+impl std::str::FromStr for MacOcrRecognition {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "accurate" => Ok(Self::Accurate),
+            "fast" => Ok(Self::Fast),
+            _ => Err(format!(
+                "invalid Mac OCR recognition level {value:?}; expected accurate or fast"
+            )),
+        }
+    }
+}
+
 /// Configuration for LiteParse document parsing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiteParseConfig {
@@ -7,7 +80,18 @@ pub struct LiteParseConfig {
     pub ocr_language: String,
     /// Whether OCR is enabled. When true, runs on text-sparse pages and embedded images.
     pub ocr_enabled: bool,
-    /// HTTP OCR server URL (uses Tesseract if not provided)
+    /// Built-in backend. Default `auto` keeps HTTP/Tesseract selection.
+    #[serde(default)]
+    pub ocr_backend: OcrBackend,
+    /// Apple Vision language tags (e.g. `en-US`, `zh-Hans`), in priority order.
+    /// Empty uses Vision's automatic language detection where available.
+    /// Independent of the Tesseract-style `ocr_language` setting.
+    #[serde(default)]
+    pub mac_ocr_languages: Vec<String>,
+    /// Apple Vision speed/accuracy tradeoff. Default `accurate`.
+    #[serde(default)]
+    pub mac_ocr_recognition: MacOcrRecognition,
+    /// HTTP OCR server URL. In `auto` mode, selects HTTP instead of Tesseract.
     pub ocr_server_url: Option<String>,
     /// Extra HTTP headers sent with every request to `ocr_server_url`, as
     /// `(name, value)` pairs. Use for auth, e.g. `("Authorization", "Bearer …")`.
@@ -278,17 +362,19 @@ impl Default for LiteParseConfig {
     fn default() -> Self {
         Self {
             ocr_language: "eng".to_string(),
-            // OCR is on by default only when a built-in engine is compiled in
-            // (the `tesseract` feature). Builds without a built-in engine
-            // (`tesseract` disabled, or WASM) default to OFF, so a consumer that
+            // OCR is on by default only when Tesseract is compiled in.
+            // Builds without Tesseract (including WASM) default to OFF, so a consumer that
             // just wants native text extraction works out of the box instead of
             // hitting "OCR enabled but no engine available". OCR is still fully
             // available in those builds by opting in explicitly: set
-            // `ocr_enabled = true` together with an `ocr_server_url` (or, on
-            // WASM, an `ocrEngine` callback). That explicit request still fails
+            // `ocr_enabled = true` together with an `ocr_server_url`, the
+            // macos-vision backend, or a caller-supplied engine. That request still fails
             // fast if no engine is reachable, so a real misconfiguration is
             // never silently swallowed.
             ocr_enabled: cfg!(feature = "tesseract"),
+            ocr_backend: OcrBackend::Auto,
+            mac_ocr_languages: Vec::new(),
+            mac_ocr_recognition: MacOcrRecognition::Accurate,
             ocr_server_url: None,
             ocr_server_headers: Vec::new(),
             tessdata_path: None,

@@ -5,12 +5,14 @@ on:
     branches: [main]
     paths:
       - "crates/**"
+      - "integration_tests_data/macos_ocr.png"
       - "packages/node/**"
       - ".github/workflows/ci-node.yml"
   pull_request:
     branches: [main]
     paths:
       - "crates/**"
+      - "integration_tests_data/macos_ocr.png"
       - "packages/node/**"
       - ".github/workflows/ci-node.yml"
 
