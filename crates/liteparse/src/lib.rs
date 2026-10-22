@@ -29,6 +29,7 @@ pub mod raw_text;
 pub mod search;
 pub mod stages;
 mod text_clip;
+mod text_paint;
 pub mod types;
 
 // ── Internal modules (available for binding crates, hidden from docs) ──
