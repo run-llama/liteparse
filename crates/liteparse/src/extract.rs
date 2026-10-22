@@ -711,6 +711,7 @@ fn extract_page_struct_nodes(page: &Page, view_box: &RectF) -> Vec<StructNode> {
                 height: b.bottom - b.top,
             }),
             alt_text: n.alt_text,
+            depth: n.depth,
         })
         .collect()
 }

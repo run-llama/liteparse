@@ -296,6 +296,8 @@ pub fn classify_page_with_filters(
     // even for shapes the standard detectors would reject in normal flow.
     // TOC pages are skipped: their split number/title/page-number leaves
     // baseline-align perfectly and fuse into a convincing-but-wrong table.
+    let tagged_regrouped = super::tagged_tables::regroup_split_tables(lines, &page.struct_nodes);
+    let lines: &[ProjectedLine] = tagged_regrouped.as_deref().unwrap_or(lines);
     let mut cross_merged_owned: Option<Vec<ProjectedLine>> = None;
     let mut cross_region_runs: Vec<(Vec<u16>, Vec<super::tables::TableRun>)> = Vec::new();
     for _ in 0..3 {
@@ -413,6 +415,7 @@ pub fn classify_page_with_filters(
             .map(|(_, runs)| runs.clone());
         let region_blocks = classify_region(
             region_lines,
+            lines,
             region_interruptions,
             page,
             &rule_segments,
@@ -528,6 +531,7 @@ impl FlowState {
 #[allow(clippy::too_many_arguments)]
 fn classify_region(
     lines: &[ProjectedLine],
+    page_lines: &[ProjectedLine],
     interruptions: Vec<(f32, Interruption)>,
     page: &ParsedPage,
     rule_segments: &super::tables::RuleSegments,
@@ -553,7 +557,12 @@ fn classify_region(
     let ruled_runs = detect_ruled_tables(lines, rule_segments, page.page_width, page.page_height);
     let borderless_runs = precomputed_tables
         .unwrap_or_else(|| detect_tables_banded(lines, rule_segments, page.page_height));
-    let table_runs = merge_table_runs(ruled_runs, borderless_runs);
+    let tagged_runs =
+        super::tagged_tables::detect_tagged_tables(lines, page_lines, &page.struct_nodes);
+    let table_runs = super::tagged_tables::prefer_tagged(
+        tagged_runs,
+        merge_table_runs(ruled_runs, borderless_runs),
+    );
 
     // Region-wide pre-pass: which line indices carry a lettered/roman marker
     // (`a.`, `i.`) that belongs to a confirmed sequential list run. Only these
