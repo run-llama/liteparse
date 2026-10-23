@@ -1,5 +1,5 @@
 use clap::{Args, Parser, Subcommand};
-use liteparse::config::{ImageMode, LiteParseConfig, OutputFormat};
+use liteparse::config::{ImageMode, LiteParseConfig, MacOcrRecognition, OcrBackend, OutputFormat};
 use liteparse::conversion;
 use liteparse::output::{json, text};
 use liteparse::parser::LiteParse;
@@ -39,6 +39,15 @@ struct ParseCommand {
     no_ocr: bool,
     #[arg(long, default_value = "eng")]
     ocr_language: String,
+    /// OCR backend: auto, tesseract, http, or macos-vision (macOS only).
+    #[arg(long, default_value = "auto")]
+    ocr_backend: OcrBackend,
+    /// Vision language tag, in priority order (repeatable or comma-separated).
+    #[arg(long = "mac-ocr-language", value_delimiter = ',')]
+    mac_ocr_languages: Vec<String>,
+    /// Vision recognition level: accurate or fast.
+    #[arg(long, default_value = "accurate")]
+    mac_ocr_recognition: MacOcrRecognition,
     #[arg(long, default_value = None)]
     ocr_server_url: Option<String>,
     /// Extra header for OCR server requests, "Name: Value" (repeatable).
@@ -159,6 +168,15 @@ struct BatchParseCommand {
     no_ocr: bool,
     #[arg(long, default_value = "eng")]
     ocr_language: String,
+    /// OCR backend: auto, tesseract, http, or macos-vision (macOS only).
+    #[arg(long, default_value = "auto")]
+    ocr_backend: OcrBackend,
+    /// Vision language tag, in priority order (repeatable or comma-separated).
+    #[arg(long = "mac-ocr-language", value_delimiter = ',')]
+    mac_ocr_languages: Vec<String>,
+    /// Vision recognition level: accurate or fast.
+    #[arg(long, default_value = "accurate")]
+    mac_ocr_recognition: MacOcrRecognition,
     #[arg(long, default_value = None)]
     ocr_server_url: Option<String>,
     /// Extra header for OCR server requests, "Name: Value" (repeatable).
@@ -278,6 +296,9 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             let image_mode = parse_image_mode(&cmd.image_mode)?;
             let mut config = LiteParseConfig {
                 ocr_language: cmd.ocr_language,
+                ocr_backend: cmd.ocr_backend,
+                mac_ocr_languages: cmd.mac_ocr_languages,
+                mac_ocr_recognition: cmd.mac_ocr_recognition,
                 ocr_enabled: !cmd.no_ocr,
                 tessdata_path: cmd.tessdata_path,
                 max_pages: cmd.max_pages,
@@ -386,6 +407,9 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 
             let mut config = LiteParseConfig {
                 ocr_language: cmd.ocr_language,
+                ocr_backend: cmd.ocr_backend,
+                mac_ocr_languages: cmd.mac_ocr_languages,
+                mac_ocr_recognition: cmd.mac_ocr_recognition,
                 ocr_enabled: !cmd.no_ocr,
                 tessdata_path: cmd.tessdata_path,
                 max_pages: cmd.max_pages,

@@ -466,6 +466,9 @@ class LiteParse:
         self,
         *,
         ocr_enabled: Optional[bool] = None,
+        ocr_backend: Optional[str] = None,
+        mac_ocr_languages: Optional[List[str]] = None,
+        mac_ocr_recognition: Optional[str] = None,
         ocr_server_url: Optional[str] = None,
         ocr_server_headers: Optional[Dict[str, str]] = None,
         ocr_language: Optional[str] = None,
@@ -511,6 +514,13 @@ class LiteParse:
 
         Args:
             ocr_enabled: Whether to enable OCR for scanned documents (default: True)
+            ocr_backend: "auto" (HTTP/Tesseract), "tesseract", "http", or
+                "macos-vision" (macOS 10.15+ only).
+            mac_ocr_languages: Vision language tags in priority order, e.g.
+                ["en-US", "fr-FR"]. Empty uses automatic detection on macOS 13+
+                and Vision defaults on older macOS. Separate from ocr_language.
+            mac_ocr_recognition: Vision recognition level: "accurate" (default)
+                or "fast". Supported languages depend on the selected level.
             ocr_server_url: URL of HTTP OCR server (uses Tesseract if not provided)
             ocr_server_headers: Extra HTTP headers sent with every request to
                 ``ocr_server_url`` (e.g. ``{"Authorization": "Bearer <token>"}``)
@@ -602,6 +612,12 @@ class LiteParse:
         kwargs = {}
         if ocr_enabled is not None:
             kwargs["ocr_enabled"] = ocr_enabled
+        if ocr_backend is not None:
+            kwargs["ocr_backend"] = ocr_backend
+        if mac_ocr_languages is not None:
+            kwargs["mac_ocr_languages"] = mac_ocr_languages
+        if mac_ocr_recognition is not None:
+            kwargs["mac_ocr_recognition"] = mac_ocr_recognition
         if ocr_server_url is not None:
             kwargs["ocr_server_url"] = ocr_server_url
         if ocr_server_headers is not None:
@@ -962,6 +978,9 @@ class LiteParse:
         return LiteParseConfig(
             ocr_language=cfg.ocr_language,
             ocr_enabled=cfg.ocr_enabled,
+            ocr_backend=cfg.ocr_backend,
+            mac_ocr_languages=list(cfg.mac_ocr_languages),
+            mac_ocr_recognition=cfg.mac_ocr_recognition,
             ocr_server_url=cfg.ocr_server_url,
             ocr_server_headers=cfg.ocr_server_headers,
             tessdata_path=cfg.tessdata_path,

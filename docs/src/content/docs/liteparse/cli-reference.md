@@ -33,6 +33,9 @@ lit parse [options] <file>
 | `--keep-headers-footers` | Keep running header/footer chrome in markdown instead of stripping it | — |
 | `--no-ocr` | Disable OCR entirely | — |
 | `--ocr-language <lang>` | OCR language code (Tesseract format) | `eng` |
+| `--ocr-backend <backend>` | `auto`, `tesseract`, `http`, or `macos-vision` (macOS 10.15+) | `auto` |
+| `--mac-ocr-language <tag>` | Vision language tag, e.g. `en-US`. Repeatable or comma-separated, in priority order | Vision automatic/default languages |
+| `--mac-ocr-recognition <level>` | Vision recognition level: `accurate` or `fast` | `accurate` |
 | `--ocr-server-url <url>` | HTTP OCR server URL | — (uses Tesseract) |
 | `--ocr-server-header <header>` | Extra HTTP header for OCR server requests, as `"Name: Value"`. Repeatable | — |
 | `--tessdata-path <path>` | Path to tessdata directory | — (uses `TESSDATA_PREFIX` env var) |
@@ -109,7 +112,8 @@ curl -sL https://example.com/report.pdf | lit parse --no-ocr -
 
 ## `lit batch-parse`
 
-Parse multiple documents in a directory.
+Parse multiple documents in a directory. The OCR backend and Apple Vision options
+from `parse` are also available for `batch-parse`.
 
 ```
 lit batch-parse [options] <input-dir> <output-dir>

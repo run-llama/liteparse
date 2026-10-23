@@ -496,6 +496,9 @@ class LiteParseConfig:
     extract_document_metadata: bool = False
     detect_screenshot_rects: bool = False
     extract_content_bounds: bool = False
+    ocr_backend: str = "auto"
+    mac_ocr_languages: List[str] = field(default_factory=list)
+    mac_ocr_recognition: str = "accurate"
 
 
 class ParseError(Exception):

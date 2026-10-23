@@ -9,7 +9,9 @@
 //!
 
 // ── Public API re-exports ──────────────────────────────────────────────
-pub use config::{DEFAULT_PAGE_BATCH_SIZE, LiteParseConfig, OutputFormat};
+pub use config::{
+    DEFAULT_PAGE_BATCH_SIZE, LiteParseConfig, MacOcrRecognition, OcrBackend, OutputFormat,
+};
 pub use error::LiteParseError;
 #[cfg(not(target_arch = "wasm32"))]
 pub use font_db_resolver::FontDbResolver;
