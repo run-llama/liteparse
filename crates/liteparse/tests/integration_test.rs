@@ -664,6 +664,12 @@ fn blank_pdf(page_sizes: &[(u32, u32)]) -> Vec<u8> {
                 .into_bytes(),
         );
     }
+    write_pdf(&objects)
+}
+
+/// Serialize `objects` as a PDF whose object `n` is `objects[n - 1]`, with
+/// object 1 as the catalog.
+fn write_pdf(objects: &[Vec<u8>]) -> Vec<u8> {
     let mut pdf = b"%PDF-1.7\n".to_vec();
     let mut offsets = Vec::with_capacity(objects.len());
     for (index, object) in objects.iter().enumerate() {
@@ -1450,4 +1456,512 @@ async fn test_rotated_map_labels_keep_layout_canvas_bounded() {
         canvas.height,
         page.page_height
     );
+}
+
+/// Screenshots must show widgets the way a viewer does. PDFium's page render
+/// skips widget annotations, and its form layer draws only those the
+/// `/AcroForm` field tree lists, so every widget below was blank before the
+/// overlay: signatures orphaned from the field tree, one without the Print
+/// flag, and a listed text field saved without an appearance stream. Hidden
+/// and NoView annotations must stay blank, as on screen. Covered in both form
+/// modes.
+#[tokio::test]
+#[serial]
+async fn test_screenshot_paints_widgets_viewers_show() {
+    let box_appearance = |width: u32, height: u32| {
+        let content = format!("0 g 0 0 {width} {height} re f");
+        format!(
+            "<< /Type /XObject /Subtype /Form /BBox [0 0 {width} {height}] /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        )
+        .into_bytes()
+    };
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [7 0 R] /DA (/Helv 0 Tf 0 g) >> >>"
+            .to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Annots [4 0 R 5 0 R 6 0 R 7 0 R 10 0 R] >>"
+            .to_vec(),
+        // Print|Locked signature that no field lists, as signing tools write it.
+        b"<< /Type /Annot /Subtype /Widget /FT /Sig /T (signed) /F 132 /Rect [20 20 100 60] /AP << /N 8 0 R >> >>"
+            .to_vec(),
+        // No Print flag: viewers still show it on screen.
+        b"<< /Type /Annot /Subtype /Widget /FT /Sig /T (screen) /F 0 /Rect [120 20 200 60] /AP << /N 8 0 R >> >>"
+            .to_vec(),
+        b"<< /Type /Annot /Subtype /Widget /FT /Sig /T (hidden) /F 6 /Rect [220 20 280 60] /AP << /N 9 0 R >> >>"
+            .to_vec(),
+        // Listed text field with a value but no /AP.
+        b"<< /Type /Annot /Subtype /Widget /FT /Tx /T (name) /V (WWWWWWWW) /DA (/Helv 24 Tf 0 g) /F 4 /Rect [20 120 280 170] >>"
+            .to_vec(),
+        box_appearance(80, 40),
+        box_appearance(60, 40),
+        // Print|NoView: printed but never shown on screen.
+        b"<< /Type /Annot /Subtype /Square /F 36 /Rect [20 75 100 105] /AP << /N 11 0 R >> >>"
+            .to_vec(),
+        box_appearance(80, 30),
+    ];
+
+    for render_form_fields in [false, true] {
+        let image = screenshot_rgb(write_pdf(&objects), render_form_fields).await;
+        let scale = image.width() as f32 / 300.0;
+        // Share of dark pixels inside a PDF-space rect on the 300x200pt page.
+        let ink = |[x0, y0, x1, y1]: [f32; 4]| {
+            let px = |v: f32| (v * scale).round() as u32;
+            let (left, right) = (px(x0), px(x1));
+            let (top, bottom) = (px(200.0 - y1), px(200.0 - y0));
+            let dark = (top..bottom)
+                .flat_map(|y| (left..right).map(move |x| (x, y)))
+                .filter(|&(x, y)| image.get_pixel(x, y).0.iter().all(|&c| c < 128))
+                .count();
+            dark as f32 / ((right - left) * (bottom - top)) as f32
+        };
+
+        assert!(
+            ink([20.0, 20.0, 100.0, 60.0]) > 0.9,
+            "a signature widget outside the field tree must be painted (render_form_fields={render_form_fields})"
+        );
+        assert!(
+            ink([120.0, 20.0, 200.0, 60.0]) > 0.9,
+            "a widget without the Print flag is shown on screen and must be painted (render_form_fields={render_form_fields})"
+        );
+        assert!(
+            ink([220.0, 20.0, 280.0, 60.0]) == 0.0,
+            "a Hidden widget must stay blank (render_form_fields={render_form_fields})"
+        );
+        assert!(
+            ink([20.0, 75.0, 100.0, 105.0]) == 0.0,
+            "the screenshot is the on-screen view, matching the widget overlay, so a NoView annotation stays blank (render_form_fields={render_form_fields})"
+        );
+        assert!(
+            ink([20.0, 120.0, 280.0, 170.0]) > 0.02,
+            "a text field saved without an appearance must show its value (render_form_fields={render_form_fields})"
+        );
+    }
+}
+
+/// One 300x200pt page whose `/Annots` are `annots`, in order: each an
+/// annotation dictionary body (no `/AP`) and, optionally, the content of a
+/// normal appearance stream drawn in a BBox the size of its `/Rect`, with an
+/// `/Half` graphics state (50% opacity) available. The annotations at
+/// `listed` go in an `/AcroForm`; with none listed there is no `/AcroForm`.
+fn annotated_page_pdf(rotate: u32, annots: &[(&str, Option<&str>)], listed: &[usize]) -> Vec<u8> {
+    let mut refs = Vec::new();
+    let mut bodies = Vec::new();
+    let mut next = 4;
+    for (dict, appearance) in annots {
+        let annot = next;
+        next += 1;
+        refs.push(format!("{annot} 0 R"));
+        let rect: Vec<f32> = dict
+            .split("/Rect [")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("annotation needs a /Rect")
+            .split_whitespace()
+            .map(|v| v.parse().unwrap())
+            .collect();
+        match appearance {
+            Some(content) => {
+                let stream = next;
+                next += 1;
+                bodies.push(format!(
+                    "<< /Type /Annot {dict} /AP << /N {stream} 0 R >> >>"
+                ));
+                bodies.push(format!(
+                    "<< /Type /XObject /Subtype /Form /BBox [0 0 {} {}] \
+                     /Resources << /ExtGState << /Half << /ca 0.5 /CA 0.5 >> >> >> /Length {} >>\n\
+                     stream\n{content}\nendstream",
+                    rect[2] - rect[0],
+                    rect[3] - rect[1],
+                    content.len()
+                ));
+            }
+            None => bodies.push(format!("<< /Type /Annot {dict} >>")),
+        }
+    }
+    let acroform = if listed.is_empty() {
+        String::new()
+    } else {
+        let fields: Vec<&str> = listed.iter().map(|&i| refs[i].as_str()).collect();
+        format!(
+            "/AcroForm << /Fields [{}] /DA (/Helv 0 Tf 0 g) >>",
+            fields.join(" ")
+        )
+    };
+    let mut objects = vec![
+        format!("<< /Type /Catalog /Pages 2 0 R {acroform} >>").into_bytes(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Rotate {rotate} /Annots [{}] >>",
+            refs.join(" ")
+        )
+        .into_bytes(),
+    ];
+    objects.extend(bodies.into_iter().map(String::into_bytes));
+    write_pdf(&objects)
+}
+
+async fn screenshot_rgb(pdf: Vec<u8>, render_form_fields: bool) -> image::RgbImage {
+    let shots = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        quiet: true,
+        render_form_fields,
+        ..LiteParseConfig::default()
+    })
+    .screenshot_input(PdfInput::Bytes(pdf), None)
+    .await
+    .expect("annotated PDF should screenshot");
+    image::load_from_memory(&shots[0].image_bytes)
+        .expect("screenshot should be a decodable image")
+        .to_rgb8()
+}
+
+/// The pixel at PDF point (`x`, `y`) of an unrotated 300x200pt page.
+fn pixel_at(image: &image::RgbImage, x: f32, y: f32) -> [u8; 3] {
+    let scale = image.width() as f32 / 300.0;
+    image
+        .get_pixel((x * scale) as u32, ((200.0 - y) * scale) as u32)
+        .0
+}
+
+/// An opaque light-grey signature widget no `/AcroForm` lists.
+const GREY_WIDGET: (&str, Option<&str>) = (
+    "/Subtype /Widget /FT /Sig /T (sig) /F 4 /Rect [40 40 160 160]",
+    Some("0.8 g 0 0 120 120 re f"),
+);
+
+/// A text field off to the side, for an `/AcroForm` to list.
+const SIDE_FIELD: (&str, Option<&str>) = (
+    "/Subtype /Widget /FT /Tx /T (side) /V (x) /DA (/Helv 12 Tf 0 g) /F 4 /Rect [240 170 290 195]",
+    None,
+);
+
+/// Lifting annotations out of the base render so they can be redrawn above a
+/// widget must keep the order every annotation had. An opaque blue square
+/// overlaps the widget, and a red square overlaps only the blue one, so it
+/// must stay above it. A green-bordered square with no `/AP`, whose
+/// appearance PDFium generates, sits inside the widget and must stay above it
+/// too. Covered with and without an `/AcroForm` and in both form modes.
+#[tokio::test]
+#[serial]
+async fn test_screenshot_keeps_annotation_order_around_widgets() {
+    let annots = [
+        GREY_WIDGET,
+        (
+            "/Subtype /Square /F 4 /Rect [120 60 200 140]",
+            Some("0 0 1 rg 0 0 80 80 re f"),
+        ),
+        (
+            "/Subtype /Square /F 4 /Rect [180 80 260 120]",
+            Some("1 0 0 rg 0 0 80 40 re f"),
+        ),
+        (
+            "/Subtype /Square /F 4 /Rect [60 60 100 100] /C [0 0.6 0] /BS << /W 4 >>",
+            None,
+        ),
+        SIDE_FIELD,
+    ];
+    for listed in [&[][..], &[4][..]] {
+        for render_form_fields in [false, true] {
+            let image =
+                screenshot_rgb(annotated_page_pdf(0, &annots, listed), render_form_fields).await;
+            let case = format!("listed={listed:?} render_form_fields={render_form_fields}");
+            let [r, g, b] = pixel_at(&image, 140.0, 100.0);
+            assert!(
+                b > 200 && r < 80 && g < 80,
+                "blue square above the widget ({case})"
+            );
+            let [r, g, b] = pixel_at(&image, 190.0, 100.0);
+            assert!(
+                r > 200 && g < 80 && b < 80,
+                "red square above the blue one ({case})"
+            );
+            let [r, g, b] = pixel_at(&image, 62.0, 80.0);
+            assert!(
+                g > r + 60 && g > b + 60,
+                "generated green border above the widget ({case})"
+            );
+        }
+    }
+}
+
+/// With form rendering, loading the page adopts an unlisted widget into the
+/// form layer. It must still be painted once: a 50% black appearance stays
+/// mid grey instead of compositing twice. And a listed widget later in
+/// `/Annots` that overlaps it, which the form layer paints, stays on top.
+#[tokio::test]
+#[serial]
+async fn test_screenshot_composites_form_layer_widgets_once_and_in_order() {
+    let annots = [
+        (
+            "/Subtype /Widget /FT /Sig /T (half) /F 4 /Rect [40 40 160 160]",
+            Some("/Half gs 0 g 0 0 120 120 re f"),
+        ),
+        (
+            "/Subtype /Widget /FT /Tx /T (listed) /V (x) /DA (/Helv 12 Tf 0 g) /F 4 /Rect [120 60 200 140]",
+            Some("0 0 1 rg 0 0 80 80 re f"),
+        ),
+    ];
+    for render_form_fields in [false, true] {
+        let image = screenshot_rgb(annotated_page_pdf(0, &annots, &[1]), render_form_fields).await;
+        let case = format!("render_form_fields={render_form_fields}");
+        let [r, g, b] = pixel_at(&image, 80.0, 100.0);
+        assert!(
+            (110..=145).contains(&r) && r == g && g == b,
+            "a 50% black widget is painted once ({case}): got {r}"
+        );
+        let [r, g, b] = pixel_at(&image, 140.0, 100.0);
+        assert!(
+            b > 200 && r < 80 && g < 80,
+            "the later listed widget stays above the unlisted one ({case})"
+        );
+    }
+}
+
+/// On a rotated page, `/NoRotate` annotations stay upright, pinned at their
+/// top-left corner. Lifting them above a widget must leave every annotation
+/// where, and in the order, PDFium draws it without the widget: a red
+/// `/NoRotate` stamp over the widget, a blue square that overlaps only the
+/// stamp's painted (turned) area, and a green `/NoRotate` stamp whose `/Rect`
+/// misses the widget but whose painted area overlaps it.
+#[tokio::test]
+#[serial]
+async fn test_screenshot_keeps_no_rotate_annotations_upright_and_ordered() {
+    let annots = [
+        (
+            "/Subtype /Stamp /F 20 /Rect [130 100 190 130]",
+            Some("1 0 0 rg 0 0 60 30 re f"),
+        ),
+        (
+            "/Subtype /Square /F 4 /Rect [140 150 220 180]",
+            Some("0 0 1 rg 0 0 80 30 re f"),
+        ),
+        (
+            "/Subtype /Stamp /F 20 /Rect [60 10 120 35]",
+            Some("0 0.6 0 rg 0 0 60 30 re f"),
+        ),
+    ];
+    let mut with_widget = vec![GREY_WIDGET];
+    with_widget.extend(annots);
+    let alone = screenshot_rgb(annotated_page_pdf(90, &annots, &[]), false).await;
+    let lifted = screenshot_rgb(annotated_page_pdf(90, &with_widget, &[]), false).await;
+    // Every annotation comes after the widget, so wherever one is drawn on its
+    // own, it must look the same drawn over the widget.
+    let near = |a: [u8; 3], b: [u8; 3]| a.iter().zip(b).all(|(x, y)| x.abs_diff(y) < 48);
+    let (mut drawn, mut wrong) = (0, 0);
+    for (a, b) in alone.pixels().zip(lifted.pixels()) {
+        if a.0 != [255, 255, 255] {
+            drawn += 1;
+            wrong += usize::from(!near(a.0, b.0));
+        }
+    }
+    assert!(drawn > 0, "the annotations should render on their own");
+    assert!(
+        wrong * 50 < drawn,
+        "lifted annotations must land where, and in the order, PDFium draws them \
+         ({wrong} of {drawn} px differ)"
+    );
+}
+
+/// Lifting must draw an annotation exactly where PDFium draws it unlifted.
+/// Two cases where its placement is not just the `/Rect`: a listed
+/// `/NoRotate` signature on a rotated page, which the form layer keeps
+/// upright, and an Underline saved without `/AP`, whose generated appearance
+/// follows its `/QuadPoints` inside a padded `/Rect`. Each is drawn on its own
+/// and over an earlier unlisted widget, and its red pixels must cover the
+/// same box both times.
+#[tokio::test]
+#[serial]
+async fn test_screenshot_keeps_lifted_appearances_where_pdfium_draws_them() {
+    let is_red = |p: &image::Rgb<u8>| p.0[0] > 200 && p.0[1] < 100 && p.0[2] < 100;
+    let red_count = |image: &image::RgbImage| image.pixels().filter(|p| is_red(p)).count();
+    let red_box = |image: &image::RgbImage| {
+        let red: Vec<(u32, u32)> = image
+            .enumerate_pixels()
+            .filter(|(_, _, p)| is_red(p))
+            .map(|(x, y, _)| (x, y))
+            .collect();
+        let xs = red.iter().map(|p| p.0);
+        let ys = red.iter().map(|p| p.1);
+        (!red.is_empty()).then(|| {
+            (
+                xs.clone().min().unwrap(),
+                ys.clone().min().unwrap(),
+                xs.max().unwrap(),
+                ys.max().unwrap(),
+            )
+        })
+    };
+    let signature = (
+        "/Subtype /Widget /FT /Sig /T (signed) /F 20 /Rect [130 100 190 130]",
+        Some("1 0 0 rg 0 0 60 30 re f"),
+    );
+    let underline = (
+        "/Subtype /Underline /F 4 /Rect [50 50 250 150] /C [1 0 0] \
+         /QuadPoints [100 110 200 110 100 70 200 70]",
+        None,
+    );
+    // On the rotated page this underline turns about its QuadPoints'
+    // top-left corner onto the small widget; turned about its `/Rect` it
+    // would miss it.
+    let upright_underline = (
+        "/Subtype /Underline /F 20 /Rect [50 50 250 150] /C [1 0 0] \
+         /QuadPoints [100 110 200 110 100 70 200 70]",
+        None,
+    );
+    let small_widget = (
+        "/Subtype /Widget /FT /Sig /T (sig) /F 4 /Rect [130 120 150 140]",
+        Some("0.8 g 0 0 20 20 re f"),
+    );
+    // A slanted quad, which PDFium bounds by its bottom-left and top-right
+    // corners only: turned on the rotated page, the highlight reaches the
+    // sliver of a widget that its four-corner bounds would miss.
+    let slanted_highlight = (
+        "/Subtype /Highlight /F 20 /Rect [90 40 200 140] /C [1 0 0] \
+         /QuadPoints [100 60 170 130 110 50 180 120]",
+        None,
+    );
+    let sliver_widget = (
+        "/Subtype /Widget /FT /Sig /T (sig) /F 4 /Rect [182 150 188 160]",
+        Some("0.8 g 0 0 6 10 re f"),
+    );
+    for (name, rotate, widget, annot) in [
+        ("signature", 90, GREY_WIDGET, signature),
+        ("underline", 0, GREY_WIDGET, underline),
+        ("upright underline", 90, small_widget, upright_underline),
+        ("slanted highlight", 90, sliver_widget, slanted_highlight),
+    ] {
+        let listed: &[usize] = if name == "signature" { &[0] } else { &[] };
+        let listed_after: Vec<usize> = listed.iter().map(|i| i + 1).collect();
+        for render_form_fields in [false, true] {
+            let alone = screenshot_rgb(
+                annotated_page_pdf(rotate, &[annot], listed),
+                render_form_fields,
+            )
+            .await;
+            let lifted = screenshot_rgb(
+                annotated_page_pdf(rotate, &[widget, annot], &listed_after),
+                render_form_fields,
+            )
+            .await;
+            let (expected, got) = (red_box(&alone), red_box(&lifted));
+            let close = match (expected, got) {
+                (Some(a), Some(b)) => {
+                    a.0.abs_diff(b.0) <= 2
+                        && a.1.abs_diff(b.1) <= 2
+                        && a.2.abs_diff(b.2) <= 2
+                        && a.3.abs_diff(b.3) <= 2
+                }
+                _ => false,
+            };
+            assert!(
+                close,
+                "lifted {name} must cover the box PDFium draws it in \
+                 (render_form_fields={render_form_fields}): {expected:?} vs {got:?}"
+            );
+            let (expected, got) = (red_count(&alone), red_count(&lifted));
+            assert!(
+                got * 100 >= expected * 99,
+                "lifted {name} must stay above the widget \
+                 (render_form_fields={render_form_fields}): {got} of {expected} red pixels"
+            );
+        }
+    }
+}
+
+/// PDFium's on-screen render ignores the Invisible flag, which per the spec
+/// applies only to annotation types a viewer does not recognize. A Stamp
+/// flagged Invisible|Print is painted above an earlier widget, so lifting
+/// must treat it as shown, or the widget overlay covers it.
+#[tokio::test]
+#[serial]
+async fn test_screenshot_lifts_invisible_flagged_annotations_above_widgets() {
+    let annots = [
+        GREY_WIDGET,
+        (
+            "/Subtype /Stamp /F 5 /Rect [120 60 200 140]",
+            Some("1 0 0 rg 0 0 80 80 re f"),
+        ),
+    ];
+    for render_form_fields in [false, true] {
+        let image = screenshot_rgb(annotated_page_pdf(0, &annots, &[]), render_form_fields).await;
+        let [r, g, b] = pixel_at(&image, 140.0, 100.0);
+        assert!(
+            r > 200 && g < 80 && b < 80,
+            "an Invisible-flagged stamp stays above the widget (render_form_fields={render_form_fields})"
+        );
+    }
+}
+
+/// A 300x200pt page painted blue, with an opaque light-grey signature widget
+/// no `/AcroForm` lists at [20 20 100 100], then a red stamp at `stamp_rect`
+/// drawn in `/OC` marked content on a layer that is off by default.
+fn layered_stamp_pdf(stamp_rect: &str) -> Vec<u8> {
+    let stream = |dict: &str, content: &str| {
+        format!(
+            "<< {dict} /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        )
+        .into_bytes()
+    };
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [4 0 R] /D << /BaseState /ON /OFF [4 0 R] >> >> >>"
+            .to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 5 0 R /Annots [7 0 R 9 0 R] >>"
+            .to_vec(),
+        b"<< /Type /OCG /Name (off by default) >>".to_vec(),
+        stream("", "0 0 1 rg 0 0 300 200 re f"),
+        stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 80 80]",
+            "0.8 g 0 0 80 80 re f",
+        ),
+        b"<< /Type /Annot /Subtype /Widget /FT /Sig /T (sig) /F 4 /Rect [20 20 100 100] /AP << /N 6 0 R >> >>"
+            .to_vec(),
+        stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 80 80] /Resources << /Properties << /Layer 4 0 R >> >>",
+            "/OC /Layer BDC 1 0 0 rg 0 0 80 80 re f EMC",
+        ),
+        format!("<< /Type /Annot /Subtype /Stamp /F 4 /Rect [{stamp_rect}] /AP << /N 8 0 R >> >>")
+            .into_bytes(),
+    ];
+    write_pdf(&objects)
+}
+
+/// The overlay is drawn from a one-page copy, which cannot carry the
+/// catalog's `/OCProperties`, so content on a layer that is off by default
+/// would show in it. A stamp above a widget draws on such a layer: the
+/// screenshot must keep it hidden, as viewers and the plain render do.
+#[tokio::test]
+#[serial]
+async fn test_screenshot_keeps_hidden_layers_hidden_above_widgets() {
+    for render_form_fields in [false, true] {
+        let image = screenshot_rgb(layered_stamp_pdf("60 60 140 140"), render_form_fields).await;
+        let [r, g, b] = pixel_at(&image, 120.0, 120.0);
+        assert!(
+            b > 200 && r < 80 && g < 80,
+            "a stamp on a hidden layer stays hidden (render_form_fields={render_form_fields}): got [{r}, {g}, {b}]"
+        );
+    }
+}
+
+/// A layered stamp elsewhere on the page must not cost an unrelated widget
+/// its overlay: the widget is still painted, and the stamp still hidden.
+#[tokio::test]
+#[serial]
+async fn test_screenshot_paints_widgets_beside_layered_annotations() {
+    for render_form_fields in [false, true] {
+        let image = screenshot_rgb(layered_stamp_pdf("200 100 280 180"), render_form_fields).await;
+        let case = format!("render_form_fields={render_form_fields}");
+        let [r, g, b] = pixel_at(&image, 60.0, 60.0);
+        assert!(
+            r > 180 && r == g && g == b,
+            "the widget beside a layered stamp is painted ({case}): got [{r}, {g}, {b}]"
+        );
+        let [r, g, b] = pixel_at(&image, 240.0, 140.0);
+        assert!(
+            b > 200 && r < 80 && g < 80,
+            "the layered stamp stays hidden ({case}): got [{r}, {g}, {b}]"
+        );
+    }
 }

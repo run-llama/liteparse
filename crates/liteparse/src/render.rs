@@ -47,6 +47,18 @@ pub(crate) fn render_document_pages(
         form.run_document_actions();
     }
 
+    // Loading a page into a form environment makes PDFium write the appearance
+    // streams it generates: for widgets saved without one (checkboxes,
+    // buttons, text fields), which the overlay below draws, and for markup
+    // saved without `/AP`, which must be known before choosing what to lift
+    // above the widgets. Without form rendering the environment serves only
+    // that purpose, so no document or page action runs.
+    let appearance_form = if form.is_some() {
+        None
+    } else {
+        document.appearance_environment()
+    };
+
     let mut results = Vec::with_capacity(pages.len());
     for page_num in pages {
         let page_render = (|| -> Result<RenderedPage, LiteParseError> {
@@ -56,7 +68,8 @@ pub(crate) fn render_document_pages(
                 )));
             }
 
-            let page = document.page((page_num - 1) as i32)?;
+            let page_index = (page_num - 1) as i32;
+            let page = document.page(page_index)?;
             // `/UserUnit` pages (spreadsheet exports hundreds of thousands
             // of points tall) would render to gigapixel bitmaps at the
             // requested DPI; cap the long edge like the OCR render does.
@@ -67,7 +80,68 @@ pub(crate) fn render_document_pages(
             if long_edge_pt > 0.0 {
                 eff_dpi = eff_dpi.min(MAX_RENDER_LONG_EDGE_PX * 72.0 / long_edge_pt);
             }
-            let bitmap = page.render_with_form(eff_dpi, form.as_ref())?;
+            // Widgets the render will leave blank, and every annotation after
+            // the first of them, which a viewer stacks above it. Those are
+            // lifted out of the base render so the overlay draws all of them,
+            // in `/Annots` order.
+            //
+            // Widgets are chosen before the page is loaded into the form:
+            // loading adopts unlisted widgets into it, and `FPDF_FFLDraw` would
+            // then paint them over every annotation. Annotations above them are
+            // chosen after, once PDFium has written the appearances it
+            // generates. A page without such widgets renders as before.
+            let mut widgets = page.unpainted_widget_indices(form.as_ref());
+            let _widgets_loaded = form
+                .as_ref()
+                .or(appearance_form.as_ref())
+                .filter(|_| !widgets.is_empty())
+                .map(|form| page.load_form_widgets(form));
+            //
+            // The overlay copy loses the catalog's layer states and would show
+            // layers that are off, so annotations drawing a layer stay in the
+            // base render, under the overlay. Nothing a layered annotation
+            // covers is lifted above it: the widgets up to the last such
+            // annotation are left as PDFium renders them, and the rest keep
+            // their overlay.
+            let layered = page.optional_content_annotations(
+                &[widgets.as_slice(), &page.annotations_above(&widgets)].concat(),
+            );
+            let lifted_above = |widgets: &[i32]| -> Vec<i32> {
+                let mut above = page.annotations_above(widgets);
+                above.retain(|index| !layered.contains(index));
+                above
+            };
+            widgets.retain(|index| !layered.contains(index));
+            let covered = [widgets.as_slice(), &lifted_above(&widgets)]
+                .concat()
+                .into_iter()
+                .filter(|&index| {
+                    layered
+                        .iter()
+                        .any(|&layer| layer > index && page.annotations_overlap(index, layer))
+                })
+                .max();
+            if let Some(covered) = covered {
+                widgets.retain(|&index| index > covered);
+            }
+            let above = lifted_above(&widgets);
+            // The widgets are hidden too: once adopted, the form layer would
+            // paint them a second time under the overlay.
+            let mut overlay = [widgets.as_slice(), &above].concat();
+            overlay.sort_unstable();
+            let lifted = page.hide_annotations(&overlay);
+            let mut bitmap = page.render_on_screen(eff_dpi, form.as_ref())?;
+            let any_lifted = lifted.is_some();
+            if !any_lifted {
+                // Nothing was hidden, so only the widgets still need painting.
+                overlay = widgets;
+            }
+            drop(lifted);
+            if !paint_annotation_overlay(document, page_index, &bitmap, &overlay) && any_lifted {
+                // The lifted annotations are missing from the raster and the
+                // overlay that would redraw them failed: render them in place.
+                bitmap = page.render_on_screen(eff_dpi, form.as_ref())?;
+            }
             let width = bitmap.width() as u32;
             let height = bitmap.height() as u32;
             let rgba = bitmap.to_rgba();
@@ -111,6 +185,42 @@ pub(crate) fn render_document_pages(
     }
 
     Ok(results)
+}
+
+/// Draw the annotations at `annot_indices` — widgets the render left blank
+/// (see [`pdfium::Page::unpainted_widget_indices`]) and whatever is stacked
+/// above them — over `bitmap`, which must hold a full on-screen render of
+/// page `page_index` of `document`. Returns `false`, having drawn nothing,
+/// when the overlay copy cannot be built; the bitmap then lacks them.
+///
+/// Without this, a signature or form value that every viewer shows is blank
+/// in `screenshot()`, and blank in every mode when the widget is orphaned
+/// from a missing `/AcroForm` (the form layer cannot resolve it either).
+fn paint_annotation_overlay(
+    document: &pdfium::Document,
+    page_index: i32,
+    bitmap: &pdfium::Bitmap,
+    annot_indices: &[i32],
+) -> bool {
+    if annot_indices.is_empty() {
+        return true;
+    }
+    let Some(overlay) = document.annotation_overlay_copy(page_index, annot_indices) else {
+        return false;
+    };
+    let Ok(overlay_page) = overlay.page(0) else {
+        return false;
+    };
+    overlay_page.render_into(
+        bitmap,
+        0,
+        0,
+        bitmap.width(),
+        bitmap.height(),
+        None,
+        pdfium_sys::FPDF_ANNOT as i32,
+    );
+    true
 }
 
 /// Minimum rect dimension as a fraction of page height: 0.5%. Small renders
