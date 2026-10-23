@@ -3473,6 +3473,7 @@ impl SegmentBuilder {
                 stroke_color: self.stroke_color.clone(),
                 char_codes: std::mem::take(&mut self.char_codes),
                 trailing_space_generated: self.pending_space_generated,
+                followed_by_space: self.pending_space && self.dir_rtl != Some(true),
                 confidence: None,
                 link: None,
                 strike: false,
