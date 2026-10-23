@@ -77,10 +77,6 @@ jobs:
       - run: cargo build --workspace --all-targets --exclude liteparse-python --exclude liteparse-napi
       - run: cargo test --workspace --exclude liteparse-python --exclude liteparse-napi
 
-      - name: Test Apple Vision without Tesseract
-        if: runner.os == 'macOS'
-        run: cargo test -p liteparse --no-default-features --test macos_ocr --test ocr_backend
-
       - name: CLI smoke test
         if: runner.os != 'Windows'
         run: |
@@ -107,6 +103,10 @@ jobs:
           size=$(wc -c < ocr-out.txt)
           echo "OCR output size: $size bytes"
           test "$size" -gt 200
+
+      - name: Test Apple Vision without Tesseract
+        if: runner.os == 'macOS'
+        run: cargo test -p liteparse --no-default-features --test macos_ocr --test ocr_backend
 
   # Test that docker builds
   build-docker-image:
