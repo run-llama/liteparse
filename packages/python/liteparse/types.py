@@ -46,7 +46,9 @@ class TextItem:
     confidence: Optional[float] = None
     rotation: float = 0.0
     #: Per-word sub-boxes. Empty unless the parser was configured with
-    #: ``emit_word_boxes=True``.
+    #: ``emit_word_boxes=True``. Left-to-right visual order, with RTL words
+    #: possibly split at punctuation, unless ``logical_word_order=True``;
+    #: loose font boxes unless ``tight_word_boxes``.
     words: List[WordBox] = field(default_factory=list)
 
 
@@ -478,6 +480,8 @@ class LiteParseConfig:
     ocr_failure_fatal: bool
     ocr_hedge_delays_ms: List[int]
     emit_word_boxes: bool
+    tight_word_boxes: bool
+    logical_word_order: bool
     #: ``(top, right, bottom, left)`` crop fractions, or ``None`` when the whole
     #: page is kept.
     crop_box: Optional[Tuple[float, float, float, float]]

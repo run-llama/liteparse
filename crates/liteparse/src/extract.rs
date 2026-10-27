@@ -358,6 +358,7 @@ fn extract_single_page(
             &view_box,
             glyph_resolver,
             output_options.emit_word_boxes,
+            output_options.tight_word_boxes,
             output_options.extract_text_metadata,
         )
     };
@@ -498,6 +499,7 @@ pub struct ExtractionOutputOptions {
     pub extract_form_fields: bool,
     pub extract_structure_tree: bool,
     pub emit_word_boxes: bool,
+    pub tight_word_boxes: bool,
 }
 
 fn non_empty(value: &Option<String>) -> Option<String> {
@@ -1490,6 +1492,7 @@ fn extract_page_text_items(
     view_box: &RectF,
     glyph_resolver: Option<&dyn crate::GlyphResolver>,
     emit_word_boxes: bool,
+    tight_word_boxes: bool,
     extract_text_metadata: bool,
 ) -> Result<Vec<TextItem>, LiteParseError> {
     let char_count = text_page.char_count();
@@ -1531,7 +1534,7 @@ fn extract_page_text_items(
     let page_rotation = page.rotation();
     let vp_xform = page.viewport_transform(view_box);
     let mut items: Vec<TextItem> = Vec::new();
-    let mut seg = SegmentBuilder::new(emit_word_boxes, extract_text_metadata);
+    let mut seg = SegmentBuilder::new(emit_word_boxes, tight_word_boxes, extract_text_metadata);
     let mut obj_meta = ObjMetaCache::default();
     let mut glyph_decoder = GlyphDecoder::new(
         std::env::var("LITEPARSE_DEBUG_GLYPH").is_ok(),
@@ -3056,12 +3059,14 @@ struct SegmentBuilder {
     word_has: bool,
     // When false, per-word tracking is skipped entirely and `words` stays empty.
     emit_words: bool,
+    // Word boxes union the strict glyph boxes instead of the loose font boxes.
+    tight_words: bool,
     // When false, source-code/trailing-space metadata is not accumulated.
     extract_text_metadata: bool,
 }
 
 impl SegmentBuilder {
-    fn new(emit_words: bool, extract_text_metadata: bool) -> Self {
+    fn new(emit_words: bool, tight_words: bool, extract_text_metadata: bool) -> Self {
         Self {
             text: String::new(),
             vp_left: f32::MAX,
@@ -3104,27 +3109,36 @@ impl SegmentBuilder {
             word_bottom: f32::MIN,
             word_has: false,
             emit_words,
+            tight_words,
             extract_text_metadata,
         }
     }
 
-    /// Extend the currently-open word with a character's loose box, opening a
-    /// fresh word if none is active. No-op unless word emission is enabled.
-    fn add_word_char(&mut self, c: char, vp_loose: &RectF) {
+    /// Extend the currently-open word with a character's box, opening a fresh
+    /// word if none is active. No-op unless word emission is enabled. Uses the
+    /// strict glyph box when `tight_words` is set, falling back to the loose
+    /// font box for glyphs with a degenerate strict box (spaces, marks).
+    fn add_word_char(&mut self, c: char, vp_loose: &RectF, vp_strict: &RectF) {
         if !self.emit_words {
             return;
         }
+        let strict_ok = vp_strict.right > vp_strict.left && vp_strict.bottom > vp_strict.top;
+        let b = if self.tight_words && strict_ok {
+            vp_strict
+        } else {
+            vp_loose
+        };
         if self.word_has {
-            self.word_left = self.word_left.min(vp_loose.left);
-            self.word_right = self.word_right.max(vp_loose.right);
-            self.word_top = self.word_top.min(vp_loose.top);
-            self.word_bottom = self.word_bottom.max(vp_loose.bottom);
+            self.word_left = self.word_left.min(b.left);
+            self.word_right = self.word_right.max(b.right);
+            self.word_top = self.word_top.min(b.top);
+            self.word_bottom = self.word_bottom.max(b.bottom);
         } else {
             self.cur_word.clear();
-            self.word_left = vp_loose.left;
-            self.word_right = vp_loose.right;
-            self.word_top = vp_loose.top;
-            self.word_bottom = vp_loose.bottom;
+            self.word_left = b.left;
+            self.word_right = b.right;
+            self.word_top = b.top;
+            self.word_bottom = b.bottom;
             self.word_has = true;
         }
         self.cur_word.push(c);
@@ -3247,7 +3261,7 @@ impl SegmentBuilder {
         self.pending_space_generated = false;
         self.words.clear();
         self.word_has = false;
-        self.add_word_char(c, vp_loose);
+        self.add_word_char(c, vp_loose, vp_strict);
         self.text_width = 0.0;
         if self.extract_text_metadata {
             self.char_codes.clear();
@@ -3346,7 +3360,7 @@ impl SegmentBuilder {
         recovered: bool,
     ) {
         self.text.push(c);
-        self.add_word_char(c, vp_loose);
+        self.add_word_char(c, vp_loose, vp_strict);
         self.vp_left = self.vp_left.min(vp_loose.left);
         self.vp_right = self.vp_right.max(vp_loose.right);
         self.vp_top = self.vp_top.min(vp_loose.top);
@@ -3480,7 +3494,11 @@ impl SegmentBuilder {
             });
         }
 
-        *self = Self::new(self.emit_words, self.extract_text_metadata);
+        *self = Self::new(
+            self.emit_words,
+            self.tight_words,
+            self.extract_text_metadata,
+        );
     }
 }
 
@@ -3607,6 +3625,40 @@ mod tests {
             .as_bytes(),
         );
         pdf
+    }
+
+    /// Loose word boxes span the font's ascent/descent; tight ones hug the
+    /// glyphs. "NORMALMARK" in Helvetica 10 pt has a ~7 pt cap-height ink
+    /// box inside a ~12 pt font box, so a flag that is ignored (or applied
+    /// the wrong way round) makes the two heights match.
+    #[test]
+    fn tight_word_boxes_hug_glyphs() {
+        let height_with = |tight: bool| -> f32 {
+            let lib = Library::init();
+            let input = PdfInput::Bytes(user_unit_pdf());
+            let document = load_document_from_input(&lib, &input, None).unwrap();
+            let options = ExtractionOutputOptions {
+                emit_word_boxes: true,
+                tight_word_boxes: tight,
+                ..Default::default()
+            };
+            let extracted =
+                extract_pages_and_images(&document, None, usize::MAX, false, None, options)
+                    .unwrap();
+            let word = extracted.pages[0]
+                .text_items
+                .iter()
+                .flat_map(|i| i.words.iter())
+                .find(|w| w.text == "NORMALMARK")
+                .expect("word box");
+            word.height
+        };
+        let loose = height_with(false);
+        let tight = height_with(true);
+        assert!(
+            tight > 5.0 && tight < loose * 0.8,
+            "tight={tight} loose={loose}"
+        );
     }
 
     #[test]
@@ -3889,7 +3941,7 @@ mod tests {
     }
 
     fn segment_with_one_char() -> SegmentBuilder {
-        let mut segment = SegmentBuilder::new(false, true);
+        let mut segment = SegmentBuilder::new(false, false, true);
         segment.text = "A".into();
         segment.vp_left = 1.0;
         segment.vp_right = 7.0;
@@ -3927,7 +3979,7 @@ mod tests {
 
     #[test]
     fn disabled_text_metadata_does_not_accumulate_source_codes() {
-        let mut segment = SegmentBuilder::new(false, false);
+        let mut segment = SegmentBuilder::new(false, false, false);
         segment.text = "A".into();
         segment.vp_left = 1.0;
         segment.vp_right = 7.0;
