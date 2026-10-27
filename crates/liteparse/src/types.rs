@@ -718,6 +718,11 @@ pub struct ProjectedLine {
     pub all_mono: bool,
     pub all_strike: bool,
     pub spans: Vec<TextItem>,
+    /// Index of each span's source item in the page's `text_items`, aligned
+    /// with `spans`. Anything that reorders or extends `spans` must do the
+    /// same here.
+    #[serde(default)]
+    pub span_item_indices: Vec<usize>,
     /// True when the line's base direction is right-to-left (strong RTL
     /// characters outnumber strong LTR ones). `spans` is always in x-ascending
     /// order; consumers that rebuild the line's *text* must walk it in reverse

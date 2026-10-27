@@ -387,6 +387,35 @@ async fn test_extract_blocks_carries_geometry_without_changing_markdown() {
         ys.windows(2).all(|w| w[0] <= w[1]),
         "blocks should be in reading order, got {ys:?}"
     );
+    // Every block links back to the page's text items: in bounds, sorted,
+    // present on every text-bearing block, and never shared between blocks.
+    let n_items = with.pages[0].text_items.len();
+    let mut seen = std::collections::HashSet::new();
+    for b in blocks {
+        assert!(b.text_item_indices.iter().all(|&i| i < n_items));
+        assert!(b.text_item_indices.windows(2).all(|w| w[0] < w[1]));
+        assert!(
+            matches!(b.kind.as_str(), "rule" | "figure") || !b.text_item_indices.is_empty(),
+            "{} block carries no text items",
+            b.kind
+        );
+        for &i in &b.text_item_indices {
+            assert!(seen.insert(i), "item {i} attributed to two blocks");
+        }
+        let cells = b
+            .header
+            .iter()
+            .flatten()
+            .chain(b.rows.iter().flatten().flatten());
+        for cell in cells {
+            assert!(cell.text_item_indices.iter().all(|&i| i < n_items));
+            assert!(
+                cell.text_item_indices
+                    .iter()
+                    .all(|i| b.text_item_indices.contains(i))
+            );
+        }
+    }
 }
 
 #[tokio::test]
