@@ -1451,17 +1451,21 @@ fn uncovered_path_area(paths: &[ImageBounds], items: &[TextItem]) -> f32 {
     uncovered
 }
 
-/// Heuristic for substitution-cipher / broken-cmap garbling: real Latin-script
-/// text has a vowel ratio of roughly 30–45%, but a substitution permutation
-/// almost always maps the original A/E/I/O/U onto non-vowel letters, driving
-/// the apparent vowel ratio to near zero. Texts without enough ASCII letters
-/// to judge (non-Latin scripts, numbers, short labels) are treated as fine.
+/// Heuristic for substitution-cipher / broken-cmap garbling. Two signals:
+/// real Latin-script text has a vowel ratio of roughly 30–45%, but a
+/// substitution permutation almost always maps the original A/E/I/O/U onto
+/// non-vowel letters, driving the apparent vowel ratio to near zero; and a
+/// cipher that maps letters into the symbol range emits text implausibly
+/// dense in punctuation, which the symbol ratio catches when there are too
+/// few letters to judge. Texts without enough characters to judge either
+/// way (non-Latin scripts, numbers, short labels) are treated as fine.
 fn is_likely_garbled(text: &str) -> bool {
     let (letters, vowels) = count_letters_and_vowels(text);
-    if letters < 10 {
-        return false;
+    if letters >= 10 && vowels * 10 < letters {
+        return true;
     }
-    vowels * 10 < letters
+    let (non_space, symbols) = count_non_space_and_symbols(&text);
+    non_space >= GARBLE_MIN_ITEM_NON_SPACE && symbol_ratio_is_garbled(symbols, non_space)
 }
 
 /// Precomposed Latin vowels carrying diacritics, lowercase. Without these,
@@ -1501,6 +1505,41 @@ fn count_letters_and_vowels(text: &str) -> (usize, usize) {
 /// Below this the vowel ratio is too noisy — an acronym run or a short label
 /// can sit near zero without being corrupt.
 const GARBLE_MIN_LETTERS: usize = 30;
+
+/// Minimum non-whitespace chars in a single text item before the symbol
+/// ratio is trusted — short tokens like `$(1,234.5)` are symbol-dense by
+/// nature.
+const GARBLE_MIN_ITEM_NON_SPACE: usize = 20;
+
+/// Counts non-whitespace chars and how many of them are ASCII punctuation /
+/// symbol characters (`(` `%` `&` …). A second garble signal for cipher cmaps
+/// that map letters into the symbol range: their output carries too few
+/// letters for the vowel check to judge but is implausibly dense in ASCII
+/// punctuation. Digits are not symbols, so numeric tables don't inflate the
+/// ratio; non-ASCII chars are excluded so CJK text and Type3 PUA fallback
+/// (handled by `page_has_unmapped_text`) don't either.
+fn count_non_space_and_symbols(text: &str) -> (usize, usize) {
+    let mut non_space = 0usize;
+    let mut symbols = 0usize;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        non_space += 1;
+        if ch.is_ascii() && !ch.is_ascii_alphanumeric() {
+            symbols += 1;
+        }
+    }
+    (non_space, symbols)
+}
+
+/// True when a body of text is symbol-swamped: ASCII punctuation at or above
+/// 40% of non-space chars. Real prose punctuates at ~5–10%; dense numeric
+/// tables and code rarely reach 25%; cipher-garbled text that maps letters
+/// onto `(` `$` `%` `&` sits around 50–70%.
+fn symbol_ratio_is_garbled(symbols: usize, non_space: usize) -> bool {
+    non_space >= GARBLE_MIN_LETTERS && symbols * 5 >= non_space * 2
+}
 
 /// A font group must hold at least this share of the page's letters before its
 /// own vowel ratio can flag the page. Corruption travels with a font, so a
@@ -1548,25 +1587,43 @@ pub(crate) enum GarbledScope {
 fn garbled_scope(page: &Page) -> GarbledScope {
     let mut total_letters = 0usize;
     let mut total_vowels = 0usize;
+    let mut total_non_space = 0usize;
+    let mut total_symbols = 0usize;
     // Keyed by font name, so text sharing a ToUnicode map is judged together.
-    let mut per_font: HashMap<Option<&str>, (usize, usize)> = HashMap::new();
+    // (letters, vowels, non_space, symbols)
+    let mut per_font: HashMap<Option<&str>, (usize, usize, usize, usize)> = HashMap::new();
     for it in &page.text_items {
         let (l, v) = count_letters_and_vowels(&it.text);
+        let (ns, sy) = count_non_space_and_symbols(&it.text);
         total_letters += l;
         total_vowels += v;
-        let entry = per_font.entry(it.font_name.as_deref()).or_insert((0, 0));
+        total_non_space += ns;
+        total_symbols += sy;
+        let entry = per_font
+            .entry(it.font_name.as_deref())
+            .or_insert((0, 0, 0, 0));
         entry.0 += l;
         entry.1 += v;
+        entry.2 += ns;
+        entry.3 += sy;
     }
 
-    if ratio_is_garbled(total_letters, total_vowels) {
+    if ratio_is_garbled(total_letters, total_vowels)
+        || symbol_ratio_is_garbled(total_symbols, total_non_space)
+    {
         return GarbledScope::WholePage;
     }
 
-    let min_share = (total_letters as f32 * GARBLE_MIN_FONT_SHARE).ceil() as usize;
+    let min_letter_share = (total_letters as f32 * GARBLE_MIN_FONT_SHARE).ceil() as usize;
+    // A symbol-swamped font has almost no letters, so it can never reach a
+    // letters-based share floor — judge its share on non-space chars instead.
+    let min_non_space_share = (total_non_space as f32 * GARBLE_MIN_FONT_SHARE).ceil() as usize;
     let fonts: HashSet<Option<String>> = per_font
         .into_iter()
-        .filter(|&(_, (letters, vowels))| letters >= min_share && ratio_is_garbled(letters, vowels))
+        .filter(|&(_, (letters, vowels, non_space, symbols))| {
+            (letters >= min_letter_share && ratio_is_garbled(letters, vowels))
+                || (non_space >= min_non_space_share && symbol_ratio_is_garbled(symbols, non_space))
+        })
         .map(|(font, _)| font.map(str::to_string))
         .collect();
 
@@ -2472,6 +2529,74 @@ mod tests {
         items.push(("TickerFont", "NYSE NASDAQ FTSE DAX SPX"));
         let page = make_font_page(&items);
         assert!(matches!(garbled_scope(&page), GarbledScope::None));
+    }
+
+    /// Cipher cmap that maps letters into ASCII symbol/digit ranges: too few
+    /// letters for the vowel check, but ~60% ASCII punctuation.
+    const SYMBOL_CIPHER: &[&str] = &[
+        ",55(92&$%/(75$16)(5$%/(67$1'%</(77(52)&5(',7126",
+        "(5$%/(67$1'%(5$%/(6)16(&4,/(5)2&$(%7('2/4'%(7$1'",
+        "&$%/('2(&4(5)4(1'%(7$1',(5)2&$(%7($16)(5$%/('",
+    ];
+
+    /// A dense numeric statement table: mostly digits, ~20% punctuation —
+    /// must not trip the symbol check.
+    const NUMERIC_TABLE: &[&str] = &[
+        "Revenue 1,234,567.89 (890.12) 45.6% $7,890.00",
+        "Cost of sales (456,789.01) 234.56 12.3% (1,234.56)",
+        "Net income 777,778.88 (655.56) 33.3% $6,655.44",
+        "Total assets 9,876,543.21 100.0% 98.7% $3,210.98",
+    ];
+
+    #[test]
+    fn test_garbled_scope_symbol_cipher_whole_page() {
+        let items: Vec<(&str, &str)> = SYMBOL_CIPHER.iter().map(|t| ("CipherFont", *t)).collect();
+        let page = make_font_page(&items);
+        assert!(matches!(garbled_scope(&page), GarbledScope::WholePage));
+        assert!(page_is_garbled(&page));
+        for it in &page.text_items {
+            assert!(is_unusable_native(it), "{}", it.text);
+        }
+    }
+
+    /// Symbol-dense cipher in one font next to healthy prose in another:
+    /// the cipher font has ~0 letters so it cannot reach the letters share
+    /// floor — it must still flag on non-space share alone.
+    #[test]
+    fn test_garbled_scope_symbol_cipher_flags_only_bad_font() {
+        let mut items: Vec<(&str, &str)> = HEALTHY_PARAGRAPH
+            .iter()
+            .map(|t| ("Helvetica", *t))
+            .collect();
+        items.extend(SYMBOL_CIPHER.iter().map(|t| ("CipherFont", *t)));
+        let page = make_font_page(&items);
+
+        match garbled_scope(&page) {
+            GarbledScope::Fonts(fonts) => {
+                assert_eq!(fonts.len(), 1);
+                assert!(fonts.contains(&Some("CipherFont".to_string())));
+            }
+            _ => panic!("expected only the cipher font group to be flagged"),
+        }
+        assert!(page_is_garbled(&page));
+    }
+
+    /// Digit-heavy table rows with ordinary punctuation stay clean.
+    #[test]
+    fn test_garbled_scope_numeric_table_not_garbled() {
+        let items: Vec<(&str, &str)> = NUMERIC_TABLE.iter().map(|t| ("TableFont", *t)).collect();
+        let page = make_font_page(&items);
+        assert!(matches!(garbled_scope(&page), GarbledScope::None));
+        assert!(!page_is_garbled(&page));
+    }
+
+    #[test]
+    fn test_is_likely_garbled_symbol_cipher() {
+        assert!(is_likely_garbled(SYMBOL_CIPHER[0]));
+        // A short symbol-dense token is not judged.
+        assert!(!is_likely_garbled("$(1,234.5)"));
+        // Ordinary punctuated prose is not judged.
+        assert!(!is_likely_garbled("Wait — really? (Yes.) Ok, fine: go."));
     }
 
     /// Items with no font name still fall back to the page-wide verdict.
