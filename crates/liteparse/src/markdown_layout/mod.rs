@@ -17,6 +17,7 @@ mod lists;
 mod paragraphs;
 mod repetition;
 mod tables;
+mod tagged_tables;
 
 pub use blocks::{Block, Cell, PositionedBlock, SpanCell, render_blocks, splice_soft_hyphens};
 pub use classify::classify_page_with_filters;

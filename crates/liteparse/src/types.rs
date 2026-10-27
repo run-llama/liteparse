@@ -420,6 +420,9 @@ pub struct StructNode {
     /// `None` when none of the mcids resolved to a bbox.
     pub bbox: Option<Rect>,
     pub alt_text: Option<String>,
+    /// Nesting depth in the tree (page roots are 0).
+    #[serde(default)]
+    pub depth: u16,
 }
 
 /// Represents a fully parsed page with projected text layout.

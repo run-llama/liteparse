@@ -65,6 +65,9 @@ pub struct StructNode {
     pub bbox: Option<RectF>,
     /// Optional alt text (set for Figure / Formula elements when present).
     pub alt_text: Option<String>,
+    /// Nesting depth in the tree (page roots are 0). With pre-order this
+    /// recovers each node's subtree: the following nodes deeper than it.
+    pub depth: u16,
 }
 
 impl Page<'_, '_> {
@@ -112,7 +115,7 @@ impl Page<'_, '_> {
         for i in 0..count {
             let elem = unsafe { ffi!(FPDF_StructTree_GetChildAtIndex(tree, i)) };
             if !elem.is_null() {
-                walk_element(elem, &mcid_bboxes, &mut out);
+                walk_element(elem, &mcid_bboxes, 0, &mut out);
             }
         }
 
@@ -367,6 +370,7 @@ fn union_rect(a: &RectF, b: &RectF) -> RectF {
 fn walk_element(
     elem: pdfium_sys::FPDF_STRUCTELEMENT,
     mcid_bboxes: &std::collections::HashMap<i32, RectF>,
+    depth: u16,
     out: &mut Vec<StructNode>,
 ) {
     let role = read_element_type(elem);
@@ -403,12 +407,13 @@ fn walk_element(
         mcids,
         bbox,
         alt_text,
+        depth,
     });
 
     for i in 0..n_children {
         let child_elem = unsafe { ffi!(FPDF_StructElement_GetChildAtIndex(elem, i)) };
         if !child_elem.is_null() {
-            walk_element(child_elem, mcid_bboxes, out);
+            walk_element(child_elem, mcid_bboxes, depth.saturating_add(1), out);
         }
     }
 }
