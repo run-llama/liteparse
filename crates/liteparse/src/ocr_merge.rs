@@ -1106,6 +1106,18 @@ pub fn merge_ocr_results(
     ocr_failure_fatal: bool,
     emit_word_boxes: bool,
 ) -> Result<(), LiteParseError> {
+    merge_ocr_results_with_options(pages, outcomes, ocr_failure_fatal, emit_word_boxes, false)
+}
+
+/// [`merge_ocr_results`], optionally keeping OCR text from figures that look
+/// like charts (`LiteParseConfig::ocr_keep_figure_text`).
+pub fn merge_ocr_results_with_options(
+    pages: &mut [Page],
+    outcomes: Vec<PageOcrOutcome>,
+    ocr_failure_fatal: bool,
+    emit_word_boxes: bool,
+    keep_figure_text: bool,
+) -> Result<(), LiteParseError> {
     // Track OCR task outcomes so we can distinguish a systemic failure (e.g.
     // missing Tesseract language data, which fails identically on every page)
     // from incidental per-page failures. Without this, every page logs the same
@@ -1191,7 +1203,7 @@ pub fn merge_ocr_results(
         // Judge each embedded figure's OCR output as a group: a figure whose
         // recognised text is mostly numbers and short tokens is a chart
         // (axes, ticks, legend keys), and none of it belongs in the text flow.
-        let chart_images: Vec<bool> = if has_native_text {
+        let chart_images: Vec<bool> = if has_native_text && !keep_figure_text {
             chart_like_images(&image_rects, &ocr_results, scale_factor)
         } else {
             Vec::new()
@@ -2755,6 +2767,43 @@ mod tests {
     /// it the projection pass has nothing to carry forward when it joins
     /// neighbouring OCR items into a run, so a caller asking for word boxes
     /// gets them on native text only and none on scanned pages (#473).
+    /// A numeric table embedded as an image on a native-text page reads as a
+    /// chart and its OCR is dropped, unless the caller keeps figure text.
+    #[test]
+    fn test_keep_figure_text_keeps_chart_like_ocr() {
+        let outcome = || PageOcrOutcome {
+            page_number: 1,
+            dpi: 72.0,
+            has_native_text: true,
+            image_rects: vec![Rect {
+                x: 50.0,
+                y: 300.0,
+                width: 300.0,
+                height: 150.0,
+            }],
+            results: ["100", "80", "60", "40", "20", "2016"]
+                .iter()
+                .enumerate()
+                .map(|(i, t)| OcrResult {
+                    text: (*t).into(),
+                    bbox: [60.0, 310.0 + 20.0 * i as f32, 80.0, 318.0 + 20.0 * i as f32],
+                    confidence: 0.9,
+                    polygon: None,
+                })
+                .collect(),
+            error: None,
+        };
+        let native = make_native_text_page(1).text_items.len();
+
+        let mut dropped = vec![make_native_text_page(1)];
+        merge_ocr_results_with_options(&mut dropped, vec![outcome()], false, false, false).unwrap();
+        assert_eq!(dropped[0].text_items.len(), native);
+
+        let mut kept = vec![make_native_text_page(1)];
+        merge_ocr_results_with_options(&mut kept, vec![outcome()], false, false, true).unwrap();
+        assert_eq!(kept[0].text_items.len(), native + 6);
+    }
+
     #[test]
     fn test_ocr_items_carry_word_boxes_when_enabled() {
         let outcome = |page_number: usize| PageOcrOutcome {

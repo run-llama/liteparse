@@ -829,13 +829,14 @@ impl LiteParse {
             // Merge once, after every page has been recognized:
             // `ocr_failure_fatal` only applies when *every* OCR task failed,
             // which can't be decided from a single page's outcome.
-            ocr_tasks
-                .finish_and_merge(
-                    &mut pages,
-                    self.config.ocr_failure_fatal,
-                    self.config.effective_emit_word_boxes(),
-                )
-                .await?;
+            let outcomes = ocr_tasks.finish().await;
+            crate::ocr_merge::merge_ocr_results_with_options(
+                &mut pages,
+                outcomes,
+                self.config.ocr_failure_fatal,
+                self.config.effective_emit_word_boxes(),
+                self.config.ocr_keep_figure_text,
+            )?;
         }
         let t_ocr = web_time::Instant::now();
         log(&format!(

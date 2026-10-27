@@ -1288,6 +1288,8 @@ struct PyLiteParseConfig {
     #[pyo3(get)]
     ocr_failure_fatal: bool,
     #[pyo3(get)]
+    ocr_keep_figure_text: bool,
+    #[pyo3(get)]
     ocr_hedge_delays_ms: Vec<u64>,
     #[pyo3(get)]
     emit_word_boxes: bool,
@@ -1362,6 +1364,7 @@ impl PyLiteParseConfig {
             detect_screenshot_rects: cfg.detect_screenshot_rects,
             render_form_fields: cfg.render_form_fields,
             ocr_failure_fatal: cfg.ocr_failure_fatal,
+            ocr_keep_figure_text: cfg.ocr_keep_figure_text,
             ocr_hedge_delays_ms: cfg.ocr_hedge_delays_ms.clone(),
             emit_word_boxes: cfg.emit_word_boxes,
             crop_box: cfg
@@ -1504,6 +1507,7 @@ impl LiteParse {
         detect_screenshot_rects = None,
         render_form_fields = None,
         ocr_failure_fatal = None,
+        ocr_keep_figure_text = None,
         ocr_hedge_delays_ms = None,
         emit_word_boxes = None,
         extract_text_metadata = None,
@@ -1544,6 +1548,7 @@ impl LiteParse {
         detect_screenshot_rects: Option<bool>,
         render_form_fields: Option<bool>,
         ocr_failure_fatal: Option<bool>,
+        ocr_keep_figure_text: Option<bool>,
         ocr_hedge_delays_ms: Option<Vec<u64>>,
         emit_word_boxes: Option<bool>,
         extract_text_metadata: Option<bool>,
@@ -1647,6 +1652,9 @@ impl LiteParse {
         }
         if let Some(v) = ocr_failure_fatal {
             cfg.ocr_failure_fatal = v;
+        }
+        if let Some(v) = ocr_keep_figure_text {
+            cfg.ocr_keep_figure_text = v;
         }
         if let Some(v) = ocr_hedge_delays_ms {
             cfg.ocr_hedge_delays_ms = v;
