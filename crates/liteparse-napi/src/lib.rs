@@ -56,9 +56,10 @@ impl LiteParse {
     /// the session for you.
     ///
     /// Converts a non-PDF source once, then yields `batchSize` pages at a time
-    /// via `nextBatch()` (default 25). Cross-page passes (repeated
-    /// header/footer removal, image deduplication) see only the pages in their
-    /// own batch, so output can differ from a whole-document `parse()`.
+    /// via `nextBatch()` (default 25). Heading levels and repeated
+    /// header/footer removal use document-wide signals, computed by a prepass
+    /// before the first batch; image deduplication is batch-local, so image
+    /// references can differ from a whole-document `parse()`.
     #[napi]
     pub async fn open_batch_session(
         &self,

@@ -20,9 +20,13 @@ mod tables;
 
 pub use blocks::{Block, Cell, PositionedBlock, SpanCell, render_blocks, splice_soft_hyphens};
 pub use classify::classify_page_with_filters;
-pub use headings::{build_heading_map, compute_body_size};
+pub use headings::{
+    BodySizeAccumulator, HeadingMapAccumulator, build_heading_map, compute_body_size,
+};
 pub use inline::{apply_link, escape_inline};
-pub use repetition::{compute_header_footer_set, detect_single_page_chrome};
+pub use repetition::{
+    HeaderFooterAccumulator, compute_header_footer_set, detect_single_page_chrome,
+};
 pub use tables::detect_table_rects;
 pub(crate) use tables::{count_text_table_runs, validated_ruled_table_rects};
 

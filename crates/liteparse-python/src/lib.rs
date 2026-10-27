@@ -1711,9 +1711,10 @@ impl LiteParse {
     /// Internal plumbing for the wrapper's `parse_batches()` — prefer that.
     ///
     /// Converts a non-PDF source once and returns a `_ParseSession` yielding
-    /// `batch_size` pages at a time. Cross-page passes (repeated header/footer
-    /// removal, image deduplication) see only the pages in their own batch, so
-    /// output can differ from a whole-document `parse()`.
+    /// `batch_size` pages at a time. Heading levels and repeated header/footer
+    /// removal use document-wide signals, computed by a prepass before the
+    /// first batch; image deduplication is batch-local, so image references
+    /// can differ from a whole-document `parse()`.
     #[pyo3(signature = (input, batch_size = None))]
     fn open_batch_session(
         &self,
