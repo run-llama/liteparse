@@ -16,6 +16,8 @@ mod inline;
 mod lists;
 mod paragraphs;
 mod repetition;
+mod table_header;
+mod table_spans;
 mod tables;
 
 pub use blocks::{Block, Cell, PositionedBlock, SpanCell, render_blocks, splice_soft_hyphens};
@@ -24,7 +26,7 @@ pub use headings::{build_heading_map, compute_body_size};
 pub use inline::{apply_link, escape_inline};
 pub use repetition::{compute_header_footer_set, detect_single_page_chrome};
 pub use tables::detect_table_rects;
-pub(crate) use tables::{count_text_table_runs, validated_ruled_table_rects};
+pub(crate) use tables::{count_text_table_runs, detect_table_grids, validated_ruled_table_rects};
 
 /// Minimum plausible text-row height in points. Floors a `bbox.height` before
 /// it is multiplied into a band / tolerance window, so a degenerate near-zero
