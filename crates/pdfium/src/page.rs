@@ -444,17 +444,34 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
 
     /// Render the page to a BGRA bitmap, drawing form-field appearances
     /// (filled values, checkbox states) on top via `FPDF_FFLDraw` when a form
-    /// environment is supplied. Without it, PDFium only paints widget
-    /// annotations' static appearance streams, so filled-in form data can be
-    /// missing from the raster. The page open/close form notifications are
-    /// wrapped around the render, mirroring the LlamaParse extract binary.
+    /// environment is supplied. Without it, PDFium paints no widget
+    /// annotations at all (see [`Self::unpainted_widget_indices`]). The page
+    /// open/close form notifications are wrapped around the render, mirroring
+    /// the LlamaParse extract binary.
     pub fn render_with_form(
         &self,
         dpi: f32,
         form: Option<&FormEnvironment>,
     ) -> Result<Bitmap<'lib>, PdfiumError> {
         let _form_page = form.map(|form| self.notify_form_page_loaded(form));
-        self.render_bitmap(dpi, form)
+        self.render_bitmap(
+            dpi,
+            form,
+            (pdfium_sys::FPDF_ANNOT | pdfium_sys::FPDF_PRINTING) as i32,
+        )
+    }
+
+    /// Like [`Self::render_with_form`], but the page as a viewer shows it on
+    /// screen rather than as printed: annotations without the Print flag are
+    /// drawn and Hidden/NoView ones are not, which is what Poppler and MuPDF
+    /// render too.
+    pub fn render_on_screen(
+        &self,
+        dpi: f32,
+        form: Option<&FormEnvironment>,
+    ) -> Result<Bitmap<'lib>, PdfiumError> {
+        let _form_page = form.map(|form| self.notify_form_page_loaded(form));
+        self.render_bitmap(dpi, form, pdfium_sys::FPDF_ANNOT as i32)
     }
 
     /// Tell the form-fill environment this page is open: `FORM_OnAfterLoadPage`
@@ -484,10 +501,26 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
         }
     }
 
+    /// Load this page into `form` without running any page action. Loading is
+    /// when PDFium builds its widget objects and writes an appearance stream for
+    /// every widget that lacks a valid one — checkboxes, buttons and text
+    /// fields saved without `/AP` — so a later render or overlay copy can draw
+    /// them. The returned guard unloads the page (`FORM_OnBeforeClosePage`);
+    /// drop it before the page.
+    pub fn load_form_widgets<'a>(&'a self, form: &'a FormEnvironment) -> FormWidgetsGuard<'a> {
+        unsafe { ffi!(FORM_OnAfterLoadPage(self.handle, form.handle)) };
+        FormWidgetsGuard {
+            page: self.handle,
+            form: form.handle,
+            _lifetime: std::marker::PhantomData,
+        }
+    }
+
     fn render_bitmap(
         &self,
         dpi: f32,
         form: Option<&FormEnvironment>,
+        flags: i32,
     ) -> Result<Bitmap<'lib>, PdfiumError> {
         // `/UserUnit` scales the physical page, so honoring the requested
         // DPI means scaling the pixel size by it too — otherwise a UserUnit
@@ -503,8 +536,6 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
 
         // Fill with white (ARGB: 0xFFFFFFFF)
         bitmap.fill_rect(0, 0, width, height, 0xFFFFFFFF);
-
-        let flags = (pdfium_sys::FPDF_ANNOT | pdfium_sys::FPDF_PRINTING) as i32;
 
         unsafe {
             ffi!(FPDF_RenderPageBitmap(
@@ -1104,6 +1135,172 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
         rects
     }
 
+    /// Indices of the visible widget annotations that a render of this page
+    /// would leave blank.
+    ///
+    /// `FPDF_RenderPageBitmap` skips widget annotations outright; `FPDF_FFLDraw`
+    /// paints only the widgets the document's AcroForm field tree knows. So
+    /// with no `form` every visible widget is unpainted, and with one the
+    /// unpainted widgets are those PDFium cannot resolve to a form field —
+    /// typically widgets orphaned from a missing or incomplete `/AcroForm`.
+    ///
+    /// Widgets without an appearance stream are included: loading the page
+    /// into a form environment (see [`Self::load_form_widgets`]) generates the
+    /// missing ones. Call this before that load, which adopts orphaned widgets
+    /// into the form.
+    pub fn unpainted_widget_indices(&self, form: Option<&FormEnvironment>) -> Vec<i32> {
+        let mut indices = Vec::new();
+        let count = unsafe { ffi!(FPDFPage_GetAnnotCount(self.handle)) };
+        for index in 0..count {
+            let annot = unsafe { ffi!(FPDFPage_GetAnnot(self.handle, index)) };
+            if annot.is_null() {
+                continue;
+            }
+            let unpainted = unsafe { ffi!(FPDFAnnot_GetSubtype(annot)) }
+                == pdfium_sys::FPDF_ANNOT_WIDGET as i32
+                && unsafe { ffi!(FPDFAnnot_GetFlags(annot)) } & SCREEN_HIDDEN == 0
+                && form.is_none_or(
+                    |form| unsafe { ffi!(FPDFAnnot_GetFormFieldType(form.handle, annot)) } < 0,
+                );
+            unsafe { ffi!(FPDFPage_CloseAnnot(annot)) };
+            if unpainted {
+                indices.push(index);
+            }
+        }
+        indices
+    }
+
+    /// Indices of the annotations a viewer paints above `widgets` (indices
+    /// from [`Self::unpainted_widget_indices`]): every annotation after the
+    /// first of them in `/Annots` that is shown on screen and has an
+    /// appearance stream, including widgets the form layer would paint under
+    /// the overlay.
+    ///
+    /// The normal render paints these before the widgets are drawn over it, so
+    /// an opaque widget box would cover, say, an ink signature or stamp placed
+    /// on top of the field. Callers lift them out of the base render with
+    /// [`Self::hide_annotations`] and draw them with the widgets, so PDFium
+    /// places and stacks all of them itself.
+    ///
+    /// Appearance streams PDFium generates (Square, Ink, Highlight and other
+    /// markup saved without `/AP`) count only once written, so load the page
+    /// into a form environment first (see [`Self::load_form_widgets`]).
+    pub fn annotations_above(&self, widgets: &[i32]) -> Vec<i32> {
+        let Some(&first_widget) = widgets.iter().min() else {
+            return Vec::new();
+        };
+        let count = unsafe { ffi!(FPDFPage_GetAnnotCount(self.handle)) };
+        (first_widget + 1..count)
+            .filter(|index| !widgets.contains(index))
+            .filter(|&index| {
+                let annot = unsafe { ffi!(FPDFPage_GetAnnot(self.handle, index)) };
+                if annot.is_null() {
+                    return false;
+                }
+                let shown = unsafe { ffi!(FPDFAnnot_GetSubtype(annot)) }
+                    != pdfium_sys::FPDF_ANNOT_POPUP as i32
+                    && unsafe { ffi!(FPDFAnnot_GetFlags(annot)) } & SCREEN_HIDDEN == 0
+                    && unsafe { ffi!(FPDFAnnot_HasKey(annot, c"AP".as_ptr())) } != 0;
+                unsafe { ffi!(FPDFPage_CloseAnnot(annot)) };
+                shown
+            })
+            .collect()
+    }
+
+    /// The annotations at `indices` that draw optional content (a layer) in
+    /// their appearance, descending into nested form XObjects.
+    ///
+    /// Layer visibility lives in the catalog's `/OCProperties`, which a page
+    /// imported into another document leaves behind, so an overlay copy would
+    /// show layers that are off. Only `/OC` marked content is seen; a form
+    /// XObject's own `/OC` entry is not exposed by PDFium's API. An
+    /// annotation's own `/OC` entry needs no check: PDFium's render ignores it
+    /// in the source document too.
+    pub fn optional_content_annotations(&self, indices: &[i32]) -> Vec<i32> {
+        indices
+            .iter()
+            .copied()
+            .filter(|&index| {
+                let annot = unsafe { ffi!(FPDFPage_GetAnnot(self.handle, index)) };
+                if annot.is_null() {
+                    return false;
+                }
+                let object_count = unsafe { ffi!(FPDFAnnot_GetObjectCount(annot)) };
+                let uses = (0..object_count).any(|object_index| {
+                    let object = unsafe { ffi!(FPDFAnnot_GetObject(annot, object_index)) };
+                    !object.is_null() && object_uses_optional_content(object, 0)
+                });
+                unsafe { ffi!(FPDFPage_CloseAnnot(annot)) };
+                uses
+            })
+            .collect()
+    }
+
+    /// Whether the annotations at `a` and `b` may paint over each other: their
+    /// `/Rect`s intersect, or one is `/NoRotate` on a rotated page, where it
+    /// is drawn turned about its corner, outside its `/Rect`. `true` when
+    /// either rect is unavailable.
+    pub fn annotations_overlap(&self, a: i32, b: i32) -> bool {
+        let rotated = self.rotation() != 0;
+        let bounds = |index: i32| {
+            let annot = unsafe { ffi!(FPDFPage_GetAnnot(self.handle, index)) };
+            if annot.is_null() {
+                return None;
+            }
+            let mut rect = pdfium_sys::FS_RECTF::default();
+            let found = unsafe { ffi!(FPDFAnnot_GetRect(annot, &mut rect)) } != 0;
+            let turned = rotated
+                && unsafe { ffi!(FPDFAnnot_GetFlags(annot)) }
+                    & pdfium_sys::FPDF_ANNOT_FLAG_NOROTATE as i32
+                    != 0;
+            unsafe { ffi!(FPDFPage_CloseAnnot(annot)) };
+            (found && !turned).then(|| {
+                (
+                    rect.left.min(rect.right),
+                    rect.bottom.min(rect.top),
+                    rect.left.max(rect.right),
+                    rect.bottom.max(rect.top),
+                )
+            })
+        };
+        match (bounds(a), bounds(b)) {
+            (Some(a), Some(b)) => a.0 < b.2 && b.0 < a.2 && a.1 < b.3 && b.1 < a.3,
+            _ => true,
+        }
+    }
+
+    /// Set the Hidden flag on the annotations at `indices` until the returned
+    /// guard drops, which restores their original flags. `None` (nothing
+    /// changed) when the pdfium build lacks `FPDFAnnot_SetFlags` or a flag
+    /// cannot be set.
+    pub fn hide_annotations(&self, indices: &[i32]) -> Option<HiddenAnnotations<'_>> {
+        let api = FlattenApi::load()?;
+        let mut originals = Vec::with_capacity(indices.len());
+        for &index in indices {
+            let annot = unsafe { ffi!(FPDFPage_GetAnnot(self.handle, index)) };
+            if annot.is_null() {
+                restore_annotation_flags(&api, self.handle, &originals);
+                return None;
+            }
+            let flags = unsafe { ffi!(FPDFAnnot_GetFlags(annot)) };
+            let changed = unsafe {
+                (api.set_flags)(annot, flags | pdfium_sys::FPDF_ANNOT_FLAG_HIDDEN as i32)
+            } != 0;
+            unsafe { ffi!(FPDFPage_CloseAnnot(annot)) };
+            if !changed {
+                restore_annotation_flags(&api, self.handle, &originals);
+                return None;
+            }
+            originals.push((index, flags));
+        }
+        Some(HiddenAnnotations {
+            api,
+            page: self.handle,
+            originals,
+            _page: PhantomData,
+        })
+    }
+
     /// Whether any text object already in the page content stream overlaps one
     /// of `rects`.
     ///
@@ -1383,6 +1580,19 @@ impl Drop for FormPageGuard<'_> {
     }
 }
 
+/// Unloads a page loaded by [`Page::load_form_widgets`].
+pub struct FormWidgetsGuard<'a> {
+    page: pdfium_sys::FPDF_PAGE,
+    form: pdfium_sys::FPDF_FORMHANDLE,
+    _lifetime: std::marker::PhantomData<&'a ()>,
+}
+
+impl Drop for FormWidgetsGuard<'_> {
+    fn drop(&mut self) {
+        unsafe { ffi!(FORM_OnBeforeClosePage(self.page, self.form)) };
+    }
+}
+
 /// The optional page-flatten API, resolved together so a build missing either
 /// half degrades to "no flattening" rather than failing the whole pdfium load.
 struct FlattenApi {
@@ -1412,6 +1622,12 @@ impl FlattenApi {
         })
     }
 }
+
+/// Annotation flags that keep an annotation off the screen, as PDFium's
+/// render reads them. Invisible is not one: it applies only to annotation
+/// types a viewer does not recognize, and PDFium paints regardless.
+pub(crate) const SCREEN_HIDDEN: i32 =
+    (pdfium_sys::FPDF_ANNOT_FLAG_HIDDEN | pdfium_sys::FPDF_ANNOT_FLAG_NOVIEW) as i32;
 
 /// Whether the annotation's appearance paints text at its top level.
 ///
@@ -1472,6 +1688,56 @@ fn object_paints_text(object: pdfium_sys::FPDF_PAGEOBJECT, depth: u32) -> bool {
             })
         }
         _ => false,
+    }
+}
+
+/// Depth-bounded search for an object inside `/OC` marked content,
+/// following form XObjects.
+fn object_uses_optional_content(object: pdfium_sys::FPDF_PAGEOBJECT, depth: u32) -> bool {
+    const MAX_DEPTH: u32 = 8;
+    let marks = unsafe { ffi!(FPDFPageObj_CountMarks(object)) };
+    let marked = (0..marks).any(|index| {
+        let mark = unsafe { ffi!(FPDFPageObj_GetMark(object, index as std::os::raw::c_ulong)) };
+        // "OC" and its NUL: 6 bytes of UTF-16LE.
+        let mut name = [0u16; 3];
+        let mut needed: std::os::raw::c_ulong = 0;
+        !mark.is_null()
+            && unsafe {
+                ffi!(FPDFPageObjMark_GetName(
+                    mark,
+                    name.as_mut_ptr(),
+                    std::mem::size_of_val(&name) as std::os::raw::c_ulong,
+                    &mut needed
+                ))
+            } != 0
+            && needed as usize == std::mem::size_of_val(&name)
+            && name == [u16::from(b'O'), u16::from(b'C'), 0]
+    });
+    marked
+        || unsafe { ffi!(FPDFPageObj_GetType(object)) } == pdfium_sys::FPDF_PAGEOBJ_FORM as i32
+            && depth < MAX_DEPTH
+            && (0..unsafe { ffi!(FPDFFormObj_CountObjects(object)) }).any(|index| {
+                let child = unsafe {
+                    ffi!(FPDFFormObj_GetObject(
+                        object,
+                        index as std::os::raw::c_ulong
+                    ))
+                };
+                !child.is_null() && object_uses_optional_content(child, depth + 1)
+            })
+}
+
+/// Restores the flags [`Page::hide_annotations`] changed when dropped.
+pub struct HiddenAnnotations<'page> {
+    api: FlattenApi,
+    page: pdfium_sys::FPDF_PAGE,
+    originals: Vec<(i32, i32)>,
+    _page: PhantomData<&'page ()>,
+}
+
+impl Drop for HiddenAnnotations<'_> {
+    fn drop(&mut self) {
+        restore_annotation_flags(&self.api, self.page, &self.originals);
     }
 }
 
