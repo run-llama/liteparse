@@ -43,17 +43,23 @@ pub fn reverse_cmap(data: &[u8]) -> Option<HashMap<u32, u32>> {
         if glyph == 0 || unicode == 0 {
             return;
         }
-        // On collision prefer non-PUA, then the smaller codepoint (ASCII /
-        // canonical forms over compatibility duplicates).
+        // On collision prefer non-PUA, then non-radical, then the smaller
+        // codepoint (ASCII / canonical forms over compatibility duplicates).
+        // CJK fonts (Noto/Source Han, Yu Gothic) map the CJK radicals blocks
+        // to the same glyph as the unified ideograph, and the radical has the
+        // smaller codepoint: U+2F47 KANGXI RADICAL SUN vs U+65E5 '日'.
+        let rank = |u: u32| match u {
+            0xE000..=0xF8FF => 2,
+            0x2E80..=0x2FDF => 1,
+            _ => 0,
+        };
         match map.entry(glyph) {
             std::collections::hash_map::Entry::Vacant(e) => {
                 e.insert(unicode);
             }
             std::collections::hash_map::Entry::Occupied(mut e) => {
                 let cur = *e.get();
-                let cur_pua = (0xE000..=0xF8FF).contains(&cur);
-                let new_pua = (0xE000..=0xF8FF).contains(&unicode);
-                if (cur_pua && !new_pua) || (cur_pua == new_pua && unicode < cur) {
+                if (rank(unicode), unicode) < (rank(cur), cur) {
                     e.insert(unicode);
                 }
             }
@@ -208,6 +214,42 @@ mod tests {
         assert_eq!(map.get(&11), Some(&0x42)); // B
         assert_eq!(map.get(&12), Some(&0x43)); // C
         assert!(!map.contains_key(&0));
+    }
+
+    #[test]
+    fn prefers_unified_ideograph_over_kangxi_radical() {
+        // Format 12 cmap where U+2F00 (KANGXI RADICAL ONE) and U+4E00 '一'
+        // share glyph 7, as in Noto Serif CJK and Yu Gothic.
+        let mut sub: Vec<u8> = Vec::new();
+        sub.extend([0, 12, 0, 0]); // format 12, reserved
+        sub.extend(40u32.to_be_bytes()); // length
+        sub.extend(0u32.to_be_bytes()); // language
+        sub.extend(2u32.to_be_bytes()); // numGroups
+        for start in [0x2F00u32, 0x4E00] {
+            sub.extend(start.to_be_bytes()); // startCharCode
+            sub.extend(start.to_be_bytes()); // endCharCode
+            sub.extend(7u32.to_be_bytes()); // startGlyphID
+        }
+
+        let mut cmap: Vec<u8> = Vec::new();
+        cmap.extend([0, 0]); // version
+        cmap.extend([0, 1]); // numTables
+        cmap.extend([0, 3, 0, 10]); // platform 3, encoding 10
+        cmap.extend(12u32.to_be_bytes()); // subtable offset
+        cmap.extend(&sub);
+
+        let mut font: Vec<u8> = Vec::new();
+        font.extend([0, 1, 0, 0]); // sfnt version
+        font.extend([0, 1]); // numTables
+        font.extend([0, 0, 0, 0, 0, 0]); // search fields
+        font.extend(b"cmap");
+        font.extend([0, 0, 0, 0]); // checksum
+        font.extend(28u32.to_be_bytes()); // offset (12 + 16)
+        font.extend((cmap.len() as u32).to_be_bytes());
+        font.extend(&cmap);
+
+        let map = reverse_cmap(&font).unwrap();
+        assert_eq!(map.get(&7), Some(&0x4E00));
     }
 
     #[test]
