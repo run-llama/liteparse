@@ -457,6 +457,29 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
         self.render_bitmap(dpi, form)
     }
 
+    /// Render one pixel rectangle of the page as [`Self::render`] would draw it at
+    /// `dpi`, into a bitmap of `width` x `height`. Objects outside the rectangle
+    /// are not rasterized, so a small region of a busy page is cheap.
+    pub fn render_region(
+        &self,
+        dpi: f32,
+        left: i32,
+        top: i32,
+        width: i32,
+        height: i32,
+    ) -> Result<Bitmap<'lib>, PdfiumError> {
+        let scale = dpi / 72.0 * self.user_unit;
+        let full_width = (self.width() * scale).round() as i32;
+        let full_height = (self.height() * scale).round() as i32;
+
+        // SAFETY: as in `render_bitmap`, the page proves the PDFium lock is held.
+        let bitmap = unsafe { Bitmap::new(width, height) }?;
+        bitmap.fill_rect(0, 0, width, height, 0xFFFFFFFF);
+        let flags = (pdfium_sys::FPDF_ANNOT | pdfium_sys::FPDF_PRINTING) as i32;
+        self.render_into(&bitmap, -left, -top, full_width, full_height, None, flags);
+        Ok(bitmap)
+    }
+
     /// Tell the form-fill environment this page is open: `FORM_OnAfterLoadPage`
     /// then the page's `/AA` open action. The returned guard runs the close
     /// action and `FORM_OnBeforeClosePage` when dropped, so drop it before the

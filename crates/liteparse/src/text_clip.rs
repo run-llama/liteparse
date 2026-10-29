@@ -170,7 +170,7 @@ fn valid_matrix(m: &Matrix) -> bool {
 
 /// Accept exactly one closed rectangle, never the bounding box of a compound
 /// path (which can contain holes). Rotated/sheared non-axis-aligned clips fail open.
-fn rectangle(path: &[RawPathSegment], parent: &Matrix) -> Option<RectF> {
+pub(crate) fn rectangle(path: &[RawPathSegment], parent: &Matrix) -> Option<RectF> {
     if !matches!(path.len(), 4 | 5) || !path.last()?.close || !valid_matrix(parent) {
         return None;
     }
