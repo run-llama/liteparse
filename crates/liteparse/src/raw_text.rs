@@ -93,6 +93,10 @@ pub struct RawTextItem {
     pub angle_radians: f32,
     /// Sum of the glyphs' advance widths in text space.
     pub text_width: f32,
+    /// One advance width per glyph, parallel to `char_codes`, in the units of
+    /// `text_width` (0 where the font reports none). `Some` only from
+    /// [`extract_raw_text_items_with_glyph_widths`].
+    pub glyph_widths: Option<Vec<f32>>,
     pub x: f32,
     pub y: f32,
     pub width: f32,
@@ -155,6 +159,27 @@ pub fn extract_raw_text_items(
     view_box: &RectF,
     glyph_resolver: Option<&dyn GlyphResolver>,
 ) -> Vec<RawTextItem> {
+    extract(page, text_page, view_box, glyph_resolver, false)
+}
+
+/// [`extract_raw_text_items`] that also fills [`RawTextItem::glyph_widths`], for
+/// callers that split an item's box per glyph.
+pub fn extract_raw_text_items_with_glyph_widths(
+    page: &Page,
+    text_page: &TextPage,
+    view_box: &RectF,
+    glyph_resolver: Option<&dyn GlyphResolver>,
+) -> Vec<RawTextItem> {
+    extract(page, text_page, view_box, glyph_resolver, true)
+}
+
+fn extract(
+    page: &Page,
+    text_page: &TextPage,
+    view_box: &RectF,
+    glyph_resolver: Option<&dyn GlyphResolver>,
+    keep_glyph_widths: bool,
+) -> Vec<RawTextItem> {
     let char_count = text_page.char_count();
     let page_rotation = page.rotation();
     let mut chunks = CharInfoChunks::new(text_page);
@@ -176,6 +201,7 @@ pub fn extract_raw_text_items(
             run,
             glyph_resolver,
             &mut outline_cache,
+            keep_glyph_widths,
         ) {
             items.push(item);
         }
@@ -321,6 +347,7 @@ fn build_item(
     glyphs: &[Glyph],
     glyph_resolver: Option<&dyn GlyphResolver>,
     outline_cache: &mut OutlineSupportCache,
+    keep_glyph_widths: bool,
 ) -> Option<RawTextItem> {
     let first = glyphs.first()?;
     let first_char = text_page.char_at_unchecked(first.index);
@@ -330,7 +357,6 @@ fn build_item(
         .and_then(|obj| unsafe { Font::from_text_object(obj) });
 
     let mut bounds = first.loose;
-    let mut text_width = 0.0f32;
     let mut font_name = String::new();
     let mut font_ascent = 0.0f32;
     let mut font_descent = 0.0f32;
@@ -342,9 +368,6 @@ fn build_item(
         font_descent = font.descent(font_size).unwrap_or(0.0);
         font_is_embedded = font.is_embedded();
         font_is_buggy = font_is_embedded && is_buggy_font(&font_name, font.font_type());
-        if let Some(width) = font.glyph_width_from_char_code(first.char_code, font_size) {
-            text_width += width;
-        }
     }
     let font_height = if first.text_object.is_some() {
         let scale_y = first_char
@@ -361,17 +384,23 @@ fn build_item(
         bounds.top = bounds.top.min(glyph.loose.top);
         bounds.right = bounds.right.max(glyph.loose.right);
         bounds.bottom = bounds.bottom.max(glyph.loose.bottom);
-        if let Some(font) = &font {
-            let width = if glyph.generated {
+    }
+    // The first glyph is always read by char code, as `text_width` has always been.
+    let widths: Vec<f32> = glyphs
+        .iter()
+        .enumerate()
+        .map(|(i, glyph)| {
+            let font = font.as_ref()?;
+            if i > 0 && glyph.generated {
                 font.glyph_width(glyph.unicode, font_size)
             } else {
                 font.glyph_width_from_char_code(glyph.char_code, font_size)
-            };
-            if let Some(width) = width {
-                text_width += width;
             }
-        }
-    }
+        })
+        .map(|width| width.unwrap_or(0.0))
+        .collect();
+    // Summed in glyph order; adding a 0 for a missing width leaves the sum unchanged.
+    let text_width = widths.iter().fold(0.0f32, |sum, width| sum + width);
     // A control / private-use decode in an embedded font flags the whole item.
     // `unicode` is 0 for an unmapped glyph, so those count too.
     if font_is_embedded && !font_is_buggy {
@@ -422,6 +451,7 @@ fn build_item(
         glyph_names,
         angle_radians: first.angle,
         text_width,
+        glyph_widths: keep_glyph_widths.then_some(widths),
         x: bounds.left,
         y: bounds.top,
         width: bounds.right - bounds.left,
@@ -1018,6 +1048,7 @@ mod tests {
             glyph_names: None,
             angle_radians: angle,
             text_width: 0.0,
+            glyph_widths: None,
             x,
             y,
             width,

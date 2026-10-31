@@ -989,6 +989,45 @@ async fn test_ocr_rounds_fill_across_sparse_pages() {
 /// items add up to the page's char count minus the generated line breaks it
 /// drops, items keep their trailing whitespace, and a generated glyph only
 /// ever closes an item.
+/// The opt-in entry point returns the same items plus one advance per glyph, and
+/// those advances are the ones `text_width` sums.
+#[test]
+#[serial]
+fn glyph_widths_are_opt_in_and_sum_to_text_width() {
+    use liteparse::{extract_raw_text_items, extract_raw_text_items_with_glyph_widths};
+
+    let lib = pdfium::Library::init();
+    let document = lib
+        .load_document("../../integration_tests_data/sample.pdf", None)
+        .expect("sample.pdf loads");
+    let page = document.page(0).expect("page 0 loads");
+    let text_page = page.text().expect("text page loads");
+    let view_box = page.view_box().expect("page has a bounding box");
+
+    let plain = extract_raw_text_items(&page, &text_page, &view_box, None);
+    let with_widths = extract_raw_text_items_with_glyph_widths(&page, &text_page, &view_box, None);
+    assert!(plain.iter().all(|item| item.glyph_widths.is_none()));
+    assert_eq!(plain.len(), with_widths.len());
+
+    let mut uneven = false;
+    for (a, b) in plain.iter().zip(&with_widths) {
+        let widths = b.glyph_widths.as_ref().expect("opt-in fills glyph_widths");
+        assert_eq!(widths.len(), b.char_codes.len());
+        let sum = widths.iter().fold(0.0f32, |sum, w| sum + w);
+        assert_eq!(sum.to_bits(), b.text_width.to_bits(), "{:?}", b.text);
+        let mut b = b.clone();
+        b.glyph_widths = None;
+        assert_eq!(a, &b, "opt-in changes nothing else");
+        uneven |= widths
+            .windows(2)
+            .any(|w| w[0] > 0.0 && w[1] > 0.0 && w[0] != w[1]);
+    }
+    assert!(
+        uneven,
+        "a proportional font gives glyphs different advances"
+    );
+}
+
 #[test]
 #[serial]
 fn raw_text_items_account_for_every_glyph() {
