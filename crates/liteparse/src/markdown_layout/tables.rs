@@ -808,6 +808,41 @@ fn is_alpha_dominant(text: &str) -> bool {
     letters > digits
 }
 
+/// Lines inside a run's span that none of its cells or interstitials took a
+/// word from. The classifier skips the span, so these would be dropped. A
+/// line that shares even one word with the table stays with it, so nothing
+/// the table already shows is repeated.
+pub(super) fn lines_left_out(run: &TableRun, lines: &[ProjectedLine]) -> Vec<usize> {
+    let Block::Table { header, rows } = &run.block else {
+        return Vec::new();
+    };
+    let mut words: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for cell in header
+        .iter()
+        .flatten()
+        .chain(rows.iter().flatten())
+        .chain(&run.interstitials)
+    {
+        for w in cell.text.split_whitespace() {
+            *words.entry(w).or_default() += 1;
+        }
+    }
+    (run.start..run.end.min(lines.len()))
+        .filter(|&i| {
+            let mut taken = false;
+            for w in lines[i].text.split_whitespace() {
+                if let Some(n) = words.get_mut(w)
+                    && *n > 0
+                {
+                    *n -= 1;
+                    taken = true;
+                }
+            }
+            !taken && !lines[i].text.trim().is_empty()
+        })
+        .collect()
+}
+
 /// Measurement-value shape: a decimal number ("2.28"), currency/percent,
 /// comma-grouped number ("1,240"), or a dash placeholder ("--" / "—").
 /// Bare integers (years, codes) deliberately do NOT match — they appear in
@@ -7720,5 +7755,27 @@ mod tests {
             &[],
         ));
         assert!(md.contains(r"Dose \*as written\*"), "{md}");
+    }
+
+    #[test]
+    fn lines_left_out_names_lines_no_cell_took() {
+        use super::super::test_helpers::line;
+        let lines = vec![
+            line("Model Order No.", 10.0, 10.0, 12.0, 10.0),
+            line("50D 659249", 10.0, 25.0, 12.0, 10.0),
+            line("Integral arms.", 10.0, 40.0, 12.0, 10.0),
+        ];
+        let run = TableRun {
+            interstitials: Vec::new(),
+            start: 0,
+            end: 3,
+            body_start: 0,
+            bbox: None,
+            block: Block::Table {
+                header: Some(vec!["Model".into(), "Order No.".into()]),
+                rows: vec![vec!["50D".into(), "659249".into()]],
+            },
+        };
+        assert_eq!(lines_left_out(&run, &lines), vec![2]);
     }
 }

@@ -1,6 +1,6 @@
 use crate::types::{OutlineTarget, ParsedPage, ProjectedLine, Rect};
 
-use super::blocks::{Block, PositionedBlock, paragraph_from_accum};
+use super::blocks::{Block, Cell, PositionedBlock, paragraph_from_accum};
 use super::headings::{
     HEADING_MAX_TEXT_CHARS, MAX_HEADING_LEVELS, heading_level_for, heading_size_of,
     is_caption_line, is_toc_title, looks_like_bold_heading, looks_like_numbered_bold_heading,
@@ -605,7 +605,14 @@ fn classify_region(
             state.flush_paragraph(&mut blocks);
             state.flush_code(&mut blocks);
             state.reset_list();
-            let run = table_iter.next().unwrap();
+            let mut run = table_iter.next().unwrap();
+            // Lines in the span that no cell took a word from (a note under
+            // the table, a column the grid left out) go the same way.
+            let left_out = super::tables::lines_left_out(&run, lines);
+            run.interstitials.extend(left_out.into_iter().map(|i| Cell {
+                text: lines[i].text.clone(),
+                bbox: Some(lines[i].bbox.clone()),
+            }));
             // Prose lines the run stepped over between its header and body
             // sit inside `[run.start, run.end)`, which this loop skips — emit
             // each as its own paragraph ahead of the table so the text isn't
