@@ -553,7 +553,14 @@ fn classify_region(
     let ruled_runs = detect_ruled_tables(lines, rule_segments, page.page_width, page.page_height);
     let borderless_runs = precomputed_tables
         .unwrap_or_else(|| detect_tables_banded(lines, rule_segments, page.page_height));
-    let table_runs = merge_table_runs(ruled_runs, borderless_runs);
+    // A table that carries under 70% of the text of the lines it spans loses
+    // the rest, since the loop below skips the span. Handing back lines no
+    // cell took a word from cannot help when every line shares a word with
+    // the cells, so such a run is read as text: every value kept, no grid.
+    let table_runs: Vec<_> = merge_table_runs(ruled_runs, borderless_runs)
+        .into_iter()
+        .filter(|run| super::tables::run_text_kept(run, lines).is_none_or(|kept| kept >= 0.7))
+        .collect();
 
     // Region-wide pre-pass: which line indices carry a lettered/roman marker
     // (`a.`, `i.`) that belongs to a confirmed sequential list run. Only these
