@@ -144,9 +144,6 @@ func resolveCLI() string {
 	if v := os.Getenv("LITEPARSE_CLI_PATH"); v != "" {
 		return v
 	}
-	if p, err := exec.LookPath("lit"); err == nil {
-		return p
-	}
 	if p := buildFromSource(); p != "" {
 		return p
 	}
@@ -159,6 +156,13 @@ func resolveCLI() string {
 		"../../target/debug/lit",
 	} {
 		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	// Fall back to a lit on PATH only if it looks like the Rust CLI.
+	if p, err := exec.LookPath("lit"); err == nil {
+		out, _ := exec.Command(p, "parse", "--help").Output()
+		if strings.Contains(string(out), "extract-xfa-packets") {
 			return p
 		}
 	}
@@ -375,6 +379,7 @@ func (c *Client) runParse(ctx context.Context, file string) (ParseResult, error)
 			Text       string     `json:"text"`
 			Markdown   string     `json:"markdown"`
 			TextItems  []TextItem `json:"text_items"`
+			TextItemsC []TextItem `json:"textItems"`
 			Complexity *any       `json:"complexity"`
 		} `json:"pages"`
 	}
@@ -386,14 +391,19 @@ func (c *Client) runParse(ctx context.Context, file string) (ParseResult, error)
 	var textBuf strings.Builder
 	for _, p := range cli.Pages {
 		page := ParsedPage{
-			Page:       p.Page,
-			PageNum:    p.Page,
-			PageLabel:  p.PageLabel,
-			Width:      p.Width,
-			Height:     p.Height,
-			Text:       p.Text,
-			Markdown:   p.Markdown,
-			TextItems:  p.TextItems,
+			Page:      p.Page,
+			PageNum:   p.Page,
+			PageLabel: p.PageLabel,
+			Width:     p.Width,
+			Height:    p.Height,
+			Text:      p.Text,
+			Markdown:  p.Markdown,
+			TextItems: func() []TextItem {
+				if len(p.TextItems) > 0 {
+					return p.TextItems
+				}
+				return p.TextItemsC
+			}(),
 			Complexity: p.Complexity,
 		}
 		res.Pages = append(res.Pages, page)

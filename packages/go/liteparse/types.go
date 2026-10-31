@@ -4,6 +4,34 @@ import "encoding/json"
 
 // TextItem represents an extracted text item.
 type TextItem struct {
+	Text                   string    `json:"-"`
+	X                      float64   `json:"-"`
+	Y                      float64   `json:"-"`
+	Width                  float64   `json:"-"`
+	Height                 float64   `json:"-"`
+	Rotation               float64   `json:"-"`
+	FontName               *string   `json:"-"`
+	FontSize               *float64  `json:"-"`
+	Confidence             *float64  `json:"-"`
+	FontHeight             *float64  `json:"-"`
+	FontAscent             *float64  `json:"-"`
+	FontDescent            *float64  `json:"-"`
+	FontWeight             *int      `json:"-"`
+	TextWidth              *float64  `json:"-"`
+	FontIsBuggy            bool      `json:"-"`
+	MCID                   *int      `json:"-"`
+	FillColor              *string   `json:"-"`
+	StrokeColor            *string   `json:"-"`
+	CharCodes              []uint32  `json:"-"`
+	TrailingSpaceGenerated bool      `json:"-"`
+	Strike                 bool      `json:"-"`
+	Link                   *string   `json:"-"`
+	Words                  []WordBox `json:"-"`
+	// exported JSON fields are handled via custom marshal/unmarshal
+}
+
+// We keep JSON tags via a parallel raw struct.
+type textItemRaw struct {
 	Text                   string    `json:"text"`
 	X                      float64   `json:"x"`
 	Y                      float64   `json:"y"`
@@ -27,6 +55,106 @@ type TextItem struct {
 	Strike                 bool      `json:"strike"`
 	Link                   *string   `json:"link"`
 	Words                  []WordBox `json:"words"`
+
+	// camelCase (Node CLI)
+	TextItemsCamel     string   `json:"-"`
+	FontNameCamel      *string  `json:"fontName"`
+	FontSizeCamel      *float64 `json:"fontSize"`
+	FontHeightCamel    *float64 `json:"fontHeight"`
+	FontWeightCamel    *int     `json:"fontWeight"`
+	TextWidthCamel     *float64 `json:"textWidth"`
+	MCIDCamel          *int     `json:"mcid"`
+	FillColorCamel     *string  `json:"fillColor"`
+	StrokeColorCamel   *string  `json:"strokeColor"`
+	CharCodesCamel     []uint32 `json:"charCodes"`
+	TrailingSpaceCamel bool     `json:"trailingSpaceGenerated"`
+}
+
+func (t *TextItem) UnmarshalJSON(data []byte) error {
+	var raw textItemRaw
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	t.Text = raw.Text
+	t.X = raw.X
+	t.Y = raw.Y
+	t.Width = raw.Width
+	t.Height = raw.Height
+	t.Rotation = raw.Rotation
+	t.FontName = raw.FontName
+	if t.FontName == nil {
+		t.FontName = raw.FontNameCamel
+	}
+	t.FontSize = raw.FontSize
+	if t.FontSize == nil {
+		t.FontSize = raw.FontSizeCamel
+	}
+	t.Confidence = raw.Confidence
+	t.FontHeight = raw.FontHeight
+	if t.FontHeight == nil {
+		t.FontHeight = raw.FontHeightCamel
+	}
+	t.FontAscent = raw.FontAscent
+	t.FontDescent = raw.FontDescent
+	t.FontWeight = raw.FontWeight
+	if t.FontWeight == nil {
+		t.FontWeight = raw.FontWeightCamel
+	}
+	t.TextWidth = raw.TextWidth
+	if t.TextWidth == nil {
+		t.TextWidth = raw.TextWidthCamel
+	}
+	t.FontIsBuggy = raw.FontIsBuggy
+	t.MCID = raw.MCID
+	if t.MCID == nil {
+		t.MCID = raw.MCIDCamel
+	}
+	t.FillColor = raw.FillColor
+	if t.FillColor == nil {
+		t.FillColor = raw.FillColorCamel
+	}
+	t.StrokeColor = raw.StrokeColor
+	if t.StrokeColor == nil {
+		t.StrokeColor = raw.StrokeColorCamel
+	}
+	t.CharCodes = raw.CharCodes
+	if t.CharCodes == nil {
+		t.CharCodes = raw.CharCodesCamel
+	}
+	t.TrailingSpaceGenerated = raw.TrailingSpaceGenerated || raw.TrailingSpaceCamel
+	t.Strike = raw.Strike
+	t.Link = raw.Link
+	t.Words = raw.Words
+	return nil
+}
+
+func (t TextItem) MarshalJSON() ([]byte, error) {
+	raw := textItemRaw{
+		Text:                   t.Text,
+		X:                      t.X,
+		Y:                      t.Y,
+		Width:                  t.Width,
+		Height:                 t.Height,
+		Rotation:               t.Rotation,
+		FontName:               t.FontName,
+		FontSize:               t.FontSize,
+		Confidence:             t.Confidence,
+		FontHeight:             t.FontHeight,
+		FontAscent:             t.FontAscent,
+		FontDescent:            t.FontDescent,
+		FontWeight:             t.FontWeight,
+		TextWidth:              t.TextWidth,
+		FontIsBuggy:            t.FontIsBuggy,
+		MCID:                   t.MCID,
+		FillColor:              t.FillColor,
+		StrokeColor:            t.StrokeColor,
+		CharCodes:              t.CharCodes,
+		TrailingSpaceGenerated: t.TrailingSpaceGenerated,
+		Strike:                 t.Strike,
+		Link:                   t.Link,
+		Words:                  t.Words,
+	}
+	return json.Marshal(raw)
 }
 
 // WordBox represents a word bounding box.
@@ -38,55 +166,117 @@ type WordBox struct {
 	Height float64 `json:"height"`
 }
 
-// ParseBatch holds a batch parse result.
-type ParseBatch struct {
-	StartPage  int
-	EndPage    int
-	TotalPages int
-	Result     ParseResult
-}
-
-// ScreenshotResult holds a rendered page screenshot.
-type ScreenshotResult struct {
-	PageNum    int    `json:"page_num"`
-	Width      int    `json:"-"`
-	Height     int    `json:"-"`
-	ImageBytes []byte `json:"-"`
-}
-
 // ParsedPage represents a parsed page.
 type ParsedPage struct {
 	Page       int         `json:"-"`
+	PageNum    int         `json:"-"`
+	PageLabel  *string     `json:"-"`
+	Width      float64     `json:"-"`
+	Height     float64     `json:"-"`
+	Text       string      `json:"-"`
+	Markdown   string      `json:"-"`
+	TextItems  []TextItem  `json:"-"`
+	Complexity interface{} `json:"-"`
+}
+
+type parsedPageRaw struct {
+	Page       int         `json:"page"`
 	PageNum    int         `json:"page_num"`
+	PageNumber int         `json:"page_number"`
 	PageLabel  *string     `json:"page_label"`
 	Width      float64     `json:"width"`
 	Height     float64     `json:"height"`
 	Text       string      `json:"text"`
 	Markdown   string      `json:"markdown"`
 	TextItems  []TextItem  `json:"text_items"`
+	TextItemsC []TextItem  `json:"textItems"`
 	Complexity interface{} `json:"complexity"`
 }
 
-// Note: CLI JSON uses "page" not "page_num". Add custom unmarshal via alias? We'll handle with json tags page.
-// We'll define separate CLI struct? Instead adjust tags.
+func (p *ParsedPage) UnmarshalJSON(data []byte) error {
+	var raw parsedPageRaw
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw.Page != 0 {
+		p.Page = raw.Page
+	} else if raw.PageNum != 0 {
+		p.Page = raw.PageNum
+	} else {
+		p.Page = raw.PageNumber
+	}
+	p.PageNum = p.Page
+	p.PageLabel = raw.PageLabel
+	p.Width = raw.Width
+	p.Height = raw.Height
+	p.Text = raw.Text
+	p.Markdown = raw.Markdown
+	if len(raw.TextItems) > 0 {
+		p.TextItems = raw.TextItems
+	} else {
+		p.TextItems = raw.TextItemsC
+	}
+	p.Complexity = raw.Complexity
+	return nil
+}
+
+func (p ParsedPage) MarshalJSON() ([]byte, error) {
+	raw := parsedPageRaw{
+		Page:       p.Page,
+		PageLabel:  p.PageLabel,
+		Width:      p.Width,
+		Height:     p.Height,
+		Text:       p.Text,
+		Markdown:   p.Markdown,
+		TextItems:  p.TextItems,
+		Complexity: p.Complexity,
+	}
+	return json.Marshal(raw)
+}
 
 // ParseResult represents parse output.
 type ParseResult struct {
-	TotalPages int          `json:"total_pages"`
-	Pages      []ParsedPage `json:"pages"`
+	TotalPages int          `json:"-"`
+	Pages      []ParsedPage `json:"-"`
 	Text       string       `json:"-"`
 }
 
-// LayoutComplexity holds layout signals.
-type LayoutComplexity struct {
-	ColumnCount        int      `json:"column_count"`
-	RuledTableCount    int      `json:"ruled_table_count"`
-	RuledTableCoverage float64  `json:"ruled_table_coverage"`
-	TextTableRunCount  int      `json:"text_table_run_count"`
-	FigureCount        int      `json:"figure_count"`
-	FigureCoverage     float64  `json:"figure_coverage"`
-	IsComplex          bool     `json:"is_complex"`
-	Reasons            []string `json:"reasons"`
+type parseResultRaw struct {
+	TotalPages  int          `json:"total_pages"`
+	TotalPages2 int          `json:"totalPages"`
+	Pages       []ParsedPage `json:"pages"`
+}
+
+func (r *ParseResult) UnmarshalJSON(data []byte) error {
+	var raw parseResultRaw
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw.TotalPages != 0 {
+		r.TotalPages = raw.TotalPages
+	} else {
+		r.TotalPages = raw.TotalPages2
+	}
+	r.Pages = raw.Pages
+	if r.TotalPages == 0 {
+		r.TotalPages = len(r.Pages)
+	}
+	var b string
+	for _, p := range r.Pages {
+		b += p.Text + "\n"
+	}
+	r.Text = b
+	return nil
+}
+
+func (r ParseResult) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		TotalPages int          `json:"total_pages"`
+		Pages      []ParsedPage `json:"pages"`
+	}{
+		TotalPages: r.TotalPages,
+		Pages:      r.Pages,
+	})
 }
 
 // PageComplexity holds per-page complexity signals.
@@ -107,35 +297,30 @@ type PageComplexity struct {
 	Layout               LayoutComplexity `json:"layout"`
 }
 
-// Ensure ParsedPage unmarshals "page" key.
-func (p *ParsedPage) UnmarshalJSON(data []byte) error {
-	type alias ParsedPage
-	aux := struct {
-		Page int `json:"page"`
-		alias
-	}{}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	p.PageNum = aux.Page
-	p.Page = aux.Page
-	p.PageLabel = aux.PageLabel
-	p.Width = aux.Width
-	p.Height = aux.Height
-	p.Text = aux.Text
-	p.Markdown = aux.Markdown
-	p.TextItems = aux.TextItems
-	p.Complexity = aux.Complexity
-	return nil
+// LayoutComplexity holds layout signals.
+type LayoutComplexity struct {
+	ColumnCount        int      `json:"column_count"`
+	RuledTableCount    int      `json:"ruled_table_count"`
+	RuledTableCoverage float64  `json:"ruled_table_coverage"`
+	TextTableRunCount  int      `json:"text_table_run_count"`
+	FigureCount        int      `json:"figure_count"`
+	FigureCoverage     float64  `json:"figure_coverage"`
+	IsComplex          bool     `json:"is_complex"`
+	Reasons            []string `json:"reasons"`
 }
 
-func (p ParsedPage) MarshalJSON() ([]byte, error) {
-	type alias ParsedPage
-	return json.Marshal(struct {
-		Page int `json:"page"`
-		alias
-	}{
-		Page:  p.PageNum,
-		alias: alias(p),
-	})
+// ScreenshotResult holds a rendered page screenshot.
+type ScreenshotResult struct {
+	PageNum    int    `json:"page_num"`
+	Width      int    `json:"-"`
+	Height     int    `json:"-"`
+	ImageBytes []byte `json:"-"`
+}
+
+// ParseBatch holds a batch parse result.
+type ParseBatch struct {
+	StartPage  int
+	EndPage    int
+	TotalPages int
+	Result     ParseResult
 }
