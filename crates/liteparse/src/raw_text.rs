@@ -385,7 +385,7 @@ fn build_item(
         bounds.right = bounds.right.max(glyph.loose.right);
         bounds.bottom = bounds.bottom.max(glyph.loose.bottom);
     }
-    // The first glyph is always read by char code, as `text_width` has always been.
+    // Generated glyphs after the first are read by unicode; every other glyph by char code.
     let widths: Vec<f32> = glyphs
         .iter()
         .enumerate()
