@@ -2,10 +2,11 @@
 
 Utilities for generating and evaluating datasets for PDF parsing performance. Compares text extraction quality across multiple PDF parsers using LLM-based QA evaluation.
 
-For local experiments that score the same output they time and compare CPU/RAM
-against current and historical main, see the dependency-free
-[accuracy/resource pilot](../benchmarks/benchcoding/README.md). It is separate
-from the LLM-based evaluation below and does not require API keys.
+For parsing-accuracy experiments, use the
+[ParseBench accuracy/resource adapter](../benchmarks/benchcoding/PARSEBENCH.md).
+It scores the same output it times, supports cached OCR replay, and compares
+CPU/RAM against current and historical main. The legacy LLM-based QA evaluation
+below is separate and is not used as the parsing-accuracy acceptance gate.
 
 ## Setup
 

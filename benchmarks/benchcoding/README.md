@@ -1,5 +1,11 @@
 # Local accuracy and resource experiments
 
+**Use the [ParseBench adapter](PARSEBENCH.md) for parsing accuracy experiments.**
+It combines upstream rule-based scoring with single-pass Markdown/layout
+extraction, optional fixed-OCR replay, and content-addressed score caching.
+The standard-library runner below remains a small infrastructure smoke harness
+and supplies the shared resource-comparison/reporting code.
+
 This is a private, local pilot. Nothing uploads evidence, dispatches remote jobs,
 creates issues, or publishes a board. It uses Python 3.10+ standard-library tools
 on Linux/macOS and a compiled `lit` CLI. No Python parser/LLM dependencies or API
@@ -192,8 +198,8 @@ runner is needed before external/OCR workloads or untrusted participation.
 1. Review and version a representative accuracy corpus, including full-text,
    table, reading-order and structural ground truth.
 2. Establish a fixed runner, collect current main, and accumulate daily history.
-3. Add established benchmark scoring adapters and whole-document regression
-   validation.
+3. Use the ParseBench adapter for established accuracy metrics; add separate
+   uncached whole-document regression validation before acceptance.
 4. Add isolated, credential-free Linux execution with process-tree accounting
    and enforced limits before accepting untrusted candidates.
 5. Add experiment records (hypotheses, costs, failed attempts) and a persistent

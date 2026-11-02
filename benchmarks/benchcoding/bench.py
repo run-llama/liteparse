@@ -163,6 +163,12 @@ def aggregate_accuracy(cases: list[dict]) -> dict:
     return {"overall": statistics.mean(means.values()), "categories": means}
 
 
+def accuracy_for_result(result: dict) -> dict:
+    # ParseBench scores a document/category once even when the resource budget
+    # is checked separately for every page or multiple categories share a PDF.
+    return aggregate_accuracy(result.get("accuracy_cases", result["cases"]))
+
+
 def run(args):
     if args.repetitions < 3 or args.timeout <= 0 or not math.isfinite(args.timeout):
         raise ValueError("Use at least 3 repetitions and a finite positive timeout")
@@ -236,12 +242,22 @@ def validate_result(result: dict):
             or len({s["output_sha256"] for s in [case["warmup"], *case["samples"]]}) != 1
         ):
             raise ValueError("Successful status contradicts sample evidence")
-    if result["accuracy"] != aggregate_accuracy(result["cases"]):
+    if "accuracy_cases" in result:
+        units = result["accuracy_cases"]
+        if not units or len({u["id"] for u in units}) != len(units):
+            raise ValueError("Missing or duplicate accuracy units")
+        for unit in units:
+            if not unit["checks"] or not set(unit["resource_ids"]).issubset({c["id"] for c in result["cases"]}):
+                raise ValueError("Invalid accuracy unit resource mapping")
+            for check in unit["checks"]:
+                if not math.isfinite(check["score"]) or not 0 <= check["score"] <= 1:
+                    raise ValueError("Invalid accuracy unit score")
+    if result["accuracy"] != accuracy_for_result(result):
         raise ValueError("Accuracy does not match per-page evidence")
 
 
 def valid(result: dict) -> bool:
-    return all(c["status"] == "ok" for c in result["cases"])
+    return all(c["status"] == "ok" for c in result["cases"] + result.get("accuracy_cases", []))
 
 
 def total_cpu(result: dict) -> float:
