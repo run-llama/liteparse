@@ -166,3 +166,77 @@ normalization, layout page numbering and score-cache invalidation. The Rust
 tests cover OCR cache key inputs, successful replay and strict cache misses.
 The existing local-runner limitations (post-run resource gates, no sandbox,
 operator-pinned hardware/dependencies) still apply.
+
+## GitHub Actions
+
+[`.github/workflows/benchcoding-validation.yml`](../../.github/workflows/benchcoding-validation.yml)
+packages the benchmark validation into a manual `workflow_dispatch` job. It
+complements the repository's existing Rust/binding CI; it does not replace it.
+There are no push, PR, scheduled, or leaderboard-publishing triggers.
+
+Inputs:
+
+| Input | Default | Purpose |
+| --- | --- | --- |
+| `suite` | `smoke` | Pinned small official test split, or pinned full ParseBench dataset |
+| `runner_label` | `ubuntu-24.04` | Hosted validation or a dedicated Linux self-hosted runner label |
+| `enforce_resources` | `false` | Make resource results acceptance gates rather than diagnostics |
+
+The job installs pinned Python/evaluator and Rust versions, runs Python tests and
+the Rust worker test, builds the same worker against current main and the chosen
+candidate, verifies/downloads the dataset, primes both workers' OCR requests,
+then measures both against the same frozen snapshot. It checks every recorded
+output against every replay repetition, computes ParseBench accuracy, and fails
+on category regressions. A separate no-OCR diagnostic is also collected; empty
+scan pages there do not invalidate the OCR-enabled profile. Model weights are
+identified by the actual SHA-256 of the system English traineddata file.
+
+This is the fixed-OCR track: changes to `Cargo.lock` or the OCR engine sources
+are rejected by this workflow. They need a separate uncached validation profile
+before they can be assessed fairly. It never silently uses a candidate's changed
+OCR engine to redefine the fixed recognition input.
+
+Dataset downloads are pinned to full Hugging Face commit hashes and existing
+cached files are checksum-verified. Rust dependencies/builds, OCR responses and
+scoring results use Actions caches. Parser timings themselves are always fresh.
+JSON evidence, page outputs, stderr and the comparison report are uploaded even
+when validation fails, with 30-day artifact retention. The human-readable report
+is also added to the job summary. No PR comments or external messages are sent.
+Use a **private repository/mirror** while this work remains private: workflow
+artifacts and logs follow repository access controls.
+
+### Timing gates and main history
+
+Hosted jobs run in fresh VMs, so their cross-run hardware identity and timings
+are unsuitable for the strict rolling resource gate. The default workflow
+reports timing decisions but only enforces execution/replay correctness and
+accuracy. An `inconclusive` timing result is explicitly not a speed acceptance.
+
+To enforce resource gates, provision a quiet Linux self-hosted runner with a
+unique label, select it, and configure the repository variable
+`BENCHCODING_HISTORY_DIR` to an absolute persistent directory owned by that
+runner. Use no other workloads on that machine. The workflow checks that it is
+self-hosted, serializes runs for the same runner label, and requires the history
+directory. Each successful main collection is archived there before candidate
+acceptance, including when a candidate later fails. Actions caches are not used
+as the authoritative main-history archive.
+
+Run validation regularly to accumulate history; no schedule is installed by
+this change. Resource enforcement refuses an archive with less than 29 days of
+**compatible** measurements within the trailing 30-day window. That span check
+is not proof of complete daily sampling: the owner must retain all daily runs.
+Changes to corpus, evaluator, OCR snapshot, dependencies or host invalidate old
+comparisons. Reestablish compatible history (or rerun historical revisions under
+the new fixed protocol) before enabling acceptance again. Fresh dependencies or
+OS updates on a self-hosted machine can therefore make a run inconclusive or
+ineligible; using the same label alone does not make environments equivalent.
+
+The workflow currently assumes an Ubuntu-compatible runner with `apt-get`,
+passwordless `sudo`, and `rustup`, using the system English Tesseract data at
+`/usr/share/tesseract-ocr/5/tessdata`. Provisioning a dedicated runner is separate
+from adding this workflow.
+
+GitHub requires a `workflow_dispatch` workflow to exist on the repository's
+[default branch](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch)
+before it can be dispatched. These files remain local until explicitly
+published; adding them to this branch does not start any remote runs.

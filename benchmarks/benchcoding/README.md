@@ -204,3 +204,7 @@ runner is needed before external/OCR workloads or untrusted participation.
    and enforced limits before accepting untrusted candidates.
 5. Add experiment records (hypotheses, costs, failed attempts) and a persistent
    board once the private evaluation loop is useful.
+
+Manual GitHub Actions validation (smoke/full dataset, caches, evidence artifacts,
+and optional dedicated-runner resource enforcement) is documented in
+[ParseBench: GitHub Actions](PARSEBENCH.md#github-actions).

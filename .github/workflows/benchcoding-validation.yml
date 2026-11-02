@@ -1,0 +1,158 @@
+name: ParseBench private validation
+
+# Deliberately manual: no PR, push, scheduled, or public-board publishing trigger.
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Frozen ParseBench dataset
+        type: choice
+        options: [smoke, full]
+        default: smoke
+      runner_label:
+        description: ubuntu-24.04 for validation, or a dedicated benchmark runner label
+        type: string
+        default: ubuntu-24.04
+      enforce_resources:
+        description: Require stable runner and at least 29 days of compatible retained main history
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchcoding-${{ inputs.runner_label }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ${{ inputs.runner_label }}
+    timeout-minutes: 360
+    env:
+      CARGO_TERM_COLOR: always
+      SUITE: ${{ inputs.suite }}
+      ENFORCE_RESOURCES: ${{ inputs.enforce_resources }}
+      RUNNER_LABEL: ${{ inputs.runner_label }}
+      HISTORY_DIR: ${{ vars.BENCHCODING_HISTORY_DIR }}
+      LLAMACLOUD_BENCH_LLM_NORMALIZATION: 'off'
+      TESSDATA_PREFIX: /usr/share/tesseract-ocr/5/tessdata
+    steps:
+      - name: Check out evaluator and candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+          persist-credentials: false
+      - name: Check out current main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: baseline
+          persist-credentials: false
+      - name: Check runner policy
+        shell: bash
+        run: |
+          if [[ "$ENFORCE_RESOURCES" == true ]]; then
+            if [[ "$RUNNER_ENVIRONMENT" != self-hosted || -z "$HISTORY_DIR" ]]; then
+              echo 'Resource acceptance requires a self-hosted runner and BENCHCODING_HISTORY_DIR.' >&2
+              exit 1
+            fi
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.10'
+          cache: pip
+          cache-dependency-path: candidate/benchmarks/benchcoding/requirements-parsebench.txt
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libtesseract-dev libleptonica-dev tesseract-ocr-eng
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+      - name: Install evaluator in an isolated environment
+        run: |
+          python -m venv "$RUNNER_TEMP/benchcoding-venv"
+          "$RUNNER_TEMP/benchcoding-venv/bin/pip" install pip==25.3
+          "$RUNNER_TEMP/benchcoding-venv/bin/pip" install -r candidate/benchmarks/benchcoding/requirements-parsebench.txt
+          echo "$RUNNER_TEMP/benchcoding-venv/bin" >> "$GITHUB_PATH"
+      - name: Resolve identities
+        id: identities
+        working-directory: candidate
+        run: |
+          echo "candidate_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "main_sha=$(git -C ../baseline rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "dataset_sha=$(python benchmarks/benchcoding/download_dataset.py --suite "$SUITE" --revision-only)" >> "$GITHUB_OUTPUT"
+          echo "model_sha=$(sha256sum "$TESSDATA_PREFIX/eng.traineddata" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Cache Rust dependencies and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/pdfium-rs
+            ~/.tesseract-rs
+            candidate/target
+            baseline/target
+          key: benchcoding-rust-v1-${{ runner.os }}-${{ runner.arch }}-1.95.0-${{ hashFiles('candidate/Cargo.lock', 'baseline/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            benchcoding-rust-v1-${{ runner.os }}-${{ runner.arch }}-1.95.0-${{ hashFiles('candidate/Cargo.lock', 'baseline/Cargo.lock') }}-
+      - name: Validate and build the fixed worker against both revisions
+        working-directory: candidate
+        run: |
+          # This track freezes OCR/dependencies. Such changes need an uncached
+          # validation profile instead of reusing recognition from another engine.
+          cmp Cargo.lock ../baseline/Cargo.lock
+          diff -qr crates/liteparse/src/ocr ../baseline/crates/liteparse/src/ocr
+          cargo +1.95.0 fmt --all -- --check
+          cargo +1.95.0 test --locked --release -p liteparse --example bench_page
+          cargo +1.95.0 build --locked --release -p liteparse --example bench_page
+          mkdir -p ../baseline/crates/liteparse/examples
+          cp crates/liteparse/examples/bench_page.rs ../baseline/crates/liteparse/examples/bench_page.rs
+          cargo +1.95.0 build --manifest-path ../baseline/Cargo.toml --locked --release -p liteparse --example bench_page
+          python -m unittest discover -s benchmarks/benchcoding/tests -v
+      - name: Cache pinned dataset
+        uses: actions/cache@v4
+        with:
+          path: candidate/benchmarks/benchcoding/results/cache/dataset
+          key: benchcoding-dataset-v1-${{ steps.identities.outputs.dataset_sha }}
+      - name: Download or verify dataset
+        working-directory: candidate
+        run: python benchmarks/benchcoding/download_dataset.py --suite "$SUITE" --output benchmarks/benchcoding/results/cache/dataset
+      - name: Cache OCR responses and deterministic scores
+        uses: actions/cache@v4
+        with:
+          path: |
+            candidate/benchmarks/benchcoding/results/cache/ocr
+            candidate/benchmarks/benchcoding/results/cache/scores
+          key: benchcoding-evidence-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.identities.outputs.dataset_sha }}-${{ steps.identities.outputs.model_sha }}-${{ steps.identities.outputs.main_sha }}-${{ hashFiles('candidate/benchmarks/benchcoding/requirements-parsebench.txt', 'candidate/crates/liteparse/examples/bench_page.rs') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            benchcoding-evidence-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.identities.outputs.dataset_sha }}-${{ steps.identities.outputs.model_sha }}-${{ steps.identities.outputs.main_sha }}-${{ hashFiles('candidate/benchmarks/benchcoding/requirements-parsebench.txt', 'candidate/crates/liteparse/examples/bench_page.rs') }}-
+      - name: Run ParseBench, verify replay, and compare main
+        working-directory: candidate
+        env:
+          MAIN_SHA: ${{ steps.identities.outputs.main_sha }}
+          CANDIDATE_SHA: ${{ steps.identities.outputs.candidate_sha }}
+          MODEL_SHA: ${{ steps.identities.outputs.model_sha }}
+        shell: bash
+        run: |
+          extra=()
+          if [[ -n "$HISTORY_DIR" ]]; then extra+=(--history-dir "$HISTORY_DIR"); fi
+          if [[ "$ENFORCE_RESOURCES" == true ]]; then extra+=(--enforce-resources); fi
+          python benchmarks/benchcoding/ci_validate.py \
+            --dataset benchmarks/benchcoding/results/cache/dataset \
+            --main-worker ../baseline/target/release/examples/bench_page \
+            --candidate-worker target/release/examples/bench_page \
+            --main-revision "$MAIN_SHA" --candidate-revision "$CANDIDATE_SHA" \
+            --runner-id "$RUNNER_LABEL" --environment-id ubuntu-rust1.95.0-python3.13.10 \
+            --ocr-id "tesseract-eng-$MODEL_SHA" \
+            --ocr-cache benchmarks/benchcoding/results/cache/ocr \
+            --score-cache benchmarks/benchcoding/results/cache/scores \
+            --output benchmarks/benchcoding/results/ci \
+            "${extra[@]}"
+      - name: Save validation evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parsebench-${{ inputs.suite }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidate/benchmarks/benchcoding/results/ci
+          if-no-files-found: warn
+          retention-days: 30
