@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "description": "Infrastructure smoke checks only, not a representative accuracy benchmark. Replace with reviewed ground truth before accepting product improvements.",
+  "cases": [
+    {
+      "id": "sample-page-1",
+      "pdf": "../../integration_tests_data/sample.pdf",
+      "page": 1,
+      "checks": [
+        {"kind": "contains", "category": "text", "text": "This is a simple PDF file. Fun fun fun."},
+        {"kind": "contains", "category": "text", "text": "Aenean est erat, tincidunt eget, venenatis quis, commodo at, quam."},
+        {"kind": "ordered", "category": "reading_order", "texts": ["Lorem ipsum dolor sit amet", "Nullam varius congue risus", "Aenean est erat"]}
+      ]
+    }
+  ]
+}

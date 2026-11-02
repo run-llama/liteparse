@@ -2,6 +2,11 @@
 
 Utilities for generating and evaluating datasets for PDF parsing performance. Compares text extraction quality across multiple PDF parsers using LLM-based QA evaluation.
 
+For local experiments that score the same output they time and compare CPU/RAM
+against current and historical main, see the dependency-free
+[accuracy/resource pilot](../benchmarks/benchcoding/README.md). It is separate
+from the LLM-based evaluation below and does not require API keys.
+
 ## Setup
 
 Requires Python 3.12+.
