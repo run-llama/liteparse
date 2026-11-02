@@ -15,6 +15,20 @@
     const resultEl = document.getElementById("result");
     const errorEl = document.getElementById("error");
 
+    function check(condition, message) {
+      if (!condition) throw new Error(message);
+    }
+
+    async function expectRejection(operation, message) {
+      try {
+        await operation();
+      } catch (error) {
+        check(String(error).includes(message), `Unexpected error: ${error}`);
+        return;
+      }
+      throw new Error(`Expected rejection: ${message}`);
+    }
+
     function deferred() {
       let resolve;
       const promise = new Promise((done) => { resolve = done; });
@@ -391,6 +405,8 @@
                 if (!String(outcome.error).includes("EXPECTED_OCR_PAGE_FAILURE")) {
                   throw new Error(`Expected a fatal OCR error (${label})`);
                 }
+                check(String(outcome.error).includes("OCR failed for all 3 page(s): ocrEngine.recognize rejected:"),
+                  "Final-only parsing changed the upstream OCR error format");
               } else {
                 if (outcome.error) throw new Error(`Unexpected rejection (${label}): ${outcome.error}`);
                 const pages = outcome.result.pages;
@@ -408,6 +424,194 @@
         }
       }
 
+      status.textContent = "testing incremental OCR pages";
+      const pageOptions = {
+        ocrEnabled: true, outputFormat: "json", dpi: 72, quiet: true,
+        extractBlocks: true, extractTextMetadata: true, emitWordBoxes: true,
+      };
+      const pageWords = (width) => [{
+        text: `PAGE_${width - 71}_TEXT`, bbox: [4, 4, 40, 24], confidence: 0.99,
+      }];
+      let pageEventCount = 0;
+      for (const numWorkers of [1, 2]) {
+        const previews = [];
+        const startedPages = [];
+        let finished = false;
+        let releaseFirst;
+        const firstPageGate = new Promise((resolvePromise) => { releaseFirst = resolvePromise; });
+        const incrementalParser = new LiteParse({
+          ...pageOptions, numWorkers,
+          ocrEngine: {
+            async recognize(_image, width) {
+              startedPages.push(width - 71);
+              if (numWorkers === 2 && width === 72) await firstPageGate;
+              return pageWords(width);
+            },
+          },
+          onOcrPage(page) {
+            check(!finished, "Page callback arrived after parse completion");
+            check(page.text.includes(`PAGE_${page.pageNum}_TEXT`), "Page callback has no merged OCR text");
+            check(page.blocks === undefined && page.complexity === undefined && page.markdown === "", "Preview includes document-wide layout");
+            check(page.textItems.some((item) => item.words?.length), "Preview lost OCR word boxes");
+            if (numWorkers === 1 && page.pageNum === 1) {
+              check(startedPages.length === 1, "Serial OCR did not emit the first page early");
+            }
+            previews.push(structuredClone(page));
+            pageEventCount += 1;
+            // Change the JS copy. This must not change the final Rust page.
+            page.text = "changed by callback";
+            page.textItems.length = 0;
+            if (page.pageNum === 3) releaseFirst();
+          },
+        });
+        let timeout;
+        let incrementalResult;
+        try {
+          incrementalResult = await Promise.race([
+            incrementalParser.parse(buildTestPdf(3)),
+            new Promise((_, reject) => {
+              timeout = setTimeout(() => reject(new Error("Page delivery waited for an unfinished OCR job")), 5000);
+            }),
+          ]);
+          finished = true;
+        } finally {
+          clearTimeout(timeout);
+          releaseFirst();
+        }
+        incrementalParser.free();
+        check(previews.length === 3, "Expected one callback per OCR page");
+        const order = previews.map((page) => page.pageNum).join(",");
+        check(order === (numWorkers === 2 ? "2,3,1" : "1,2,3"), `Unexpected page delivery order: ${order}`);
+        for (const preview of previews) {
+          const finalPage = incrementalResult.pages.find((page) => page.pageNum === preview.pageNum);
+          check(preview.text === finalPage.text, "Preview text differs from final text");
+          check(JSON.stringify(preview.textItems) === JSON.stringify(finalPage.textItems), "Preview boxes or metadata differ");
+        }
+        const finalOnlyParser = new LiteParse({
+          ...pageOptions, numWorkers,
+          ocrEngine: { async recognize(_image, width) { return pageWords(width); } },
+        });
+        const finalOnly = await finalOnlyParser.parse(buildTestPdf(3));
+        finalOnlyParser.free();
+        check(JSON.stringify(finalOnly) === JSON.stringify(incrementalResult), "Page callbacks changed the final result");
+      }
+
+      const selectedEvents = [];
+      const selectedParser = new LiteParse({
+        ...pageOptions, targetPages: "2-3",
+        ocrEngine: { async recognize() { return []; } },
+        onOcrPage(page) { selectedEvents.push(page.pageNum); },
+      });
+      await selectedParser.parse(buildTestPdf(3));
+      selectedParser.free();
+      check(selectedEvents.join(",") === "2,3", "Empty OCR results lost selected page numbers");
+
+      let croppedPreview;
+      const croppedParser = new LiteParse({
+        ...pageOptions, cropBox: { bottom: 0.5 }, extractTextMetadata: false,
+        ocrEngine: {
+          async recognize() {
+            return [
+              { text: "KEEP", bbox: [4, 4, 30, 20], confidence: 0.99 },
+              { text: "DROP", bbox: [4, 50, 30, 65], confidence: 0.99 },
+            ];
+          },
+        },
+        onOcrPage(page) { croppedPreview = page; },
+      });
+      const croppedResult = await croppedParser.parse(buildTestPdf());
+      croppedParser.free();
+      check(croppedPreview.text.includes("KEEP") && !croppedPreview.text.includes("DROP"), "Preview ignored content filters");
+      check(JSON.stringify(croppedPreview.textItems) === JSON.stringify(croppedResult.pages[0].textItems), "Filtered preview differs from final text items");
+
+      // Reused OCR layouts must compose with untouched native pages and failed OCR pages.
+      for (const outputFormat of ["json", "markdown"]) {
+        let reference;
+        for (const deliverPreviews of [false, true]) {
+          const events = [];
+          const mixedParser = new LiteParse({
+            ...pageOptions, outputFormat, numWorkers: 2, includeComplexity: true,
+            cropBox: { bottom: 0.1 },
+            ocrEngine: {
+              async recognize(_image, width) {
+                if (width === 75) throw new Error("mixed page failure");
+                return pageWords(width);
+              },
+            },
+            ...(deliverPreviews ? { onOcrPage(page) { events.push(page.pageNum); } } : {}),
+          });
+          try {
+            const result = await mixedParser.parse(buildTestPdf(4, 2));
+            check(result.pages.map(page => page.pageNum).join(",") === "1,2,3,4", "Reused layouts changed page order");
+            check(result.pages[1].text.includes("NATIVE TEXT"), "Reused layouts lost a native page");
+            check(result.pages.every(page => page.complexity !== undefined), "Reused layouts lost final complexity");
+            if (deliverPreviews) {
+              check(events.join(",") === "1,3", "Mixed parse previewed native or failed pages");
+              check(JSON.stringify(result) === reference, `Reused layouts changed final ${outputFormat} output`);
+            } else reference = JSON.stringify(result);
+          } finally { mixedParser.free(); }
+        }
+      }
+
+      const noOcrParser = new LiteParse({
+        ocrEnabled: false, quiet: true,
+        onOcrPage() { throw new Error("Unexpected callback with OCR disabled"); },
+      });
+      await noOcrParser.parse(buildTestPdf());
+      noOcrParser.free();
+
+      for (const fatal of [true, false]) {
+        for (const allFailed of [true, false]) {
+          const successfulPages = [];
+          const failureParser = new LiteParse({
+            ...pageOptions, numWorkers: 2, ocrFailureFatal: fatal,
+            ocrEngine: {
+              async recognize(_image, width) {
+                if (allFailed || width === 72) throw new Error("test engine failure");
+                return pageWords(width);
+              },
+            },
+            onOcrPage(page) { successfulPages.push(page.pageNum); },
+          });
+          try {
+            if (allFailed && fatal) {
+              await expectRejection(() => failureParser.parse(buildTestPdf(3)), "OCR failed for all 3 page(s): ocrEngine.recognize rejected:");
+            } else {
+              const partial = await failureParser.parse(buildTestPdf(3));
+              check(partial.pages.length === 3, "Partial OCR lost pages");
+            }
+            check(successfulPages.join(",") === (allFailed ? "" : "2,3"), "Failed OCR emitted a success callback");
+          } finally {
+            failureParser.free();
+          }
+        }
+      }
+
+      const throwingParser = new LiteParse({
+        ...pageOptions,
+        ocrEngine: { async recognize(_image, width) { return pageWords(width); } },
+        onOcrPage() { throw new Error("test page callback failure"); },
+      });
+      await expectRejection(() => throwingParser.parse(buildTestPdf()), "test page callback failure");
+      throwingParser.free();
+      await expectRejection(() => new LiteParse({ onOcrPage: 42 }), "onOcrPage must be a function");
+
+      for (const emitWordBoxes of [false, true]) {
+        let preview;
+        const p = new LiteParse({
+          ...pageOptions, emitWordBoxes,
+          ocrEngine: { async recognize(_image, width) { return pageWords(width); } },
+          onOcrPage(page) { preview = page; },
+        });
+        try {
+          const final = await p.parse(buildTestPdf());
+          check(preview.textItems.some((item) => item.words?.length) === emitWordBoxes,
+            "Preview ignored word-box output setting");
+          check(JSON.stringify(preview.textItems) === JSON.stringify(final.pages[0].textItems),
+            "Preview differs from final word-box setting");
+        } finally { p.free(); }
+      }
+
       status.textContent = "done";
       resultEl.style.display = "block";
       resultEl.setAttribute("data-pages", pageCount);
@@ -416,6 +620,7 @@
       resultEl.setAttribute("data-ocr-bytes", ocrByteLength);
       resultEl.setAttribute("data-ocr-max-concurrency", maxActiveOcrCalls);
       resultEl.setAttribute("data-ocr-failure-cases", failureCases);
+      resultEl.setAttribute("data-ocr-page-events", pageEventCount);
       resultEl.textContent = `OK: ${pageCount} pages, ${textLength} chars, OCR callback, concurrency, worker limits, grouped completion, native text refill, and ${failureCases} failure cases passed`;
     } catch (err) {
       status.textContent = "error";

@@ -211,7 +211,7 @@ pub struct WordBox {
 /// put a process or activity boundary between any two stages. The public JSON
 /// output does not use this shape (see `output/json.rs`).
 #[doc(hidden)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Page {
     pub page_number: usize,
     /// The document's `/PageLabels` entry for this page ("iv", "A-1"), when

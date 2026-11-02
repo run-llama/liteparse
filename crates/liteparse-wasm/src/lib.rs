@@ -1097,6 +1097,10 @@ export interface OcrEngine {
 
 export interface LiteParseInit extends LiteParseConfig {
   ocrEngine?: OcrEngine;
+  /** Synchronous OCR preview; calls can arrive out of page order.
+   * No final blocks, complexity, or markdown. A thrown error rejects parse().
+   * Replace previews with the final result. Return values are ignored. */
+  onOcrPage?: (page: ParsedPage) => void;
 }
 "#;
 
@@ -1110,6 +1114,7 @@ extern "C" {
 pub struct LiteParse {
     inner: CoreLiteParse,
     config: CoreConfig,
+    on_ocr_page: Option<Function>,
 }
 
 #[wasm_bindgen]
@@ -1119,6 +1124,21 @@ impl LiteParse {
     #[wasm_bindgen(constructor)]
     pub fn new(config: LiteParseInit) -> Result<LiteParse, JsError> {
         let config: JsValue = config.into();
+        let on_ocr_page = if config.is_object() {
+            let callback = Reflect::get(&config, &JsValue::from_str("onOcrPage"))
+                .map_err(|e| JsError::new(&format!("onOcrPage lookup failed: {e:?}")))?;
+            if callback.is_undefined() || callback.is_null() {
+                None
+            } else {
+                Some(
+                    callback
+                        .dyn_into::<Function>()
+                        .map_err(|_| JsError::new("onOcrPage must be a function"))?,
+                )
+            }
+        } else {
+            None
+        };
         let ocr_engine_js = if config.is_object() {
             Reflect::get(&config, &JsValue::from_str("ocrEngine"))
                 .ok()
@@ -1141,6 +1161,7 @@ impl LiteParse {
         Ok(LiteParse {
             inner: parser,
             config: core_cfg,
+            on_ocr_page,
         })
     }
 
@@ -1152,11 +1173,29 @@ impl LiteParse {
 
     /// Parse PDF bytes. Returns `Promise<ParseResult>`.
     pub async fn parse(&self, data: Vec<u8>) -> Result<ParseResult, JsError> {
-        let result = self
-            .inner
-            .parse_input(PdfInput::Bytes(data))
-            .await
-            .map_err(|e| JsError::new(&format!("parse failed: {}", e)))?;
+        let input = PdfInput::Bytes(data);
+        let result = if let Some(callback) = &self.on_ocr_page {
+            let on_page = |page: &liteparse::types::ParsedPage| {
+                let pages = to_js_pages(
+                    std::slice::from_ref(page),
+                    self.config.extract_text_metadata,
+                    self.config.output_word_boxes(),
+                );
+                let value = serde_wasm_bindgen::to_value(&pages[0]).map_err(|e| {
+                    liteparse::LiteParseError::Other(format!("onOcrPage conversion failed: {e}"))
+                })?;
+                callback.call1(&JsValue::NULL, &value).map_err(|e| {
+                    liteparse::LiteParseError::Other(format!("onOcrPage failed: {e:?}"))
+                })?;
+                Ok(())
+            };
+            self.inner
+                .parse_input_with_ocr_page_callback(input, &on_page)
+                .await
+        } else {
+            self.inner.parse_input(input).await
+        }
+        .map_err(|e| JsError::new(&format!("parse failed: {e}")))?;
 
         Ok(to_js_result(
             &result,
@@ -1166,17 +1205,13 @@ impl LiteParse {
     }
 }
 
-/// Convert a core [`CoreParseResult`] into the wasm-bindgen view.
-///
-/// Shared by `parse()` and `ParseSession::nextBatch()` so a batch is mapped
-/// exactly the same way a whole-document result is.
-fn to_js_result(
-    result: &liteparse::ParseResult,
+/// Shared by previews and final results so output options stay identical.
+fn to_js_pages(
+    core_pages: &[liteparse::types::ParsedPage],
     extract_text_metadata: bool,
     word_boxes: bool,
-) -> ParseResult {
-    let pages: Vec<ParsedPage> = result
-        .pages
+) -> Vec<ParsedPage> {
+    core_pages
         .iter()
         .map(|p| ParsedPage {
             page_num: p.page_number,
@@ -1292,7 +1327,19 @@ fn to_js_result(
                 .as_ref()
                 .map(|blocks| blocks.iter().map(LayoutBlock::from_rust).collect()),
         })
-        .collect();
+        .collect()
+}
+
+/// Convert a core [`CoreParseResult`] into the wasm-bindgen view.
+///
+/// Shared by `parse()` and `ParseSession::nextBatch()` so a batch is mapped
+/// exactly the same way a whole-document result is.
+fn to_js_result(
+    result: &liteparse::ParseResult,
+    extract_text_metadata: bool,
+    word_boxes: bool,
+) -> ParseResult {
+    let pages = to_js_pages(&result.pages, extract_text_metadata, word_boxes);
 
     let images: Vec<ExtractedImage> = result
         .images
