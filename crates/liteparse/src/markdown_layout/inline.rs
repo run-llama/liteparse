@@ -30,18 +30,78 @@ impl SpanStyle {
 /// Escape characters that would otherwise be interpreted as markdown emphasis.
 /// Deliberately narrow: only `*`, `_`, and backslash. Aggressive escaping
 /// (`#`, `[`, backticks, etc.) breaks more output than it saves in practice.
+/// An `_` between two letters or digits stays bare: CommonMark never reads an
+/// intraword underscore as emphasis, and `snake_case`, `first_last@host.com`
+/// or a URL path should survive verbatim (`mcc\_compliance` splits the token
+/// for any consumer that doesn't unescape). Inline math (`$…$`, see
+/// [`math_runs`]) passes through untouched.
 pub fn escape_inline(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\\' | '*' | '_' => {
-                out.push('\\');
-                out.push(c);
+    for (is_math, run) in math_runs(s) {
+        if is_math {
+            out.push_str(run);
+            continue;
+        }
+        let chars: Vec<char> = run.chars().collect();
+        for (i, &c) in chars.iter().enumerate() {
+            let intraword = c == '_'
+                && i > 0
+                && chars[i - 1].is_alphanumeric()
+                && chars.get(i + 1).is_some_and(|n| n.is_alphanumeric());
+            match c {
+                '\\' | '*' | '_' if !intraword => {
+                    out.push('\\');
+                    out.push(c);
+                }
+                _ => out.push(c),
             }
-            _ => out.push(c),
         }
     }
     out
+}
+
+/// Split `s` into runs, flagging the `$…$` spans a renderer reads as inline
+/// math under pandoc's `tex_math_dollars` rule: the opening `$` is followed
+/// by a non-space, the closing `$` follows a non-space and isn't followed by
+/// a digit (so "$5 to $10" stays text) unless the span is plainly LaTeX
+/// (`\`, `^`, `_` or `{`: "$\mathbb{R}$3" from a split script). The math
+/// pass (`tex_math`) emits its LaTeX this way, and it must reach the output
+/// unescaped.
+pub(crate) fn math_runs(s: &str) -> Vec<(bool, &str)> {
+    let b = s.as_bytes();
+    let mut runs = Vec::new();
+    let (mut lit, mut i) = (0, 0);
+    while i < b.len() {
+        let opens = b[i] == b'$'
+            && (i == 0 || b[i - 1] != b'\\')
+            && b.get(i + 1)
+                .is_some_and(|c| !c.is_ascii_whitespace() && *c != b'$');
+        let close = opens
+            .then(|| {
+                let j = i + 1 + s[i + 1..].find('$')?;
+                let latex = s[i + 1..j].contains(['\\', '^', '_', '{']);
+                let ok = !b[j - 1].is_ascii_whitespace()
+                    && b[j - 1] != b'\\'
+                    && (latex || !b.get(j + 1).is_some_and(u8::is_ascii_digit));
+                ok.then_some(j)
+            })
+            .flatten();
+        match close {
+            Some(j) => {
+                if lit < i {
+                    runs.push((false, &s[lit..i]));
+                }
+                runs.push((true, &s[i..=j]));
+                i = j + 1;
+                lit = i;
+            }
+            None => i += 1,
+        }
+    }
+    if lit < s.len() {
+        runs.push((false, &s[lit..]));
+    }
+    runs
 }
 
 /// Escape `text` for use as the body of a span with `style`. Backslash escapes
@@ -333,6 +393,37 @@ mod tests {
         assert!(out.starts_with("**") && out.ends_with("**"), "got: {out}");
         // Only one bold run, not two — the shortcut should kick in.
         assert_eq!(out.matches("**").count(), 2, "got: {out}");
+    }
+
+    #[test]
+    fn escape_inline_leaves_dollar_math_alone() {
+        assert_eq!(
+            escape_inline(r"where $x_{i}\in \mathbb{R}$ and a*b"),
+            r"where $x_{i}\in \mathbb{R}$ and a\*b"
+        );
+        // Currency is not math: the closing `$` is followed by a digit.
+        assert_eq!(
+            escape_inline("costs $5 to $10 a*b"),
+            r"costs $5 to $10 a\*b"
+        );
+        assert_eq!(escape_inline("$ x*1$"), r"$ x\*1$");
+        // A script split off after the span still leaves the LaTeX intact.
+        assert_eq!(escape_inline(r"M×$\mathbb{R}$3"), r"M×$\mathbb{R}$3");
+    }
+
+    #[test]
+    fn escape_inline_keeps_intraword_underscores() {
+        // CommonMark never reads an underscore between alphanumerics as emphasis.
+        assert_eq!(
+            escape_inline("mcc_compliance@masterchemical.com"),
+            "mcc_compliance@masterchemical.com"
+        );
+        assert_eq!(escape_inline("snake_case and x_1"), "snake_case and x_1");
+        // At a word edge it can open or close emphasis, so it stays escaped.
+        assert_eq!(
+            escape_inline("_lead and trail_ and __init__"),
+            r"\_lead and trail\_ and \_\_init\_\_"
+        );
     }
 
     #[test]

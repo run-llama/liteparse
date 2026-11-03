@@ -612,6 +612,7 @@ pub struct JsPageInput {
 impl JsPageInput {
     pub fn to_rust(&self) -> Page {
         Page {
+            ocr_deskew: None,
             page_number: self.page_number as usize,
             // Externally supplied pages carry no source PDF, so there is no
             // /PageLabels tree to read a label from.

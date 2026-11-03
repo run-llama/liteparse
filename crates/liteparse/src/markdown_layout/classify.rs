@@ -16,8 +16,9 @@ use super::lists::{
     split_ordered_marker_for_emit,
 };
 use super::paragraphs::{
-    ParaAccum, append_to_paragraph, collapse_whitespace, continues_heading, continues_list_item,
-    continues_paragraph, ends_hyphenated, ends_sentence_final, is_soft_hyphen_break,
+    ParaAccum, append_to_paragraph, collapse_whitespace, continues_heading, continues_hyphen_wrap,
+    continues_list_item, continues_paragraph, ends_hyphenated, ends_open_hyphen,
+    ends_sentence_final, is_soft_hyphen_break,
 };
 use super::repetition::is_header_or_footer;
 use super::tables::{detect_ruled_tables, detect_tables_banded, merge_table_runs};
@@ -780,6 +781,12 @@ fn classify_region(
             let mid_word_wrap = text.trim_end().ends_with('-');
             !(has_mid_sentence && mid_word_wrap)
         });
+        // On a page whose sizes are estimated from box heights (scans, OCR) a line ending in an
+        // attached hyphen is the first half of a token, not a finished heading: promoted, it
+        // splits the token across a heading and the paragraph below ("…pyridine-3-" /
+        // "carbonitrile 4a …"). Left in the paragraph, the join keeps it whole.
+        let open_hyphen_scan = line.font_size_is_estimated && ends_open_hyphen(text);
+        let size_level = size_level.filter(|_| !open_hyphen_scan);
         // A standalone "Contents" / "Table of Contents" / "Index" line is
         // almost always a real H1, even when `page_is_toc` is false — many
         // TOCs list entries without inline trailing page numbers, so the
@@ -1058,7 +1065,10 @@ fn classify_region(
         }
 
         match state.paragraph.as_mut() {
-            Some(acc) if continues_paragraph(&acc.last, line) => {
+            Some(acc)
+                if continues_paragraph(&acc.last, line)
+                    || continues_hyphen_wrap(&acc.last, line) =>
+            {
                 append_to_paragraph(acc, line);
             }
             _ => {
@@ -1253,6 +1263,15 @@ fn stitch_regions(blocks: Vec<PositionedBlock>, region_starts: &[usize]) -> Vec<
                     prev_text.pop();
                 }
                 prev_text.pop(); // the '-'
+                prev_text.push_str(cur_text.trim_start());
+                prev.bbox = merged_bbox;
+                continue;
+            }
+            // A hard hyphen (`pyridine-3-` + `carbonitrile`): one token, hyphen kept.
+            if ends_open_hyphen(prev_text) && starts_lower {
+                while prev_text.ends_with(|c: char| c.is_whitespace()) {
+                    prev_text.pop();
+                }
                 prev_text.push_str(cur_text.trim_start());
                 prev.bbox = merged_bbox;
                 continue;

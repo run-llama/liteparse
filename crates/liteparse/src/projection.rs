@@ -119,6 +119,25 @@ fn canonical_rotation(rotation: f32) -> i32 {
     }
 }
 
+/// Append `right` (the item to the right on the page) to `left` in reading order: after it for
+/// a left-to-right pair, before it when the pair reads right to left (Hebrew / Arabic words
+/// PDFium emitted as separate runs). Joining in x order reversed RTL word order.
+fn join_in_reading_order(left: &mut String, right: &str, sep: &str) {
+    if crate::bidi::is_rtl_pieces([left.as_str(), right]) {
+        let mut joined = right.trim_end().to_string();
+        if !sep.is_empty() && !joined.is_empty() {
+            joined.push_str(sep);
+        }
+        joined.push_str(left.trim_start());
+        *left = joined;
+    } else {
+        if !sep.is_empty() && !left.ends_with(' ') {
+            left.push_str(sep);
+        }
+        left.push_str(right);
+    }
+}
+
 fn handle_rotation_reading_order(items: &mut [ProjectedTextItem], page_height: f32) {
     if !items
         .iter()
@@ -829,7 +848,7 @@ fn form_lines(
                     && delta_x <= MERGE_THRESHOLD
                 {
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
-                    prev.item.text.push_str(&item.item.text);
+                    join_in_reading_order(&mut prev.item.text, &item.item.text, "");
                     prev.item.words.append(&mut item.item.words);
                     merge_orig_bbox(prev, &item);
                     continue;
@@ -839,10 +858,7 @@ fn form_lines(
                 let avg_char_width = prev.item.width / prev_len;
                 if y_compatible && !both_are_numbers && delta_x < avg_char_width {
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
-                    if !prev.item.text.ends_with(' ') {
-                        prev.item.text.push(' ');
-                    }
-                    prev.item.text.push_str(&item.item.text);
+                    join_in_reading_order(&mut prev.item.text, &item.item.text, " ");
                     prev.item.words.append(&mut item.item.words);
                     merge_orig_bbox(prev, &item);
                     continue;
@@ -3167,6 +3183,31 @@ const XY_COLUMN_PEAK_BALANCE_RATIO: f32 = 0.4;
 /// detector) on sparse tabular layouts.
 const XY_COLUMN_MIN_FILL: f32 = 0.55;
 
+/// An equation number set at a column edge: "(22)", "(3.14)", "(A.2)".
+fn is_equation_number(text: &str) -> bool {
+    let t = text.trim();
+    let Some(inner) = t.strip_prefix('(').and_then(|r| r.strip_suffix(')')) else {
+        return false;
+    };
+    !inner.is_empty()
+        && inner.len() <= 6
+        && inner.chars().any(|c| c.is_ascii_digit())
+        && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '.')
+}
+
+/// Text with no run of three letters: a matrix entry, a bracket piece or an
+/// accent the math pass left behind ("0", "¯", ", B =").
+fn is_formula_fragment(text: &str) -> bool {
+    let mut run = 0;
+    for c in text.chars() {
+        run = if c.is_alphabetic() { run + 1 } else { 0 };
+        if run >= 3 {
+            return false;
+        }
+    }
+    !text.trim().is_empty()
+}
+
 /// A peak whose band count is below this fraction of the most-banded column's
 /// is treated as a figure-scatter "phantom" (axis tick labels, a point cloud
 /// spread across x) rather than a real column. Real table columns have one
@@ -3585,15 +3626,8 @@ fn xy_find_column_cut(
     median_h: f32,
     tabular: &mut bool,
 ) -> Option<CutCandidate> {
-    let dbg = std::env::var("LITEPARSE_DEBUG_XY").is_ok();
-    macro_rules! reject {
-        ($($t:tt)*) => {{
-            if dbg { eprintln!("[xy col-reject] {}", format!($($t)*)); }
-            return None;
-        }};
-    }
     if bbox.width <= 1.0 || idxs.len() < 8 {
-        reject!("preflight: width={:.1} items={}", bbox.width, idxs.len());
+        return None;
     }
 
     // Identify "line-start" items: within each y-band, the first item of
@@ -3605,7 +3639,20 @@ fn xy_find_column_cut(
     // column) because the inter-column gutter exceeds `gutter_gap`, so we
     // don't collapse a band to its single leftmost item.
     let band_tol = (median_h * 0.5).max(2.0);
-    let gutter_gap = median_h.max(4.0);
+    // OCR items are whole detected lines, not PDF word fragments: two of them in one band
+    // are split at a column gutter (or a cell boundary, which the fill gate below handles),
+    // never at a word space. Scans' tight gutters (~0.6-0.8 line heights on newspaper pages)
+    // fail the native one-line-height test, and the near-start rescue needs sub-point edge
+    // alignment that OCR boxes don't have, so N-column scans were read row by row.
+    let ocr_items = idxs
+        .iter()
+        .filter(|&&i| items[i].item.confidence.is_some())
+        .count();
+    let gutter_gap = if ocr_items * 2 > idxs.len() {
+        (median_h * 0.5).max(4.0)
+    } else {
+        median_h.max(4.0)
+    };
 
     let mut sorted: Vec<usize> = idxs.to_vec();
     sorted.sort_by(|&a, &b| {
@@ -3653,11 +3700,7 @@ fn xy_find_column_cut(
     }
 
     if line_starts.len() < 8 {
-        reject!(
-            "line_starts={} < 8 (items={})",
-            line_starts.len(),
-            idxs.len()
-        );
+        return None;
     }
 
     // Histogram extent uses full item bounds so `XY_COLUMN_MIN_GAP_FRACTION`
@@ -3673,7 +3716,7 @@ fn xy_find_column_cut(
         }
     }
     if !min_x.is_finite() || max_x <= min_x + 1.0 {
-        reject!("degenerate extent min_x={min_x:.1} max_x={max_x:.1}");
+        return None;
     }
     let total_w = max_x - min_x;
     let bucket_pt = XY_COLUMN_BUCKET_PT;
@@ -3712,11 +3755,6 @@ fn xy_find_column_cut(
                 }
             }
         }
-        if dbg && rescued > 0 {
-            eprintln!(
-                "[xy col-rescue] {rescued} near-gap starts (gap in [{near_gap_floor:.1},{gutter_gap:.1}]) exactly aligned to >=2 strict starts"
-            );
-        }
     }
     let n_starts = line_starts.len() + rescued;
 
@@ -3753,7 +3791,6 @@ fn xy_find_column_cut(
     // Keep only "strong" peaks. A real column edge is sat-stacked by many
     // lines at the same left x; spurious peaks (a stray indented quote, a
     // numbered marker, etc.) carry only a few lines.
-    let strong_before = peaks.len();
     let raw_counts: Vec<(f32, usize)> = peaks.clone();
     // Adaptive minimum: scale with how many line-starts the band actually has.
     // The static `XY_COLUMN_MIN_LINES_PER_PEAK = 10` floor is meant to drop
@@ -3795,30 +3832,7 @@ fn xy_find_column_cut(
                 if sparse {
                     *tabular = true;
                 }
-                if dbg {
-                    eprintln!(
-                        "[xy col-weak-peaks] {} balanced raw peaks (min={raw_min} max={raw_max}) dominance={dominance:.2} min_fill={min_fill:.2} avg_fill={avg_fill:.2} — {}",
-                        raw_counts.len(),
-                        if sparse {
-                            "tabular, no cut"
-                        } else {
-                            "filled (prose), not tabular"
-                        }
-                    );
-                }
             }
-        }
-        if dbg {
-            let preview: Vec<String> = raw_counts
-                .iter()
-                .take(8)
-                .map(|(x, c)| format!("({x:.0}:{c})"))
-                .collect();
-            eprintln!(
-                "[xy col-reject] peaks<2 after min_per_peak={adaptive_min} (raw={strong_before} strong={}): {}",
-                peaks.len(),
-                preview.join(",")
-            );
         }
         return None;
     }
@@ -3854,40 +3868,17 @@ fn xy_find_column_cut(
             // whose cells don't tightly left-cluster (numeric columns are
             // typically right-aligned / centered, so they never form
             // strong left-edge peaks and fail dominance here).
-            let before = peaks.len();
             peaks.retain(|(_, c)| {
                 largest <= 0.0 || (*c as f32) / largest >= XY_COLUMN_PEAK_BALANCE_RATIO
             });
             if peaks.len() < 2 {
-                reject!("peaks>2 but <2 balanced (largest={largest})");
-            }
-            if dbg {
-                eprintln!(
-                    "[xy col-keep-N] kept {} of {} balanced peaks (N-column); xs=[{}]",
-                    peaks.len(),
-                    before,
-                    peaks
-                        .iter()
-                        .map(|(x, c)| format!("{x:.0}:{c}"))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                );
+                return None;
             }
         } else {
             // Top-2 dominate → assume real columns + weak floats. Keep
             // top-2 (re-sorted left→right) and continue.
             let mut top2 = vec![by_count[0], by_count[1]];
             top2.sort_by(|a, b| a.0.total_cmp(&b.0));
-            if dbg {
-                eprintln!(
-                    "[xy col-keep-top2] dropped {} weak peaks; kept xs=[{:.0}:{},{:.0}:{}]",
-                    peaks.len() - 2,
-                    top2[0].0,
-                    top2[0].1,
-                    top2[1].0,
-                    top2[1].1
-                );
-            }
             peaks = top2;
         }
     }
@@ -3902,6 +3893,11 @@ fn xy_find_column_cut(
         let mut n = peaks.len();
         let mut covered_sum = vec![0.0f32; n];
         let mut band_count = vec![0usize; n];
+        // Bands where everything in the column is display math or an
+        // equation number (`math_bands`), or that plus formula fragments the
+        // math pass left as text (`formula_bands`).
+        let mut math_bands = vec![0usize; n];
+        let mut formula_bands = vec![0usize; n];
         let mut kk = 0;
         while kk < sorted.len() {
             let by = items[sorted[kk]].item.y;
@@ -3911,6 +3907,8 @@ fn xy_find_column_cut(
             }
             let mut lo_x = vec![f32::INFINITY; n];
             let mut hi_x = vec![f32::NEG_INFINITY; n];
+            let mut all_math = vec![true; n];
+            let mut all_formula = vec![true; n];
             for &idx in &sorted[kk..jj] {
                 let it = &items[idx].item;
                 if !it.x.is_finite() {
@@ -3926,6 +3924,9 @@ fn xy_find_column_cut(
                 }
                 lo_x[c] = lo_x[c].min(it.x);
                 hi_x[c] = hi_x[c].max(it.x + it.width.max(0.0));
+                let math = it.math || is_equation_number(&it.text);
+                all_math[c] &= math;
+                all_formula[c] &= math || is_formula_fragment(&it.text);
             }
             for c in 0..n {
                 if hi_x[c] > lo_x[c] {
@@ -3937,6 +3938,12 @@ fn xy_find_column_cut(
                     if col_w > 1.0 {
                         covered_sum[c] += ((hi_x[c] - lo_x[c]) / col_w).min(1.0);
                         band_count[c] += 1;
+                        if all_math[c] {
+                            math_bands[c] += 1;
+                        }
+                        if all_formula[c] {
+                            formula_bands[c] += 1;
+                        }
                     }
                 }
             }
@@ -3977,21 +3984,6 @@ fn xy_find_column_cut(
         } else {
             f32::INFINITY
         };
-        if dbg {
-            eprintln!(
-                "[xy col-fill] avg_fill={avg_fill:.2} min_fill={min_fill:.2} (gate={XY_COLUMN_MIN_FILL}) per_col=[{}] band_counts=[{}]",
-                per_col_fill
-                    .iter()
-                    .map(|f| format!("{f:.2}"))
-                    .collect::<Vec<_>>()
-                    .join(","),
-                band_count
-                    .iter()
-                    .map(|c| c.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            );
-        }
         const MIN_FILL_HARD_FLOOR: f32 = 0.38;
         // Figure-scatter phantom column: on a 2-column page with an embedded
         // plot (scatter cloud, axis tick labels), the plot's x-spread items
@@ -4014,9 +4006,20 @@ fn xy_find_column_cut(
                         0.0
                     }
                 };
-                let survivors: Vec<usize> = (0..n)
-                    .filter(|&c| !(band_count[c] < band_floor && col_fill(c) < MIN_FILL_HARD_FLOOR))
-                    .collect();
+                // Note: display equations and their numbers inside a prose
+                // column line up into the same sparse, low-fill peak (a
+                // two-column paper read as a table); a column made mostly
+                // of math bands is a phantom at any band count.
+                // Dropping still needs the surviving columns to read as
+                // prose, so a numeric table column keeps the region tabular.
+                let display_math = |c: usize| {
+                    math_bands[c] * 3 >= band_count[c] && formula_bands[c] * 3 >= band_count[c] * 2
+                };
+                let phantom = |c: usize| {
+                    col_fill(c) < MIN_FILL_HARD_FLOOR
+                        && (band_count[c] < band_floor || display_math(c))
+                };
+                let survivors: Vec<usize> = (0..n).filter(|&c| !phantom(c)).collect();
                 let survivors_filled = survivors
                     .iter()
                     .all(|&c| col_fill(c) >= MIN_FILL_HARD_FLOOR);
@@ -4030,16 +4033,6 @@ fn xy_find_column_cut(
                         new_min = new_min.min(f);
                         wsum += f * band_count[c] as f32;
                         wn += band_count[c] as f32;
-                    }
-                    if dbg {
-                        eprintln!(
-                            "[xy col-phantom] dropped {} sparse low-fill peak(s) (band_floor={band_floor}); kept xs=[{}]",
-                            n - survivors.len(),
-                            kept.iter()
-                                .map(|(x, _)| format!("{x:.0}"))
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        );
                     }
                     peaks = kept;
                     n = peaks.len();
@@ -4056,14 +4049,11 @@ fn xy_find_column_cut(
         // needed column split AND the density V via the tabular flag.
         if n > 2 && min_fill.is_finite() && min_fill < MIN_FILL_HARD_FLOOR {
             *tabular = true;
-            reject!("N-column min fill {min_fill:.2} < {MIN_FILL_HARD_FLOOR} (tabular column)");
+            return None;
         }
         if avg_fill.is_finite() && avg_fill < XY_COLUMN_MIN_FILL {
             *tabular = true;
-            reject!(
-                "N-column avg fill {avg_fill:.2} < {} (tabular)",
-                XY_COLUMN_MIN_FILL
-            );
+            return None;
         }
     }
     // Require the two peaks to together dominate the histogram — a real
@@ -4073,10 +4063,7 @@ fn xy_find_column_cut(
     let peak_sum: usize = peaks.iter().map(|(_, c)| *c).sum();
     let dominance = (peak_sum as f32) / (n_starts as f32);
     if dominance < XY_COLUMN_PEAK_DOMINANCE {
-        reject!(
-            "dominance {dominance:.2} < {} (peak_sum={peak_sum} line_starts={n_starts})",
-            XY_COLUMN_PEAK_DOMINANCE
-        );
+        return None;
     }
     // Require the peaks to be roughly balanced in size. A real multi-column
     // layout has comparable line counts in each column; a long-single-column
@@ -4092,11 +4079,7 @@ fn xy_find_column_cut(
         0.0
     };
     if balance < XY_COLUMN_PEAK_BALANCE_RATIO {
-        reject!(
-            "balance {balance:.2} < {} (min={smallest} max={largest} npeaks={})",
-            XY_COLUMN_PEAK_BALANCE_RATIO,
-            peaks.len()
-        );
+        return None;
     }
 
     // Cut at the leftmost gutter that clears `XY_COLUMN_MIN_GAP_FRACTION ×
@@ -4116,14 +4099,7 @@ fn xy_find_column_cut(
     }
     let li = match best {
         Some((_, li)) => li,
-        None => reject!(
-            "no gap >= {:.0} (min_gap_frac={} total_w={total_w:.0}); peak_xs=[{:.0},{:.0}] gap={:.0}",
-            min_gap,
-            XY_COLUMN_MIN_GAP_FRACTION,
-            peaks[0].0,
-            peaks[1].0,
-            peaks[1].0 - peaks[0].0
-        ),
+        None => return None,
     };
     // Place the cut at the actual gutter, not midway between peak centers.
     // Peaks mark column LEFT edges, so the center midpoint lands inside the
@@ -4163,7 +4139,7 @@ fn xy_find_column_cut(
     // off the items (some PDFs have content with negative x), fall back to
     // an item-relative midpoint check.
     if cut_x <= min_x + 1.0 || cut_x >= max_x - 1.0 {
-        reject!("cut_x {cut_x:.0} outside extent [{min_x:.0},{max_x:.0}]");
+        return None;
     }
     // High finite score so this beats every density cut but stays below
     // banner's infinity.
@@ -4349,54 +4325,7 @@ fn xy_cut_rec(
     } else {
         None
     };
-    let debug_xy = std::env::var("LITEPARSE_DEBUG_XY").is_ok();
     let disable_vcut_minlines = std::env::var("LITEPARSE_DISABLE_VCUT_MINLINES").is_ok();
-    if debug_xy && depth == 0 && std::env::var("LITEPARSE_DEBUG_ITEMS").is_ok() {
-        for &i in &idxs {
-            let it = &items[i].item;
-            eprintln!(
-                "[xy item] x={:.1} w={:.1} y={:.1} h={:.1} text={:?}",
-                it.x,
-                it.width,
-                it.y,
-                it.height,
-                &it.text.chars().take(80).collect::<String>()
-            );
-        }
-    }
-    if debug_xy {
-        // Also probe what the column histogram WOULD return if we ran it
-        // unconditionally — this is the diagnostic that tells us whether
-        // reordering V/H/column priority would unlock more column splits.
-        let column_probe = column_full;
-        let pad = "  ".repeat(depth as usize);
-        let fmt = |c: &Option<CutCandidate>| {
-            c.as_ref()
-                .map(|c| format!("{:?}@{:.1}/{:.3}", c.axis, c.position, c.score))
-                .unwrap_or_else(|| "-".to_string())
-        };
-        let fmt_pos = |p: &Option<f32>| {
-            p.as_ref()
-                .map(|p| format!("{p:.1}"))
-                .unwrap_or_else(|| "-".to_string())
-        };
-        let (ex0, ex1) = x_extent(items, &idxs);
-        let lines = xy_distinct_lines(items, &idxs, median_h);
-        eprintln!(
-            "[xy d={depth}]{pad} bbox=({:.0},{:.0} {:.0}x{:.0}) items={} lines={} x_ext=[{ex0:.1},{ex1:.1}] banner={} h={} v={} col={} col_probe={}",
-            bbox.x,
-            bbox.y,
-            bbox.width,
-            bbox.height,
-            idxs.len(),
-            lines,
-            fmt(&banner),
-            fmt(&h),
-            fmt(&v),
-            fmt_pos(&column.as_ref().map(|c| c.position)),
-            fmt_pos(&column_probe.as_ref().map(|c| c.position)),
-        );
-    }
     // Build a priority-ordered candidate list.
     //
     // **Primary** is the cut chosen by the main resolution order
@@ -4429,20 +4358,7 @@ fn xy_cut_rec(
     // When the histogram fill gate classified this region as tabular, a
     // density V valley here is a table gutter, not a column boundary —
     // suppress it so the table reaches the table detectors row-major.
-    let v = if effective_tabular {
-        if debug_xy && v.is_some() {
-            let pad = "  ".repeat(depth as usize);
-            let reason = if region_tabular {
-                "region tabular"
-            } else {
-                "region tabular, inherited"
-            };
-            eprintln!("[xy d={depth}]{pad} -> SUPPRESS density V ({reason})");
-        }
-        None
-    } else {
-        v
-    };
+    let v = if effective_tabular { None } else { v };
     if prefer_h_over_v {
         if let Some(hc) = h {
             candidates.push(hc);
@@ -4470,13 +4386,6 @@ fn xy_cut_rec(
     }
 
     for cut in candidates {
-        if debug_xy {
-            let pad = "  ".repeat(depth as usize);
-            eprintln!(
-                "[xy d={depth}]{pad} -> TRY {:?}@{:.1}/{:.3}",
-                cut.axis, cut.position, cut.score
-            );
-        }
         let mut left: Vec<usize> = Vec::new();
         let mut right: Vec<usize> = Vec::new();
         // Column-histogram V-cuts (score = 1.0e9) split between two column
@@ -4557,15 +4466,6 @@ fn xy_cut_rec(
             const STRADDLE_PARTITION_FRACTION: f32 = 0.25;
             let partition_by_item = rows_total > 0
                 && (rows_straddle as f32) / (rows_total as f32) >= STRADDLE_PARTITION_FRACTION;
-            if debug_xy {
-                let pad = "  ".repeat(depth as usize);
-                eprintln!(
-                    "[xy d={depth}]{pad}    hist-v straddle={}/{} → partition_by_{}",
-                    rows_straddle,
-                    rows_total,
-                    if partition_by_item { "item" } else { "row" }
-                );
-            }
 
             if partition_by_item {
                 for &i in &idxs {
@@ -4615,19 +4515,7 @@ fn xy_cut_rec(
                 }
             }
         }
-        if debug_xy {
-            let pad = "  ".repeat(depth as usize);
-            eprintln!(
-                "[xy d={depth}]{pad}    partition: left={} right={}",
-                left.len(),
-                right.len()
-            );
-        }
         if left.is_empty() || right.is_empty() {
-            if debug_xy {
-                let pad = "  ".repeat(depth as usize);
-                eprintln!("[xy d={depth}]{pad}    -> degenerate, try next");
-            }
             continue;
         }
         let (left_bbox, right_bbox) = xy_split_bbox(&bbox, &cut);
@@ -4676,12 +4564,6 @@ fn xy_cut_rec(
                 })
             };
             if (lc < XY_MIN_LINES_PER_H_SIDE || rc < XY_MIN_LINES_PER_H_SIDE) && !spanning_rescue {
-                if debug_xy {
-                    let pad = "  ".repeat(depth as usize);
-                    eprintln!(
-                        "[xy d={depth}]{pad}    -> min-lines fail (lc={lc} rc={rc}), try next"
-                    );
-                }
                 continue;
             }
         }
@@ -4699,23 +4581,10 @@ fn xy_cut_rec(
             let lc = xy_distinct_lines(items, &left, median_h);
             let rc = xy_distinct_lines(items, &right, median_h);
             if lc < XY_MIN_LINES_PER_H_SIDE || rc < XY_MIN_LINES_PER_H_SIDE {
-                if debug_xy {
-                    let pad = "  ".repeat(depth as usize);
-                    eprintln!(
-                        "[xy d={depth}]{pad}    -> v-cut min-lines fail (lc={lc} rc={rc}), try next"
-                    );
-                }
                 continue;
             }
         }
 
-        if debug_xy {
-            let pad = "  ".repeat(depth as usize);
-            eprintln!(
-                "[xy d={depth}]{pad} -> COMMIT {:?}@{:.1}",
-                cut.axis, cut.position
-            );
-        }
         let child_inherited_tabular = effective_tabular && cut.axis == CutAxis::Horizontal;
         let left_region = xy_cut_rec(
             items,
@@ -4744,10 +4613,6 @@ fn xy_cut_rec(
         };
     }
 
-    if debug_xy {
-        let pad = "  ".repeat(depth as usize);
-        eprintln!("[xy d={depth}]{pad} -> LEAF (no valid cut)");
-    }
     Region {
         bbox,
         kind: RegionKind::Leaf { item_indices: idxs },
@@ -5238,6 +5103,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn equation_numbers_and_formula_fragments() {
+        assert!(is_equation_number("(22)"));
+        assert!(is_equation_number(" (3.14) "));
+        assert!(is_equation_number("(A.2)"));
+        assert!(!is_equation_number("(see above)"));
+        assert!(!is_equation_number("(a)"));
+        assert!(is_formula_fragment("0"));
+        assert!(is_formula_fragment(", B ="));
+        assert!(!is_formula_fragment("which defines the"));
+        assert!(!is_formula_fragment(" "));
+    }
+
+    #[test]
     fn compress_wide_spaces_preserves_utf8_text() {
         assert_eq!(
             compress_wide_spaces("売上高    1,234 Café  Größe", 4, 2),
@@ -5293,6 +5171,7 @@ mod tests {
     #[test]
     fn project_to_grid_handles_text_sparse_zero_width_items() {
         let page = Page {
+            ocr_deskew: None,
             page_number: 1,
             page_label: None,
             page_width: 612.0,
@@ -5811,6 +5690,7 @@ mod tests {
     #[test]
     fn project_pages_to_grid_handles_page_with_no_text_items() {
         let pages = vec![Page {
+            ocr_deskew: None,
             page_number: 1,
             page_label: None,
             page_width: 612.0,
@@ -5837,6 +5717,7 @@ mod tests {
     fn project_pages_to_grid_unions_original_bbox_when_word_items_merge() {
         let y = 50.25;
         let pages = vec![Page {
+            ocr_deskew: None,
             page_number: 1,
             page_label: None,
             page_width: 612.0,
@@ -5889,6 +5770,7 @@ mod tests {
         // second item's `words` were silently dropped, truncating `words`.
         let y = 50.25;
         let pages = vec![Page {
+            ocr_deskew: None,
             page_number: 1,
             page_label: None,
             page_width: 612.0,
@@ -5949,6 +5831,7 @@ mod tests {
     #[test]
     fn project_pages_to_grid_unions_original_bbox_when_continuous_items_merge() {
         let pages = vec![Page {
+            ocr_deskew: None,
             page_number: 1,
             page_label: None,
             page_width: 612.0,

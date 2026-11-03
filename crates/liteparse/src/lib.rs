@@ -28,6 +28,7 @@ pub mod parser;
 pub mod raw_text;
 pub mod search;
 pub mod stages;
+mod tex_math;
 mod text_clip;
 pub mod types;
 
