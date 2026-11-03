@@ -95,6 +95,7 @@ fn check_recognition(num_workers: usize) {
             dpi: 150.0,
             has_native_text: false,
             image_rects: vec![],
+            replace_native: false,
         })
         .collect();
     let engine = Arc::new(ControlledEngine::default());
@@ -191,6 +192,7 @@ fn window_collects_ready_results_and_reuses_all_slots() {
             dpi: 150.0,
             has_native_text: false,
             image_rects: vec![],
+            replace_native: false,
         };
         assert!(
             pin!(window.submit(raster))
@@ -220,6 +222,7 @@ fn window_collects_ready_results_and_reuses_all_slots() {
         dpi: 150.0,
         has_native_text: false,
         image_rects: vec![],
+        replace_native: false,
     };
     assert!(
         pin!(window.submit(raster))

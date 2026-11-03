@@ -663,6 +663,7 @@ fn merge_ocr_rejects_outcome_for_unknown_page() {
         dpi: 150.0,
         has_native_text: false,
         image_rects: Vec::new(),
+        replace_native: false,
         results: vec![OcrResult {
             text: "x".into(),
             bbox: [0.0, 0.0, 10.0, 10.0],

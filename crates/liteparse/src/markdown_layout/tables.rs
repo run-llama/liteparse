@@ -5795,9 +5795,19 @@ fn cell_continues(prev: &str, cur: &str) -> bool {
 /// stays valid. Newlines should be impossible inside a single cell (we built
 /// cells from spans on the same projected line) but guard anyway.
 pub(super) fn escape_table_cell(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('|', "\\|")
-        .replace('\n', " ")
+    super::inline::math_runs(s)
+        .into_iter()
+        .map(|(is_math, run)| {
+            // Inline math keeps its backslashes; only the pipe is escaped
+            // (GFM splits cells before parsing inlines).
+            let run = if is_math {
+                run.to_string()
+            } else {
+                run.replace('\\', "\\\\")
+            };
+            run.replace('|', "\\|").replace('\n', " ")
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -6790,6 +6800,11 @@ mod tests {
         ];
         let runs = detect_tables(&lines);
         assert!(runs.is_empty());
+    }
+
+    #[test]
+    fn escapes_math_cell_pipes_but_keeps_backslashes() {
+        assert_eq!(escape_table_cell(r"$\|x\|_{2}$ a\b"), r"$\\|x\\|_{2}$ a\\b");
     }
 
     #[test]
