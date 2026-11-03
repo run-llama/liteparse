@@ -288,6 +288,10 @@ struct PyLayoutCell {
     text: String,
     #[pyo3(get)]
     bbox: Option<PyAnnotationRect>,
+    /// Indices into the page's `text_items` of the items the cell was read
+    /// from, in reading order. Empty for padding cells.
+    #[pyo3(get)]
+    text_item_indices: Vec<usize>,
 }
 
 impl PyLayoutCell {
@@ -295,6 +299,7 @@ impl PyLayoutCell {
         Self {
             text: cell.text,
             bbox: cell.bbox.map(PyAnnotationRect::from_rust),
+            text_item_indices: cell.text_item_indices,
         }
     }
 }
@@ -354,6 +359,11 @@ struct PyLayoutBlock {
     /// geometry behind it.
     #[pyo3(get)]
     bbox: Option<PyAnnotationRect>,
+    /// Indices into the page's `text_items` of every item the block was read
+    /// from, sorted. For tables, the union of the cells'. Empty for `figure`
+    /// and for a `rule` drawn as a stroke.
+    #[pyo3(get)]
+    text_item_indices: Vec<usize>,
 }
 
 impl PyLayoutBlock {
@@ -379,6 +389,7 @@ impl PyLayoutBlock {
             id: block.id,
             format: block.format,
             bbox: block.bbox.map(PyAnnotationRect::from_rust),
+            text_item_indices: block.text_item_indices,
         }
     }
 }

@@ -279,38 +279,40 @@ Only the fields that apply to a block's `kind` are present:
 |-------|-------|---------|
 | `kind` | all | `heading`, `paragraph`, `list_item`, `code`, `table`, `grid_fallback`, `rule`, `figure` |
 | `bbox` | all | Region occupied, in the same coordinate space as `text_items` |
+| `text_item_indices` | all | Indices into `text_items` of the items the block was read from, sorted. Empty for `figure` and for a `rule` drawn as a stroke |
 | `text` | `heading`, `paragraph`, `list_item` | Rendered text |
 | `level` | `heading`, `list_item` | Heading level 1–6, or list nesting depth |
 | `bold`, `italic` | `paragraph`, `list_item` | Set when the whole block is emphasized |
 | `ordered`, `marker` | `list_item` | Whether the list is ordered, and the marker as it appeared (`138.`, `iii)`, `•`) |
 | `lines`, `lang` | `code`, `grid_fallback` | Verbatim source lines, and a best-effort language hint |
-| `header`, `rows` | `table` | Cells, each with its own `text` and `bbox` |
+| `header`, `rows` | `table` | Cells, each with its own `text`, `bbox` and `text_item_indices` |
 | `id`, `format` | `figure` | Matches the `img_{id}.{format}` target in Markdown output |
 
 `bbox` is the union of every source line that fed the block, so a wrapped heading or multi-line paragraph reports the whole band it occupies — not just its first line.
 
 ### Tables
 
-Table cells are objects, not bare strings: each carries its own `bbox`, so a cell maps back to the region it was read from.
+Table cells are objects, not bare strings: each carries its own `bbox` and `text_item_indices`, so a cell maps back to the region and the text items it was read from.
 
 ```json
 {
   "kind": "table",
   "bbox": { "x": 67.9, "y": 511.1, "width": 458.4, "height": 111.0 },
   "header": [
-    { "text": "Title of each class", "bbox": { "x": 132.7, "y": 511.1, "width": 64.0, "height": 8.0 } },
-    { "text": "Trading symbol(s)",   "bbox": { "x": 288.7, "y": 511.1, "width": 35.0, "height": 8.0 } }
+    { "text": "Title of each class", "bbox": { "x": 132.7, "y": 511.1, "width": 64.0, "height": 8.0 }, "text_item_indices": [41] },
+    { "text": "Trading symbol(s)",   "bbox": { "x": 288.7, "y": 511.1, "width": 35.0, "height": 8.0 }, "text_item_indices": [42] }
   ],
   "rows": [
     [
-      { "text": "Common Stock", "bbox": { "x": 67.9, "y": 522.4, "width": 193.0, "height": 9.5 } },
-      { "text": "AAPL",         "bbox": { "x": 293.8, "y": 522.4, "width": 24.0, "height": 9.5 } }
+      { "text": "Common Stock", "bbox": { "x": 67.9, "y": 522.4, "width": 193.0, "height": 9.5 }, "text_item_indices": [43] },
+      { "text": "AAPL",         "bbox": { "x": 293.8, "y": 522.4, "width": 24.0, "height": 9.5 }, "text_item_indices": [44] }
     ]
-  ]
+  ],
+  "text_item_indices": [41, 42, 43, 44]
 }
 ```
 
-For a ruled table, a cell's box is the drawn grid cell. For a borderless one, it is the extent of the spans the cell was built from. Cells that exist only to square off a ragged grid have no `bbox` — there is no ink behind them.
+For a ruled table, a cell's box is the drawn grid cell. For a borderless one, it is the extent of the spans the cell was built from. Cells that exist only to square off a ragged grid have no `bbox` — there is no ink behind them. A text item that straddles a column boundary is split across cells, so its index appears in each of them.
 
 Getting a table into a dataframe is then a two-line transform:
 

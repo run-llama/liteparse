@@ -376,6 +376,11 @@ export interface JsFormField {
 export interface JsLayoutCell {
   text: string
   bbox?: JsAnnotationRect
+  /**
+   * Indices into the page's `textItems` of the items the cell was read
+   * from, in reading order. Empty for padding cells.
+   */
+  textItemIndices: Array<number>
 }
 /**
  * A classified block plus where it sits on the page. Flat by design — `kind`
@@ -427,6 +432,12 @@ export interface JsLayoutBlock {
    * `textItems`. Absent when the block has no page geometry behind it.
    */
   bbox?: JsAnnotationRect
+  /**
+   * Indices into the page's `textItems` of every item the block was read
+   * from, sorted. For tables, the union of the cells'. Empty for `figure`
+   * and for a `rule` drawn as a stroke.
+   */
+  textItemIndices: Array<number>
 }
 export interface JsParseResult {
   /** Total source-document pages before target/max-page filtering. */

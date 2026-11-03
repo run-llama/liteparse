@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::markdown_layout::{Block, Cell, PositionedBlock, SpanCell};
-use crate::types::{ParsedPage, Rect};
+use crate::types::{ParsedPage, Rect, TextItem};
 
 /// One table cell: its rendered text and the region it occupied.
 ///
@@ -34,6 +34,12 @@ pub struct LayoutCell {
     pub colspan: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rowspan: Option<u16>,
+    /// Indices into the page's `text_items` of the items the cell's text was
+    /// read from, in reading order, without repeats. One item can feed
+    /// several cells when a run that straddles a column boundary is split.
+    /// Empty for padding cells.
+    #[serde(default)]
+    pub text_item_indices: Vec<usize>,
 }
 
 impl From<&Cell> for LayoutCell {
@@ -43,6 +49,7 @@ impl From<&Cell> for LayoutCell {
             bbox: c.bbox.clone(),
             colspan: None,
             rowspan: None,
+            text_item_indices: unique(&c.text_item_indices),
         }
     }
 }
@@ -54,8 +61,20 @@ impl From<&SpanCell> for LayoutCell {
             bbox: c.bbox.clone(),
             colspan: (c.colspan > 1).then_some(c.colspan),
             rowspan: (c.rowspan > 1).then_some(c.rowspan),
+            text_item_indices: unique(&c.text_item_indices),
         }
     }
+}
+
+/// `indices` with repeats dropped, first occurrence kept.
+fn unique(indices: &[usize]) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::with_capacity(indices.len());
+    for &i in indices {
+        if !out.contains(&i) {
+            out.push(i);
+        }
+    }
+    out
 }
 
 /// A classified block plus where it sits on the page.
@@ -117,6 +136,11 @@ pub struct LayoutBlock {
     /// band. `None` when the block has no page geometry behind it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bbox: Option<Rect>,
+    /// Indices into the page's `text_items` of every item the block was read
+    /// from, sorted. For tables, the union of the cells'. Empty for `figure`
+    /// and for a `rule` drawn as a stroke.
+    #[serde(default)]
+    pub text_item_indices: Vec<usize>,
 }
 
 impl LayoutBlock {
@@ -138,6 +162,7 @@ impl LayoutBlock {
             id: None,
             format: None,
             bbox,
+            text_item_indices: Vec::new(),
         }
     }
 }
@@ -149,7 +174,7 @@ fn cells(row: &[Cell]) -> Vec<LayoutCell> {
 impl From<&PositionedBlock> for LayoutBlock {
     fn from(pb: &PositionedBlock) -> Self {
         let bbox = pb.bbox.clone();
-        match &pb.block {
+        let block = match &pb.block {
             Block::Heading { level, text } => LayoutBlock {
                 text: Some(text.clone()),
                 level: Some(*level),
@@ -206,6 +231,22 @@ impl From<&PositionedBlock> for LayoutBlock {
                 format: Some(format.clone()),
                 ..LayoutBlock::of("figure", bbox)
             },
+        };
+        let mut text_item_indices = match &pb.block {
+            Block::Table { .. } | Block::MergedTable { .. } => block
+                .header
+                .iter()
+                .flatten()
+                .chain(block.rows.iter().flatten().flatten())
+                .flat_map(|c| c.text_item_indices.iter().copied())
+                .collect(),
+            _ => pb.text_item_indices.clone(),
+        };
+        text_item_indices.sort_unstable();
+        text_item_indices.dedup();
+        LayoutBlock {
+            text_item_indices,
+            ..block
         }
     }
 }
@@ -217,12 +258,24 @@ impl From<&PositionedBlock> for LayoutBlock {
 /// the *projection* frame. On pages where rotation handling moved text (see
 /// `ParsedPage::projected_item_frames`) that frame is a virtual canvas —
 /// unrotated sidebars, body text pushed a page-height down — so those boxes
-/// are mapped back here. Pages without rotated text have an empty table and
-/// pass through unchanged.
+/// are mapped back here through the items they were read from. Pages
+/// without rotated text pass through unchanged.
 pub(crate) fn blocks_for_page(page: &ParsedPage, blocks: &[PositionedBlock]) -> Vec<LayoutBlock> {
     let mut out: Vec<LayoutBlock> = blocks.iter().map(LayoutBlock::from).collect();
+    let n_items = page.text_items.len();
+    for block in &mut out {
+        block.text_item_indices.retain(|&i| i < n_items);
+        for cell in block
+            .header
+            .iter_mut()
+            .flatten()
+            .chain(block.rows.iter_mut().flatten().flatten())
+        {
+            cell.text_item_indices.retain(|&i| i < n_items);
+        }
+    }
     if !page.projected_item_frames.is_empty() {
-        remap_to_page_frame(&mut out, &page.projected_item_frames);
+        remap_to_page_frame(&mut out, &page.text_items);
     }
     clip_tables_to_page(&mut out, page.page_width, page.page_height);
     out
@@ -267,51 +320,45 @@ fn clip_rect(r: &mut Rect, width: f32, height: f32) {
 }
 
 /// Map text-derived block and cell boxes from the projection frame back to
-/// the page frame. A box is the union of the text items it was built from,
-/// so its page-frame counterpart is the union of those items' original
-/// rects — found by testing which projected items sit inside it. `figure`
-/// and `rule` boxes come from graphics, already in page coordinates, and are
-/// left alone; so is any box that contains no projected item (nothing to
-/// map it through).
-fn remap_to_page_frame(blocks: &mut [LayoutBlock], frames: &[(Rect, Rect)]) {
+/// the page frame: a box is the union of the items it was built from, so its
+/// page-frame counterpart is the union of those items' rects. `figure` and
+/// `rule` boxes come from graphics, already in page coordinates, and are
+/// left alone; so is any box with no items behind it.
+fn remap_to_page_frame(blocks: &mut [LayoutBlock], items: &[TextItem]) {
     for block in blocks.iter_mut() {
         if matches!(block.kind.as_str(), "figure" | "rule") {
             continue;
         }
-        remap_opt(&mut block.bbox, frames);
+        remap_opt(&mut block.bbox, &block.text_item_indices, items);
         for cell in block.header.iter_mut().flatten() {
-            remap_opt(&mut cell.bbox, frames);
+            remap_opt(&mut cell.bbox, &cell.text_item_indices, items);
         }
         for cell in block.rows.iter_mut().flatten().flatten() {
-            remap_opt(&mut cell.bbox, frames);
+            remap_opt(&mut cell.bbox, &cell.text_item_indices, items);
         }
     }
 }
 
-fn remap_opt(bbox: &mut Option<Rect>, frames: &[(Rect, Rect)]) {
-    if let Some(r) = bbox.as_ref().and_then(|r| remap_rect(r, frames)) {
-        *bbox = Some(r);
+fn remap_opt(bbox: &mut Option<Rect>, indices: &[usize], items: &[TextItem]) {
+    if bbox.is_none() {
+        return;
     }
-}
-
-/// Union of the original rects of every item whose projected centre lies in
-/// `rect` (with a small tolerance for float drift in the unions). `None` when
-/// no item does.
-fn remap_rect(rect: &Rect, frames: &[(Rect, Rect)]) -> Option<Rect> {
-    const TOL: f32 = 0.5;
-    let x0 = rect.x - TOL;
-    let y0 = rect.y - TOL;
-    let x1 = rect.x + rect.width + TOL;
-    let y1 = rect.y + rect.height + TOL;
     let mut acc: Option<Rect> = None;
-    for (projected, original) in frames {
-        let cx = projected.x + projected.width / 2.0;
-        let cy = projected.y + projected.height / 2.0;
-        if cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1 {
-            Rect::extend(&mut acc, original);
-        }
+    for &i in indices {
+        let item = &items[i];
+        Rect::extend(
+            &mut acc,
+            &Rect {
+                x: item.x,
+                y: item.y,
+                width: item.width,
+                height: item.height,
+            },
+        );
     }
-    acc
+    if acc.is_some() {
+        *bbox = acc;
+    }
 }
 
 #[cfg(test)]
@@ -334,30 +381,38 @@ mod tests {
         }
     }
 
+    fn item(r: Rect) -> TextItem {
+        TextItem {
+            x: r.x,
+            y: r.y,
+            width: r.width,
+            height: r.height,
+            ..TextItem::default()
+        }
+    }
+
     #[test]
-    fn remap_unions_original_rects_of_contained_items() {
-        // Body text displaced one page-height (792pt) down by rotation handling.
-        let frames = vec![
-            (
-                rect(50.0, 892.0, 100.0, 10.0),
-                rect(50.0, 100.0, 100.0, 10.0),
-            ),
-            (
-                rect(50.0, 904.0, 120.0, 10.0),
-                rect(50.0, 112.0, 120.0, 10.0),
-            ),
+    fn remap_unions_the_rects_of_the_items_read() {
+        let items = vec![
+            // Body text displaced one page-height (792pt) down by rotation
+            // handling; the page-frame rects are the items' own.
+            item(rect(50.0, 100.0, 100.0, 10.0)),
+            item(rect(50.0, 112.0, 120.0, 10.0)),
             // A rotated sidebar, unrotated in the projection frame.
-            (
-                rect(20.0, 30.0, 200.0, 12.0),
-                rect(14.0, 300.0, 12.0, 200.0),
-            ),
+            item(rect(14.0, 300.0, 12.0, 200.0)),
         ];
         let mut blocks = vec![
-            para(rect(50.0, 892.0, 120.0, 22.0)),
-            para(rect(20.0, 30.0, 200.0, 12.0)),
+            LayoutBlock {
+                text_item_indices: vec![0, 1],
+                ..para(rect(50.0, 892.0, 120.0, 22.0))
+            },
+            LayoutBlock {
+                text_item_indices: vec![2],
+                ..para(rect(20.0, 30.0, 200.0, 12.0))
+            },
             LayoutBlock::of("figure", Some(rect(300.0, 300.0, 50.0, 50.0))),
         ];
-        remap_to_page_frame(&mut blocks, &frames);
+        remap_to_page_frame(&mut blocks, &items);
         assert_eq!(blocks[0].bbox, Some(rect(50.0, 100.0, 120.0, 22.0)));
         assert_eq!(blocks[1].bbox, Some(rect(14.0, 300.0, 12.0, 200.0)));
         // Graphics-derived boxes are already in page space.
@@ -371,6 +426,7 @@ mod tests {
             bbox: Some(bbox),
             colspan: None,
             rowspan: None,
+            text_item_indices: Vec::new(),
         };
         // A ruled column whose right boundary came from a path drawn far past
         // the 595pt page edge.
@@ -413,9 +469,109 @@ mod tests {
 
     #[test]
     fn remap_leaves_boxes_with_no_items_untouched() {
-        let frames = vec![(rect(0.0, 900.0, 10.0, 10.0), rect(0.0, 100.0, 10.0, 10.0))];
+        let items = vec![item(rect(0.0, 100.0, 10.0, 10.0))];
         let mut blocks = vec![para(rect(200.0, 200.0, 50.0, 10.0))];
-        remap_to_page_frame(&mut blocks, &frames);
+        remap_to_page_frame(&mut blocks, &items);
         assert_eq!(blocks[0].bbox, Some(rect(200.0, 200.0, 50.0, 10.0)));
+    }
+
+    #[test]
+    fn block_items_are_sorted_and_deduplicated() {
+        let pb = PositionedBlock::sourced(
+            Block::Paragraph {
+                text: "x".into(),
+                bold: false,
+                italic: false,
+            },
+            None,
+            vec![5, 2, 5, 9, 2],
+        );
+        assert_eq!(LayoutBlock::from(&pb).text_item_indices, vec![2, 5, 9]);
+    }
+
+    #[test]
+    fn table_block_items_are_the_union_of_its_cells() {
+        let cell = |items: Vec<usize>| Cell {
+            text_item_indices: items,
+            ..Cell::from("x")
+        };
+        // The block's own list is ignored: only the cells say what was read.
+        let pb = PositionedBlock::sourced(
+            Block::Table {
+                header: Some(vec![cell(vec![3])]),
+                rows: vec![vec![cell(vec![1]), cell(vec![2, 1])]],
+            },
+            None,
+            vec![9],
+        );
+        assert_eq!(LayoutBlock::from(&pb).text_item_indices, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn cell_items_keep_reading_order() {
+        let cell = Cell {
+            text_item_indices: vec![9, 3, 9, 7],
+            ..Cell::from("a b")
+        };
+        assert_eq!(LayoutCell::from(&cell).text_item_indices, vec![9, 3, 7]);
+        let span = SpanCell {
+            text_item_indices: vec![4, 4, 1],
+            ..SpanCell::spanning("wide", 2, 1)
+        };
+        assert_eq!(LayoutCell::from(&span).text_item_indices, vec![4, 1]);
+    }
+
+    #[test]
+    fn out_of_range_items_are_dropped_at_the_boundary() {
+        let page = ParsedPage {
+            page_number: 1,
+            page_label: None,
+            page_width: 612.0,
+            page_height: 792.0,
+            content_bounds: None,
+            text: String::new(),
+            markdown: String::new(),
+            text_items: vec![crate::types::TextItem::default(); 2],
+            projected_lines: vec![],
+            regions: crate::types::Region::default(),
+            graphics: vec![],
+            vector_graphics: None,
+            figures: vec![],
+            projected_item_frames: vec![],
+            struct_nodes: vec![],
+            image_refs: vec![],
+            complexity: None,
+            annotations: None,
+            form_fields: None,
+            structure_tree: None,
+            blocks: None,
+        };
+        let para = PositionedBlock::sourced(
+            Block::Paragraph {
+                text: "p".into(),
+                bold: false,
+                italic: false,
+            },
+            None,
+            vec![0, 1, 2, 7],
+        );
+        let cell = Cell {
+            text_item_indices: vec![1, 2],
+            ..Cell::from("c")
+        };
+        let table = PositionedBlock::new(
+            Block::Table {
+                header: None,
+                rows: vec![vec![cell]],
+            },
+            None,
+        );
+        let out = blocks_for_page(&page, &[para, table]);
+        assert_eq!(out[0].text_item_indices, vec![0, 1]);
+        assert_eq!(out[1].text_item_indices, vec![1]);
+        assert_eq!(
+            out[1].rows.as_ref().unwrap()[0][0].text_item_indices,
+            vec![1]
+        );
     }
 }
