@@ -1040,8 +1040,9 @@ fn raw_text_items_account_for_every_glyph() {
     );
 }
 
-/// The opt-in entry point returns the same items plus one advance per glyph, and
-/// those advances are the ones `text_width` sums.
+/// The opt-in entry point returns the same items plus one advance per glyph.
+/// Those advances add up to `text_width`, except in an item with a ligature
+/// (sample.pdf prints "file" with an fi ligature), where they add up to less.
 #[test]
 #[serial]
 fn glyph_widths_are_opt_in_and_sum_to_text_width() {
@@ -1061,11 +1062,16 @@ fn glyph_widths_are_opt_in_and_sum_to_text_width() {
     assert_eq!(plain.len(), with_widths.len());
 
     let mut uneven = false;
+    let mut ligature = false;
     for (a, b) in plain.iter().zip(&with_widths) {
         let widths = b.glyph_widths.as_ref().expect("opt-in fills glyph_widths");
         assert_eq!(widths.len(), b.char_codes.len());
         let sum = widths.iter().fold(0.0f32, |sum, w| sum + w);
-        assert_eq!(sum.to_bits(), b.text_width.to_bits(), "{:?}", b.text);
+        if sum < b.text_width {
+            ligature = true;
+        } else {
+            assert_eq!(sum.to_bits(), b.text_width.to_bits(), "{:?}", b.text);
+        }
         let mut b = b.clone();
         b.glyph_widths = None;
         assert_eq!(a, &b, "opt-in changes nothing else");
@@ -1077,6 +1083,7 @@ fn glyph_widths_are_opt_in_and_sum_to_text_width() {
         uneven,
         "a proportional font gives glyphs different advances"
     );
+    assert!(ligature, "sample.pdf has an item with a ligature");
 }
 
 /// One page that shows `(\002ce) Tj` in 12 pt Helvetica, where char code 2 is the
@@ -1126,7 +1133,8 @@ fn ligature_pdf() -> Vec<u8> {
 
 /// Without the opt-in, `text_width` is the Helvetica advances of the item's glyphs:
 /// a ligature glyph is read by its char code and each of its two chars carries its
-/// whole advance, and a generated space with no font adds 0.
+/// whole advance, and a generated space with no font adds 0. With the opt-in, the
+/// two chars share the ligature's one advance.
 #[test]
 #[serial]
 fn text_width_reads_char_codes_and_counts_a_missing_width_as_zero() {
@@ -1150,7 +1158,7 @@ fn text_width_reads_char_codes_and_counts_a_missing_width_as_zero() {
     let with_widths = extract_raw_text_items_with_glyph_widths(&page, &text_page, &view_box, None);
     assert_eq!(
         with_widths[0].glyph_widths,
-        Some(vec![6.0, 6.0, 6.0, 6.672])
+        Some(vec![3.0, 3.0, 6.0, 6.672])
     );
 
     let document = lib

@@ -94,7 +94,8 @@ pub struct RawTextItem {
     /// Sum of the glyphs' advance widths in text space.
     pub text_width: f32,
     /// One advance width per glyph, parallel to `char_codes`, in the units of
-    /// `text_width` (0 where the font reports none). `Some` only from
+    /// `text_width` (0 where the font reports none). A ligature's advance is split
+    /// evenly across the chars it decodes to. `Some` only from
     /// [`extract_raw_text_items_with_glyph_widths`].
     pub glyph_widths: Option<Vec<f32>>,
     pub x: f32,
@@ -285,6 +286,22 @@ fn load_glyph(
     }
 }
 
+/// pdfium decodes a ligature such as `fi` into one char per letter, each with
+/// the ligature's char code, loose box and full advance. Split that one advance
+/// evenly across its letters so the widths add up to the printed advance.
+/// `text_width` keeps the repeated advances, as the C extractor does.
+fn split_ligature_advances(glyphs: &[Glyph], mut widths: Vec<f32>) -> Vec<f32> {
+    let mut start = 0;
+    for run in glyphs.chunk_by(|a, b| {
+        !a.generated && !b.generated && a.char_code == b.char_code && a.loose == b.loose
+    }) {
+        let share = widths[start] / run.len() as f32;
+        widths[start..start + run.len()].fill(share);
+        start += run.len();
+    }
+    widths
+}
+
 /// Counter-clockwise baseline rotation of a text matrix, in radians, from the
 /// direction of its first column. Formed the way the C extractor forms it — the
 /// degrees wrapped into `[0, 360)` first, then negated and converted — so an
@@ -451,7 +468,7 @@ fn build_item(
         glyph_names,
         angle_radians: first.angle,
         text_width,
-        glyph_widths: keep_glyph_widths.then_some(widths),
+        glyph_widths: keep_glyph_widths.then(|| split_ligature_advances(glyphs, widths)),
         x: bounds.left,
         y: bounds.top,
         width: bounds.right - bounds.left,
