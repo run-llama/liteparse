@@ -1040,6 +1040,141 @@ fn raw_text_items_account_for_every_glyph() {
     );
 }
 
+/// The opt-in entry point returns the same items plus one advance per glyph.
+/// Those advances add up to `text_width`, except in an item with a ligature
+/// (sample.pdf prints "file" with an fi ligature), where they add up to less.
+#[test]
+#[serial]
+fn glyph_widths_are_opt_in_and_sum_to_text_width() {
+    use liteparse::{extract_raw_text_items, extract_raw_text_items_with_glyph_widths};
+
+    let lib = pdfium::Library::init();
+    let document = lib
+        .load_document("../../integration_tests_data/sample.pdf", None)
+        .expect("sample.pdf loads");
+    let page = document.page(0).expect("page 0 loads");
+    let text_page = page.text().expect("text page loads");
+    let view_box = page.view_box().expect("page has a bounding box");
+
+    let plain = extract_raw_text_items(&page, &text_page, &view_box, None);
+    let with_widths = extract_raw_text_items_with_glyph_widths(&page, &text_page, &view_box, None);
+    assert!(plain.iter().all(|item| item.glyph_widths.is_none()));
+    assert_eq!(plain.len(), with_widths.len());
+
+    let mut uneven = false;
+    let mut ligature = false;
+    for (a, b) in plain.iter().zip(&with_widths) {
+        let widths = b.glyph_widths.as_ref().expect("opt-in fills glyph_widths");
+        assert_eq!(widths.len(), b.char_codes.len());
+        let sum = widths.iter().fold(0.0f32, |sum, w| sum + w);
+        if sum < b.text_width {
+            ligature = true;
+        } else {
+            assert_eq!(sum.to_bits(), b.text_width.to_bits(), "{:?}", b.text);
+        }
+        let mut b = b.clone();
+        b.glyph_widths = None;
+        assert_eq!(a, &b, "opt-in changes nothing else");
+        uneven |= widths
+            .windows(2)
+            .any(|w| w[0] > 0.0 && w[1] > 0.0 && w[0] != w[1]);
+    }
+    assert!(
+        uneven,
+        "a proportional font gives glyphs different advances"
+    );
+    assert!(ligature, "sample.pdf has an item with a ligature");
+}
+
+/// One page that shows `(\002ce) Tj` in 12 pt Helvetica, where char code 2 is the
+/// `fi` ligature and its ToUnicode entry maps it to "fi".
+fn ligature_pdf() -> Vec<u8> {
+    let content = "BT /F1 12 Tf 72 700 Td (\\002ce) Tj ET\n";
+    let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /X def\n\
+                1 begincodespacerange <00> <FF> endcodespacerange\n\
+                1 beginbfchar <02> <00660069> endbfchar\n\
+                1 beginbfrange <20> <7E> <0020> endbfrange\n\
+                endcmap CMapName currentdict /CMap defineresource pop end end\n";
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
+         /Resources << /Font << /F1 5 0 R >> >> >>"
+            .to_string(),
+        format!(
+            "<< /Length {} >>\nstream\n{content}endstream",
+            content.len()
+        ),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /Type /Encoding \
+         /BaseEncoding /WinAnsiEncoding /Differences [2 /fi] >> /ToUnicode 6 0 R >>"
+            .to_string(),
+        format!("<< /Length {} >>\nstream\n{cmap}endstream", cmap.len()),
+    ];
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend(format!("{} 0 obj\n{body}\nendobj\n", i + 1).bytes());
+    }
+    let xref = pdf.len();
+    pdf.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).bytes());
+    for offset in offsets {
+        pdf.extend(format!("{offset:010} 00000 n \n").bytes());
+    }
+    pdf.extend(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .bytes(),
+    );
+    pdf
+}
+
+/// Without the opt-in, `text_width` is the Helvetica advances of the item's glyphs:
+/// a ligature glyph is read by its char code and each of its two chars carries its
+/// whole advance, and a generated space with no font adds 0. With the opt-in, the
+/// two chars share the ligature's one advance.
+#[test]
+#[serial]
+fn text_width_reads_char_codes_and_counts_a_missing_width_as_zero() {
+    use liteparse::{extract_raw_text_items, extract_raw_text_items_with_glyph_widths};
+
+    let lib = pdfium::Library::init();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ligature.pdf");
+    std::fs::write(&path, ligature_pdf()).unwrap();
+    let document = lib
+        .load_document(path.to_str().unwrap(), None)
+        .expect("ligature.pdf loads");
+    let page = document.page(0).expect("page 0 loads");
+    let text_page = page.text().expect("text page loads");
+    let view_box = page.view_box().expect("page has a bounding box");
+    let items = extract_raw_text_items(&page, &text_page, &view_box, None);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].text, "fice");
+    // Helvetica advances per 1000 em: fi 500, c 500, e 556; at 12 pt.
+    assert_eq!(items[0].text_width, 6.0 + 6.0 + 6.0 + 6.672);
+    let with_widths = extract_raw_text_items_with_glyph_widths(&page, &text_page, &view_box, None);
+    assert_eq!(
+        with_widths[0].glyph_widths,
+        Some(vec![3.0, 3.0, 6.0, 6.672])
+    );
+
+    let document = lib
+        .load_document("../../integration_tests_data/diagonal_column.pdf", None)
+        .expect("diagonal_column.pdf loads");
+    let page = document.page(0).expect("page 0 loads");
+    let text_page = page.text().expect("text page loads");
+    let view_box = page.view_box().expect("page has a bounding box");
+    let generated: Vec<_> = extract_raw_text_items(&page, &text_page, &view_box, None)
+        .into_iter()
+        .filter(|item| item.char_codes == [0])
+        .collect();
+    assert!(!generated.is_empty(), "the page has generated spaces");
+    assert!(generated.iter().all(|item| item.text_width == 0.0));
+}
+
 /// A page whose content stream pairs a y-flipped CTM and `-100 Tz` with a
 /// negative `Tf` operand renders upright, but PDFium's per-char angle only
 /// sees the mirrored char matrix and reports 180°. `rotation` must describe
