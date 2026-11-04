@@ -2590,7 +2590,9 @@ fn merge_fragmented_table_clusters(runs: Vec<TableRun>, lines: &[ProjectedLine])
         }
         if j - i >= 2 {
             let floor = out.last().map(|r| r.end).unwrap_or(0);
-            if let Some(merged) = build_union_table(&runs[i..j], lines, floor) {
+            let merged = build_union_table(&runs[i..j], lines, floor)
+                .or_else(|| build_aligned_union_table(&runs[i..j], lines, floor));
+            if let Some(merged) = merged {
                 if dbgt {
                     eprintln!(
                         "[tbl-cluster] merged {} runs (lines {}..{}) into one table",
@@ -3106,6 +3108,540 @@ fn build_union_table(
         // starts at the first fragment's body and `union_header_from_above`
         // stops at prose, so any stepped-over line lands outside the new span
         // and is classified normally — preserved as a paragraph, not dropped.
+        interstitials,
+        bbox: lines_bbox(lines, start, window_end),
+        block: Block::Table { header, rows },
+    })
+}
+
+// ── Alignment-aware cluster re-extraction ─────────────────────────────────
+//
+// `build_union_table` derives the union tracks from cell *start* x. That is
+// right for left-aligned text columns, but a right-aligned money column has no
+// common start: `$482,110.40`, `$0.00` and `$31,905.22` all end at the same x
+// and start wherever their width puts them. Start-x clustering then scatters
+// one column into several weak tracks (or merges it into its neighbour), the
+// union comes out narrower than the widest fragment, and the cluster stays
+// split into separate tables (#449).
+//
+// The fallback below reads each column by its own alignment: value-like cells
+// that share a right edge form a right-aligned column, everything else
+// clusters by start x as before. It only runs after `build_union_table` has
+// rejected a cluster, and only accepts a result that found at least one
+// right-aligned column, so tables the start-x union already handles are
+// untouched.
+
+/// Median words per cell at which a text column past the first reads as prose.
+const ALIGNED_PROSE_COLUMN_MEDIAN_WORDS: usize = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ColumnAlign {
+    Left,
+    Right,
+}
+
+/// A column of the alignment-aware union: its x-extent and the edge its cells
+/// share (`start` for left-aligned, `end` for right-aligned).
+#[derive(Debug, Clone)]
+struct AlignedColumn {
+    start: f32,
+    end: f32,
+    align: ColumnAlign,
+}
+
+/// One horizontal unit of a row for column inference: a gutter-split piece,
+/// or a single word of a piece that is a run of merged values
+/// (`$0.00 $9,215.75 $491,326.15`).
+#[derive(Debug, Clone)]
+struct RowToken {
+    x0: f32,
+    x1: f32,
+    text: String,
+    value: bool,
+}
+
+/// A number-shaped cell: currency, percent, decimal, grouped or plain digits,
+/// and not a label that merely contains one. Unlike `is_value_like`, bare
+/// integers count: the question here is how a column aligns, and integer
+/// columns are right-aligned like any other numbers.
+fn is_value_token(text: &str) -> bool {
+    let t = text.trim();
+    let plain_number = t.chars().any(|c| c.is_ascii_digit())
+        && t.chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, ',' | '.' | '-' | '(' | ')' | '%' | '$'));
+    (plain_number || is_value_like(t)) && !is_alpha_dominant(t)
+}
+
+/// Dot leaders (`.........`) between a label and its value. They belong to the
+/// label: never a column of their own.
+fn is_leader_token(text: &str) -> bool {
+    let t = text.trim();
+    t.chars().count() >= 3
+        && t.chars()
+            .all(|c| matches!(c, '.' | '\u{2026}' | '\u{b7}' | '_'))
+}
+
+/// Tokens of one piece. A piece made only of value words is split per word:
+/// PDFium joins tightly set numeric cells into one run, and each value still
+/// carries its own right edge in the word boxes.
+fn piece_tokens(piece: &SpanPiece<'_>) -> Vec<RowToken> {
+    if piece.words.len() >= 2 && piece.words.iter().all(|w| is_value_token(&w.text)) {
+        return piece
+            .words
+            .iter()
+            .map(|w| RowToken {
+                x0: w.x,
+                x1: w.x + w.width.max(0.0),
+                text: w.text.trim().to_string(),
+                value: true,
+            })
+            .collect();
+    }
+    vec![RowToken {
+        x0: piece.x,
+        x1: piece.end_x,
+        text: piece.text.clone(),
+        value: is_value_token(&piece.text),
+    }]
+}
+
+/// Single-link 1-D clusters of `(x, line)` points at `tol`. Returns each
+/// cluster's member indices (into `points`) with its distinct-line support.
+fn cluster_points(points: &[(f32, usize)], tol: f32) -> Vec<(Vec<usize>, usize)> {
+    let mut order: Vec<usize> = (0..points.len()).collect();
+    order.sort_by(|&a, &b| points[a].0.total_cmp(&points[b].0));
+    let mut out: Vec<(Vec<usize>, usize)> = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
+    let mut anchor = 0.0f32;
+    let flush = |current: &mut Vec<usize>, out: &mut Vec<(Vec<usize>, usize)>| {
+        if current.is_empty() {
+            return;
+        }
+        let mut lines: Vec<usize> = current.iter().map(|&i| points[i].1).collect();
+        lines.sort_unstable();
+        lines.dedup();
+        out.push((std::mem::take(current), lines.len()));
+    };
+    for idx in order {
+        let x = points[idx].0;
+        if !current.is_empty() && (x - anchor).abs() > tol {
+            flush(&mut current, &mut out);
+        }
+        current.push(idx);
+        anchor = current.iter().map(|&i| points[i].0).sum::<f32>() / current.len() as f32;
+    }
+    flush(&mut current, &mut out);
+    out
+}
+
+/// Infer alignment-aware columns from the multi-token lines of a window.
+/// A column needs cells on at least two lines. Returns `None` unless at least
+/// one right-aligned value column exists - without one this pass has nothing
+/// to add over the start-x union.
+fn infer_aligned_columns(rows: &[Vec<RowToken>]) -> Option<Vec<AlignedColumn>> {
+    let tol = TABLE_TRACK_TOLERANCE_PT;
+    let tokens: Vec<(&RowToken, usize)> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.len() >= 2)
+        .flat_map(|(li, r)| {
+            r.iter()
+                .filter(|t| !is_leader_token(&t.text))
+                .map(move |t| (t, li))
+        })
+        .collect();
+
+    let value_ends: Vec<(f32, usize)> = tokens
+        .iter()
+        .filter(|(t, _)| t.value)
+        .map(|(t, li)| (t.x1, *li))
+        .collect();
+    let value_idx: Vec<usize> = tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, (t, _))| t.value)
+        .map(|(i, _)| i)
+        .collect();
+    let mut columns: Vec<AlignedColumn> = Vec::new();
+    let mut in_right_column = vec![false; tokens.len()];
+    for (members, support) in cluster_points(&value_ends, tol) {
+        if support < 2 {
+            continue;
+        }
+        let toks: Vec<&RowToken> = members.iter().map(|&m| tokens[value_idx[m]].0).collect();
+        for &m in &members {
+            in_right_column[value_idx[m]] = true;
+        }
+        columns.push(AlignedColumn {
+            start: toks.iter().map(|t| t.x0).fold(f32::INFINITY, f32::min),
+            end: toks.iter().map(|t| t.x1).fold(f32::NEG_INFINITY, f32::max),
+            align: ColumnAlign::Right,
+        });
+    }
+    if columns.is_empty() {
+        return None;
+    }
+
+    let rest: Vec<usize> = (0..tokens.len()).filter(|&i| !in_right_column[i]).collect();
+    let starts: Vec<(f32, usize)> = rest
+        .iter()
+        .map(|&i| (tokens[i].0.x0, tokens[i].1))
+        .collect();
+    for (members, support) in cluster_points(&starts, tol) {
+        if support < 2 {
+            continue;
+        }
+        let toks: Vec<&RowToken> = members.iter().map(|&m| tokens[rest[m]].0).collect();
+        let start = toks.iter().map(|t| t.x0).sum::<f32>() / toks.len() as f32;
+        let end = toks.iter().map(|t| t.x1).fold(f32::NEG_INFINITY, f32::max);
+        // Left-aligned header words over a right-aligned column (`Federal` /
+        // `Program` above `141,000`) are that column, not a new one.
+        let over_right_column = columns.iter().any(|c| {
+            if c.align != ColumnAlign::Right {
+                return false;
+            }
+            let overlap = end.min(c.end) - start.max(c.start);
+            let narrower = (end - start).min(c.end - c.start).max(1.0);
+            (start >= c.start - tol && start <= c.end) || overlap >= narrower * 0.5
+        });
+        if over_right_column {
+            continue;
+        }
+        columns.push(AlignedColumn {
+            start,
+            end,
+            align: ColumnAlign::Left,
+        });
+    }
+    columns.sort_by(|a, b| a.start.total_cmp(&b.start));
+    Some(columns)
+}
+
+/// Whether a fragment's track `(s, e)` is already represented by `columns`. A
+/// right-aligned column owns the gap back to the previous column's right edge,
+/// where its (usually left-aligned) header sits.
+fn track_covered(track: (f32, f32), columns: &[AlignedColumn]) -> bool {
+    let tol = TABLE_TRACK_TOLERANCE_PT;
+    let s = track.0;
+    columns.iter().enumerate().any(|(i, c)| match c.align {
+        ColumnAlign::Left => s >= c.start - TABLE_SUBSET_TRACK_TOLERANCE_PT && s <= c.end,
+        ColumnAlign::Right => {
+            let prev_end = if i > 0 {
+                columns[i - 1].end
+            } else {
+                f32::NEG_INFINITY
+            };
+            s > prev_end && s <= c.end + tol
+        }
+    })
+}
+
+/// Column for one token: an exact edge match first (start for left-aligned,
+/// end for right-aligned), then the column it overlaps most.
+fn aligned_column_for(token: &RowToken, columns: &[AlignedColumn]) -> Option<usize> {
+    let tol = TABLE_TRACK_TOLERANCE_PT;
+    let edge = columns
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            let d = match c.align {
+                ColumnAlign::Left => (token.x0 - c.start).abs(),
+                ColumnAlign::Right => (token.x1 - c.end).abs(),
+            };
+            (d <= tol).then_some((i, d))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1));
+    if let Some((i, _)) = edge {
+        return Some(i);
+    }
+    columns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (i, token.x1.min(c.end) - token.x0.max(c.start)))
+        .filter(|&(_, overlap)| overlap > 0.0)
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _)| i)
+}
+
+/// Split a text piece at word boundaries where a later column starts
+/// (`Freight Charge Tax` over the `Freight Charge` and `Tax` columns). Only
+/// cuts where a word lands on a column edge, so ordinary multi-word cell text
+/// is never shredded.
+fn split_piece_at_columns(piece: &SpanPiece<'_>, columns: &[AlignedColumn]) -> Vec<RowToken> {
+    let tol = TABLE_TRACK_TOLERANCE_PT;
+    if piece.words.len() < 2 {
+        return piece_tokens(piece);
+    }
+    let mut groups: Vec<Vec<&crate::types::WordBox>> = vec![vec![piece.words[0]]];
+    for w in &piece.words[1..] {
+        let at_column_start = columns.iter().any(|c| (w.x - c.start).abs() <= tol);
+        if at_column_start {
+            groups.push(Vec::new());
+        }
+        groups.last_mut().unwrap().push(w);
+    }
+    if groups.len() < 2 {
+        return piece_tokens(piece);
+    }
+    groups
+        .into_iter()
+        .map(|g| {
+            let text = collapse_whitespace(
+                &g.iter()
+                    .map(|w| w.text.trim())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+            RowToken {
+                x0: g[0].x,
+                x1: g.last().map_or(g[0].x, |w| w.x + w.width.max(0.0)),
+                value: is_value_token(&text),
+                text,
+            }
+        })
+        .collect()
+}
+
+/// Bin one line into the aligned columns. A single text piece (a note or a
+/// sparse label) goes whole to the column it starts in; a line whose tokens
+/// can't be placed left to right returns `None`.
+fn bin_line_aligned(line: &ProjectedLine, columns: &[AlignedColumn]) -> Option<Vec<TableCell>> {
+    let pieces = line_pieces(line);
+    let tokens: Vec<RowToken> = if pieces.len() == 1 && piece_tokens(&pieces[0]).len() == 1 {
+        piece_tokens(&pieces[0])
+    } else {
+        pieces
+            .iter()
+            .flat_map(|p| {
+                let t = piece_tokens(p);
+                if t.len() > 1 {
+                    t
+                } else {
+                    split_piece_at_columns(p, columns)
+                }
+            })
+            .collect()
+    };
+    let mut cells: Vec<TableCell> = columns
+        .iter()
+        .map(|c| TableCell {
+            start_x: c.start,
+            end_x: c.start,
+            text: String::new(),
+            bold: false,
+        })
+        .collect();
+    let mut filled = vec![false; columns.len()];
+    let mut last_col = 0usize;
+    for token in tokens.iter().filter(|t| !t.text.trim().is_empty()) {
+        let col = if is_leader_token(&token.text) && filled[last_col] {
+            last_col
+        } else {
+            aligned_column_for(token, columns)?
+        };
+        if col < last_col {
+            return None;
+        }
+        last_col = col;
+        let cell = &mut cells[col];
+        if filled[col] {
+            cell.text.push(' ');
+            cell.start_x = cell.start_x.min(token.x0);
+        } else {
+            cell.start_x = token.x0;
+        }
+        cell.text.push_str(token.text.trim());
+        cell.end_x = cell.end_x.max(token.x1);
+        filled[col] = true;
+    }
+    Some(cells)
+}
+
+/// Re-extract a cluster against alignment-aware columns. Fallback for
+/// clusters `build_union_table` rejects; same soundness gates (no column the
+/// fragments found is lost, bounded unbinnable lines).
+fn build_aligned_union_table(
+    cluster: &[TableRun],
+    lines: &[ProjectedLine],
+    floor: usize,
+) -> Option<TableRun> {
+    let dbgt = *super::flags::DEBUG_TABLE;
+    let window_start = cluster.first()?.body_start;
+    let window_end = cluster.last()?.end.min(lines.len());
+    if window_start >= window_end {
+        return None;
+    }
+    let window = &lines[window_start..window_end];
+    let token_rows: Vec<Vec<RowToken>> = window
+        .iter()
+        .map(|l| line_pieces(l).iter().flat_map(piece_tokens).collect())
+        .collect();
+    // Horizontal extent of what the fragments themselves took as table cells.
+    // A token outside it is a neighbouring page column the fragments stepped
+    // over (prose beside the table); re-binning would pull it into the table.
+    let mut extent = (f32::INFINITY, f32::NEG_INFINITY);
+    for run in cluster {
+        if let Block::Table { header, rows } = &run.block {
+            for b in header
+                .iter()
+                .chain(rows.iter())
+                .flatten()
+                .filter_map(|c| c.bbox.as_ref())
+            {
+                extent = (extent.0.min(b.x), extent.1.max(b.x + b.width));
+            }
+        }
+    }
+    let slack = TABLE_SUBSET_TRACK_TOLERANCE_PT;
+    if extent.0 > extent.1
+        || token_rows
+            .iter()
+            .flatten()
+            .any(|t| t.x0 > extent.1 + slack || t.x1 < extent.0 - slack)
+    {
+        if dbgt {
+            eprintln!("[tbl-cluster-aligned] reject: content outside the fragments' extent");
+        }
+        return None;
+    }
+    let mut columns = infer_aligned_columns(&token_rows)?;
+    // Keep every column a fragment already found, even one no body row fills
+    // (an empty `Suffix` column under its header).
+    for run in cluster {
+        for track in run_body_tracks(run, lines).unwrap_or_default() {
+            if !track_covered(track, &columns) {
+                columns.push(AlignedColumn {
+                    start: track.0,
+                    end: track.1,
+                    align: ColumnAlign::Left,
+                });
+                columns.sort_by(|a, b| a.start.total_cmp(&b.start));
+            }
+        }
+    }
+    // A text column past the first whose cells run to sentence length is a
+    // neighbouring page column of prose, not a table column.
+    let mut words_per_col: Vec<Vec<usize>> = vec![Vec::new(); columns.len()];
+    for row in token_rows.iter().filter(|r| r.len() >= 2) {
+        for t in row.iter().filter(|t| !t.value && !is_leader_token(&t.text)) {
+            if let Some(c) = aligned_column_for(t, &columns) {
+                words_per_col[c].push(t.text.split_whitespace().count());
+            }
+        }
+    }
+    let prose_column = words_per_col.iter_mut().skip(1).any(|w| {
+        w.sort_unstable();
+        w.len() >= 2 && w[w.len() / 2] >= ALIGNED_PROSE_COLUMN_MEDIAN_WORDS
+    });
+    if prose_column {
+        if dbgt {
+            eprintln!("[tbl-cluster-aligned] reject: a non-label column holds running prose");
+        }
+        return None;
+    }
+    let max_run_cols = cluster.iter().filter_map(run_column_count).max()?;
+    if columns.len() < TABLE_MIN_COLUMNS || columns.len() < max_run_cols {
+        if dbgt {
+            eprintln!(
+                "[tbl-cluster-aligned] reject: {} columns < widest fragment {max_run_cols}",
+                columns.len()
+            );
+        }
+        return None;
+    }
+
+    let mut rows: Vec<Vec<Cell>> = Vec::new();
+    let mut failed = 0usize;
+    for line in window {
+        if line.text.trim().is_empty() {
+            continue;
+        }
+        match bin_line_aligned(line, &columns) {
+            Some(cells) if cells.iter().any(|c| !c.text.is_empty()) => {
+                rows.push(
+                    cells
+                        .iter()
+                        .map(|c| {
+                            if c.text.is_empty() {
+                                Cell::default()
+                            } else {
+                                located_cell(c, line)
+                            }
+                        })
+                        .collect(),
+                );
+            }
+            Some(_) => {}
+            None => {
+                failed += 1;
+                let mut row = vec![Cell::default(); columns.len()];
+                row[0] = Cell::located(collapse_whitespace(line.text.trim()), line.bbox.clone());
+                rows.push(row);
+            }
+        }
+    }
+    // A column no line put any text in is an artifact of a fragment's track
+    // (two fragments reading one column at slightly different x); drop it.
+    let used: Vec<bool> = (0..columns.len())
+        .map(|c| rows.iter().any(|r| !r[c].text.is_empty()))
+        .collect();
+    if used.iter().any(|u| !u) {
+        for row in &mut rows {
+            let mut c = 0;
+            row.retain(|_| {
+                c += 1;
+                used[c - 1]
+            });
+        }
+        let mut c = 0;
+        columns.retain(|_| {
+            c += 1;
+            used[c - 1]
+        });
+    }
+    if (failed as f32) > (window.len() as f32) * TABLE_CLUSTER_MAX_FAILED_ROW_FRAC {
+        if dbgt {
+            eprintln!(
+                "[tbl-cluster-aligned] reject: {failed}/{} lines unbinnable",
+                window.len()
+            );
+        }
+        return None;
+    }
+    if rows.len() < TABLE_MIN_ROWS || columns.len() < TABLE_MIN_COLUMNS {
+        return None;
+    }
+    if dbgt {
+        eprintln!(
+            "[tbl-cluster-aligned] {} columns [{}] over lines {window_start}..{window_end}",
+            columns.len(),
+            columns
+                .iter()
+                .map(|c| format!(
+                    "{:.0}-{:.0}{}",
+                    c.start,
+                    c.end,
+                    if c.align == ColumnAlign::Right {
+                        "R"
+                    } else {
+                        ""
+                    }
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+    }
+
+    let ranges: Vec<(f32, f32)> = columns.iter().map(|c| (c.start, c.end)).collect();
+    let absorbed = union_header_from_above(lines, window_start, floor, &ranges, false);
+    let (start, header, interstitials) = match absorbed {
+        Some((hstart, header, interstitials)) => (hstart, Some(header), interstitials),
+        None => (window_start, None, Vec::new()),
+    };
+    Some(TableRun {
+        start,
+        end: window_end,
+        body_start: window_start,
         interstitials,
         bbox: lines_bbox(lines, start, window_end),
         block: Block::Table { header, rows },
@@ -6407,6 +6943,183 @@ mod tests {
         let before = xs.clone();
         collapse_gutter_columns(&mut xs, &rows, false);
         assert_eq!(xs, before, "wide blank columns must not fuse: {xs:?}");
+    }
+
+    fn tok(x0: f32, x1: f32, text: &str) -> RowToken {
+        RowToken {
+            x0,
+            x1,
+            text: text.to_string(),
+            value: is_value_token(text),
+        }
+    }
+
+    #[test]
+    fn value_tokens_include_plain_integers_but_not_labels() {
+        assert!(is_value_token("$482,110.40"));
+        assert!(is_value_token("1,314,000"));
+        assert!(is_value_token("14"));
+        assert!(is_value_token("(3.2)"));
+        assert!(!is_value_token("IC-1048"));
+        assert!(!is_value_token("Total 2024 revenue 1,200"));
+        assert!(is_leader_token("......"));
+        assert!(!is_leader_token(".."));
+        assert!(!is_leader_token("Any Injury ...."));
+    }
+
+    #[test]
+    fn right_aligned_amounts_form_one_column_despite_ragged_starts() {
+        // `$482,110.40`, `$0.00` and `$31,905.22` share a right edge at 464
+        // but start 21pt apart; a left-aligned header sits over them.
+        let rows = vec![
+            vec![
+                tok(215.0, 247.0, "Item Code"),
+                tok(424.0, 452.8, "Unit Cost"),
+            ],
+            vec![
+                tok(215.0, 240.0, "IC-1048"),
+                tok(425.1, 464.0, "$482,110.40"),
+            ],
+            vec![tok(215.0, 240.0, "IC-1048"), tok(446.5, 464.0, "$0.00")],
+            vec![
+                tok(215.0, 240.0, "IC-1048"),
+                tok(429.0, 464.0, "$31,905.22"),
+            ],
+        ];
+        let cols = infer_aligned_columns(&rows).unwrap();
+        assert_eq!(cols.len(), 2, "{cols:?}");
+        assert_eq!(cols[0].align, ColumnAlign::Left);
+        assert_eq!(cols[1].align, ColumnAlign::Right);
+        assert!((cols[1].start - 425.1).abs() < 0.01 && (cols[1].end - 464.0).abs() < 0.01);
+        // The header word lands in the amount column, by overlap.
+        assert_eq!(aligned_column_for(&rows[0][1], &cols), Some(1));
+    }
+
+    #[test]
+    fn no_right_aligned_column_means_nothing_to_add() {
+        let rows = vec![
+            vec![tok(50.0, 80.0, "Name"), tok(150.0, 180.0, "City")],
+            vec![tok(50.0, 75.0, "Ann"), tok(150.0, 190.0, "Boston")],
+            vec![tok(50.0, 78.0, "Raj"), tok(150.0, 185.0, "Austin")],
+        ];
+        assert!(infer_aligned_columns(&rows).is_none());
+    }
+
+    #[test]
+    fn fragment_track_coverage_respects_column_alignment() {
+        let cols = vec![
+            AlignedColumn {
+                start: 300.0,
+                end: 388.0,
+                align: ColumnAlign::Left,
+            },
+            AlignedColumn {
+                start: 425.0,
+                end: 464.0,
+                align: ColumnAlign::Right,
+            },
+            AlignedColumn {
+                start: 483.0,
+                end: 514.0,
+                align: ColumnAlign::Right,
+            },
+        ];
+        // A header left-aligned in the gutter before a right-aligned column.
+        assert!(track_covered((470.0, 517.0), &cols));
+        // Inside a text column.
+        assert!(track_covered((310.0, 330.0), &cols));
+        // An empty column nobody filled stays uncovered, so it is kept.
+        assert!(!track_covered((108.0, 125.0), &cols));
+    }
+
+    #[test]
+    fn merged_value_run_splits_per_word_and_headers_split_at_column_starts() {
+        let words = [
+            crate::types::WordBox {
+                text: "$0.00".into(),
+                x: 496.5,
+                y: 0.0,
+                width: 17.5,
+                height: 7.0,
+            },
+            crate::types::WordBox {
+                text: "$9,215.75".into(),
+                x: 518.9,
+                y: 0.0,
+                width: 31.1,
+                height: 7.0,
+            },
+        ];
+        let span = TextItem {
+            text: "$0.00 $9,215.75".into(),
+            x: 496.5,
+            width: 53.5,
+            ..Default::default()
+        };
+        let piece = SpanPiece {
+            x: 496.5,
+            end_x: 550.0,
+            text: span.text.clone(),
+            span: &span,
+            words: words.iter().collect(),
+        };
+        let toks = piece_tokens(&piece);
+        assert_eq!(toks.len(), 2);
+        assert!((toks[1].x1 - 550.0).abs() < 0.01);
+
+        let header_words = [
+            crate::types::WordBox {
+                text: "Freight".into(),
+                x: 470.0,
+                y: 0.0,
+                width: 23.0,
+                height: 7.0,
+            },
+            crate::types::WordBox {
+                text: "Charge".into(),
+                x: 495.0,
+                y: 0.0,
+                width: 23.0,
+                height: 7.0,
+            },
+            crate::types::WordBox {
+                text: "Tax".into(),
+                x: 520.0,
+                y: 0.0,
+                width: 12.0,
+                height: 7.0,
+            },
+        ];
+        let header_span = TextItem {
+            text: "Freight Charge Tax".into(),
+            x: 470.0,
+            width: 62.0,
+            ..Default::default()
+        };
+        let header = SpanPiece {
+            x: 470.0,
+            end_x: 532.0,
+            text: header_span.text.clone(),
+            span: &header_span,
+            words: header_words.iter().collect(),
+        };
+        let cols = vec![
+            AlignedColumn {
+                start: 483.0,
+                end: 514.0,
+                align: ColumnAlign::Right,
+            },
+            AlignedColumn {
+                start: 518.9,
+                end: 550.0,
+                align: ColumnAlign::Right,
+            },
+        ];
+        let parts: Vec<String> = split_piece_at_columns(&header, &cols)
+            .into_iter()
+            .map(|t| t.text)
+            .collect();
+        assert_eq!(parts, ["Freight Charge", "Tax"]);
     }
 
     #[test]
