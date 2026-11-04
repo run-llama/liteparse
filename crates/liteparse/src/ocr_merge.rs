@@ -67,8 +67,8 @@ pub struct OcrRaster {
     /// and the merge applies the stricter artifact filters.
     pub has_native_text: bool,
     /// Embedded raster figure rects (viewport pt, excluding full-page
-    /// backgrounds), so the merge can judge each figure's OCR output as a
-    /// group — a chart's axis/legend labels are dropped together.
+    /// backgrounds). Carried for consumers of the stages API; the merge
+    /// itself does not filter on them.
     pub image_rects: Vec<Rect>,
     /// The page's native text is an invisible OCR layer the new OCR replaces
     /// ([`ComplexityReason::InvisibleTextLayer`]).
@@ -1177,7 +1177,7 @@ pub async fn recognize_rasters(
 ///
 /// Per page, unusable native text (garbled fonts, unmappable Type3) is dropped
 /// first so OCR can replace it; then each result is filtered against rule
-/// artifacts, chart figures and overlap with surviving native text before
+/// artifacts and overlap with surviving native text before
 /// being appended as an `OCR`-font [`TextItem`] in viewport points.
 ///
 /// Outcomes are matched to pages by `page_number`; an outcome for a page not
@@ -1225,7 +1225,7 @@ pub fn merge_ocr_results(
             page_number,
             dpi: page_dpi,
             has_native_text,
-            image_rects,
+            image_rects: _,
             replace_native,
             results: ocr_results,
             error,
@@ -1303,14 +1303,6 @@ pub fn merge_ocr_results(
                 Some(deg) => rotate_about(x, y, cx, cy, -deg),
                 None => (x, y),
             }
-        };
-        // Judge each embedded figure's OCR output as a group: a figure whose
-        // recognised text is mostly numbers and short tokens is a chart
-        // (axes, ticks, legend keys), and none of it belongs in the text flow.
-        let chart_images: Vec<bool> = if has_native_text {
-            chart_like_images(&image_rects, &ocr_results, scale_factor)
-        } else {
-            Vec::new()
         };
         if debug_ocr {
             eprintln!(
@@ -1392,19 +1384,6 @@ pub fn merge_ocr_results(
                         "[ocr-merge]   skip(rule-artifact) {:?} w={:.1} h={:.1}",
                         r.text, ocr_w, ocr_h
                     );
-                }
-                continue;
-            }
-            if has_native_text
-                && chart_images
-                    .iter()
-                    .zip(&image_rects)
-                    .any(|(is_chart, rect)| {
-                        *is_chart && box_center_in(rect, ocr_x, ocr_y, ocr_w, ocr_h)
-                    })
-            {
-                if debug_ocr {
-                    eprintln!("[ocr-merge]   skip(chart-figure) {:?}", r.text);
                 }
                 continue;
             }
@@ -2209,80 +2188,6 @@ fn is_rule_artifact(text: &str, w: f32, h: f32) -> bool {
     false
 }
 
-/// Minimum OCR results inside a figure before it is judged as a chart.
-const CHART_MIN_RESULTS: usize = 4;
-/// Fraction of a figure's OCR results that must be numeric or very short
-/// tokens for the figure to count as a chart.
-const CHART_LABEL_FRACTION: f32 = 0.5;
-
-fn box_center_in(rect: &Rect, x: f32, y: f32, w: f32, h: f32) -> bool {
-    let cx = x + w / 2.0;
-    let cy = y + h / 2.0;
-    cx >= rect.x && cx <= rect.x + rect.width && cy >= rect.y && cy <= rect.y + rect.height
-}
-
-/// A chart label: a number (with separators/units) or a token of ≤ 3 chars.
-///
-/// The length rule only applies to text without CJK characters. Tesseract
-/// splits Chinese, Japanese and Korean text into words of one to three
-/// characters ("を", "変換", "します"), so in those scripts a short token is
-/// ordinary prose, not an axis tick or legend key.
-fn is_chart_label(text: &str) -> bool {
-    let t = text.trim();
-    if t.chars().count() <= 3 && !t.chars().any(is_cjk) {
-        return true;
-    }
-    t.chars().any(|c| c.is_ascii_digit())
-        && t.chars().all(|c| {
-            c.is_ascii_digit()
-                || matches!(
-                    c,
-                    ',' | '.' | '%' | '-' | '+' | '$' | '€' | '£' | ' ' | 'k' | 'K' | 'M' | 'x'
-                )
-        })
-}
-
-/// Han ideographs, kana and Hangul: scripts written without spaces between
-/// words, or with short syllable blocks, where OCR words are naturally short.
-fn is_cjk(c: char) -> bool {
-    matches!(c,
-        '\u{1100}'..='\u{11FF}'   // Hangul Jamo
-        | '\u{3040}'..='\u{30FF}' // Hiragana, Katakana
-        | '\u{3130}'..='\u{318F}' // Hangul Compatibility Jamo
-        | '\u{3400}'..='\u{4DBF}' // CJK Unified Ideographs Extension A
-        | '\u{4E00}'..='\u{9FFF}' // CJK Unified Ideographs
-        | '\u{AC00}'..='\u{D7AF}' // Hangul Syllables
-        | '\u{F900}'..='\u{FAFF}' // CJK Compatibility Ideographs
-        | '\u{FF66}'..='\u{FF9F}' // Halfwidth Katakana
-    )
-}
-
-/// For each figure rect, whether its OCR results look like a chart's
-/// axes/ticks/legend rather than text worth keeping.
-fn chart_like_images(rects: &[Rect], results: &[OcrResult], scale_factor: f32) -> Vec<bool> {
-    rects
-        .iter()
-        .map(|rect| {
-            let (mut n, mut labels) = (0usize, 0usize);
-            for r in results {
-                let (x, y, w, h) = (
-                    r.bbox[0] * scale_factor,
-                    r.bbox[1] * scale_factor,
-                    (r.bbox[2] - r.bbox[0]) * scale_factor,
-                    (r.bbox[3] - r.bbox[1]) * scale_factor,
-                );
-                if box_center_in(rect, x, y, w, h) {
-                    n += 1;
-                    if is_chart_label(&r.text) {
-                        labels += 1;
-                    }
-                }
-            }
-            n >= CHART_MIN_RESULTS && labels as f32 >= CHART_LABEL_FRACTION * n as f32
-        })
-        .collect()
-}
-
 fn overlaps_existing_text(
     items: &[TextItem],
     ocr_x: f32,
@@ -2419,68 +2324,6 @@ mod tests {
         // Anything with letters/digits and more than one char is text.
         assert!(!is_rule_artifact("If", 1.0, 12.0));
         assert!(!is_rule_artifact("N/A", 12.0, 8.0));
-    }
-
-    #[test]
-    fn chart_labels_and_chart_like_figures() {
-        assert!(is_chart_label("140,000"));
-        assert!(is_chart_label("2016"));
-        assert!(is_chart_label("$1.5M"));
-        assert!(is_chart_label("0"));
-        assert!(is_chart_label("Yr"));
-        assert!(!is_chart_label("Year"));
-        assert!(!is_chart_label("Fruit Production in British Columbia"));
-        // Short CJK words are prose, not chart labels.
-        assert!(!is_chart_label("を"));
-        assert!(!is_chart_label("変換"));
-        assert!(!is_chart_label("します"));
-        assert!(!is_chart_label("中文"));
-        assert!(!is_chart_label("한국"));
-
-        let rect = Rect {
-            x: 50.0,
-            y: 100.0,
-            width: 200.0,
-            height: 150.0,
-        };
-        let mk = |text: &str, x: f32, y: f32| OcrResult {
-            text: text.to_string(),
-            bbox: [x, y, x + 20.0, y + 8.0],
-            confidence: 0.9,
-            polygon: None,
-        };
-        // Axis ticks + one title: mostly labels -> chart.
-        let chart = vec![
-            mk("100", 60.0, 110.0),
-            mk("80", 60.0, 130.0),
-            mk("60", 60.0, 150.0),
-            mk("2016", 100.0, 240.0),
-            mk("Fruit Production", 120.0, 105.0),
-        ];
-        assert_eq!(chart_like_images(&[rect.clone()], &chart, 1.0), vec![true]);
-        // An infographic with sentences: not a chart.
-        let prose = vec![
-            mk("Wash your hands", 60.0, 110.0),
-            mk("for twenty seconds", 60.0, 130.0),
-            mk("before every meal", 60.0, 150.0),
-            mk("2020", 100.0, 240.0),
-        ];
-        assert_eq!(chart_like_images(&[rect.clone()], &prose, 1.0), vec![false]);
-        // Japanese prose, which OCR returns as one- to three-character words:
-        // not a chart.
-        let japanese = vec![
-            mk("文書", 60.0, 110.0),
-            mk("を", 80.0, 110.0),
-            mk("変換", 100.0, 110.0),
-            mk("します", 120.0, 110.0),
-            mk("。", 140.0, 110.0),
-        ];
-        assert_eq!(
-            chart_like_images(&[rect.clone()], &japanese, 1.0),
-            vec![false]
-        );
-        // Too few results to judge.
-        assert_eq!(chart_like_images(&[rect], &chart[..3], 1.0), vec![false]);
     }
 
     fn leaf(n: usize) -> Region {
@@ -3398,5 +3241,64 @@ mod tests {
         merge_ocr_results(&mut disabled, vec![outcome(1)], false, false).unwrap();
         assert_eq!(disabled[0].text_items.len(), 2);
         assert!(disabled[0].text_items.iter().all(|i| i.words.is_empty()));
+    }
+
+    /// A scanned figure on a page with a typed footer keeps all its OCR text,
+    /// even when most recognised words are short ("et", "de", "la") or noise.
+    /// A chart filter that dropped such figures wholesale lost the body of
+    /// scanned French cover pages (#538).
+    #[test]
+    fn test_figure_ocr_with_short_words_is_kept() {
+        let mut page = make_blank_page(1);
+        page.text_items.push(TextItem {
+            text: "Guide de Performance".into(),
+            x: 10.0,
+            y: 92.0,
+            width: 60.0,
+            height: 4.0,
+            ..Default::default()
+        });
+        let word = |text: &str, x: f32, y: f32| OcrResult {
+            text: text.into(),
+            bbox: [x, y, x + 8.0, y + 4.0],
+            confidence: 0.9,
+            polygon: None,
+        };
+        let results = vec![
+            word("Logement", 10.0, 10.0),
+            word("et", 20.0, 10.0),
+            word("de", 30.0, 10.0),
+            word("la", 40.0, 10.0),
+            word("ES", 10.0, 20.0),
+            word("à", 20.0, 20.0),
+            word("Abordable", 30.0, 20.0),
+        ];
+        let outcome = PageOcrOutcome {
+            page_number: 1,
+            dpi: 72.0,
+            has_native_text: true,
+            image_rects: vec![Rect {
+                x: 5.0,
+                y: 5.0,
+                width: 80.0,
+                height: 60.0,
+            }],
+            replace_native: false,
+            results,
+            error: None,
+        };
+        let mut pages = vec![page];
+        merge_ocr_results(&mut pages, vec![outcome], false, false).unwrap();
+        let texts: Vec<&str> = pages[0]
+            .text_items
+            .iter()
+            .map(|i| i.text.as_str())
+            .collect();
+        for w in ["Logement", "et", "de", "la", "ES", "à", "Abordable"] {
+            assert!(
+                texts.contains(&w),
+                "figure word {w:?} was dropped: {texts:?}"
+            );
+        }
     }
 }
