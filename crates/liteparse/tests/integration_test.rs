@@ -1059,10 +1059,12 @@ fn glyph_widths_are_opt_in_and_sum_to_text_width() {
     let plain = extract_raw_text_items(&page, &text_page, &view_box, None);
     let with_widths = extract_raw_text_items_with_glyph_widths(&page, &text_page, &view_box, None);
     assert!(plain.iter().all(|item| item.glyph_widths.is_none()));
+    assert!(plain.iter().all(|item| item.glyph_boxes.is_none()));
     assert_eq!(plain.len(), with_widths.len());
 
     let mut uneven = false;
     let mut ligature = false;
+    let mut tight = false;
     for (a, b) in plain.iter().zip(&with_widths) {
         let widths = b.glyph_widths.as_ref().expect("opt-in fills glyph_widths");
         assert_eq!(widths.len(), b.char_codes.len());
@@ -1072,8 +1074,15 @@ fn glyph_widths_are_opt_in_and_sum_to_text_width() {
         } else {
             assert_eq!(sum.to_bits(), b.text_width.to_bits(), "{:?}", b.text);
         }
+        let boxes = b.glyph_boxes.as_ref().expect("opt-in fills glyph_boxes");
+        assert_eq!(boxes.len(), b.char_codes.len());
+        // Ink is shorter than the ascent-to-descent cell for most letters.
+        tight |= boxes
+            .iter()
+            .any(|g| g.strict.bottom - g.strict.top < g.loose.bottom - g.loose.top - 0.5);
         let mut b = b.clone();
         b.glyph_widths = None;
+        b.glyph_boxes = None;
         assert_eq!(a, &b, "opt-in changes nothing else");
         uneven |= widths
             .windows(2)
@@ -1084,6 +1093,7 @@ fn glyph_widths_are_opt_in_and_sum_to_text_width() {
         "a proportional font gives glyphs different advances"
     );
     assert!(ligature, "sample.pdf has an item with a ligature");
+    assert!(tight, "strict boxes hug the ink inside the loose cells");
 }
 
 /// One page that shows `(\002ce) Tj` in 12 pt Helvetica, where char code 2 is the
