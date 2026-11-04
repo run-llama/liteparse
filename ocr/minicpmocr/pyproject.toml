@@ -1,0 +1,21 @@
+[project]
+name = "minicpm-ocr-liteparse"
+version = "0.1.0"
+description = "MiniCPM-OCR server conforming to the LiteParse OCR API"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "minicpm-ocr[layout]>=1.0.4,<1.1.0",
+    "paddlepaddle>=3.0",
+    "fastapi>=0.131.0",
+    "uvicorn>=0.41.0",
+    "pillow>=13.0.0",
+    "python-multipart>=0.0.22",
+    "numpy>=1.26",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27.0,<0.28",
+    "pytest>=9.0.2",
+]
