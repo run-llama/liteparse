@@ -35,3 +35,6 @@ const MIN_ROW_HEIGHT_PT: f32 = 8.0;
 
 #[cfg(test)]
 pub(crate) mod test_helpers;
+
+#[cfg(test)]
+mod wrapped_outline_tests;

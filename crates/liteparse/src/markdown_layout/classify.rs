@@ -4,7 +4,7 @@ use super::blocks::{Block, Cell, PositionedBlock, paragraph_from_accum};
 use super::headings::{
     HEADING_MAX_TEXT_CHARS, MAX_HEADING_LEVELS, heading_level_for, heading_size_of,
     is_caption_line, is_toc_title, looks_like_bold_heading, looks_like_numbered_bold_heading,
-    outline_heading_level, page_is_toc, struct_heading_level,
+    normalize_outline_text, outline_heading_match, page_is_toc, struct_heading_level,
 };
 use super::hr::detect_horizontal_rules;
 use super::inline::{
@@ -81,6 +81,61 @@ enum Interruption {
     /// at its top-y position like other interruptions; its lines were pulled
     /// out of the region pipeline so it won't be re-detected per-region.
     Table(super::blocks::PositionedBlock),
+}
+
+/// Find a complete wrapped bookmark title without consuming any lines on a
+/// partial match. The normal heading-flow checks still decide how to emit it.
+fn complete_outline_heading(
+    lines: &[ProjectedLine],
+    start: usize,
+    entry: &OutlineTarget,
+    page: &ParsedPage,
+    outline: &[OutlineTarget],
+    table_covered: &std::collections::HashSet<usize>,
+    interruptions: &[f32],
+) -> Option<usize> {
+    let title = normalize_outline_text(&entry.title);
+    let mut matched = normalize_outline_text(lines[start].text.trim());
+    if matched.is_empty() || matched == title || !title.starts_with(&matched) {
+        return None;
+    }
+    if title.chars().count() > HEADING_MAX_TEXT_CHARS {
+        return None;
+    }
+    // A short bounded lookahead avoids considering an entire paragraph as a
+    // title while supporting ordinary wrapped headings.
+    const MAX_OUTLINE_HEADING_LINES: usize = 8;
+    for end in (start + 1)..lines.len().min(start + MAX_OUTLINE_HEADING_LINES) {
+        let previous = &lines[end - 1];
+        let next = &lines[end];
+        let text = next.text.trim();
+        if text.is_empty()
+            || table_covered.contains(&end)
+            || next.all_mono
+            || next.in_figure
+            || is_rotated_line(next)
+            || decorative_divider_kind(text).is_some()
+            || parse_list_marker(text).is_some()
+            || struct_heading_level(next, &page.struct_nodes).is_some()
+            || outline_heading_match(next, page.page_height, outline, text, Some(entry)).is_some()
+            || next.bbox.y <= previous.bbox.y
+            || interruptions
+                .iter()
+                .any(|y| *y > previous.bbox.y && *y <= next.bbox.y)
+            || !continues_heading(previous, next)
+        {
+            return None;
+        }
+        matched.push(' ');
+        matched.push_str(&normalize_outline_text(text));
+        if matched == title {
+            return Some(end);
+        }
+        if !title.starts_with(&matched) {
+            return None;
+        }
+    }
+    None
 }
 
 /// Returns true if any span on the line is rotated more than ~5° off
@@ -541,6 +596,8 @@ fn classify_region(
     let mut blocks: Vec<PositionedBlock> = Vec::new();
     let mut state = FlowState::default();
     let mut heading_run: Option<(u8, usize)> = None;
+    // (first line, last line, outline level) for a fully verified title.
+    let mut outline_heading_run: Option<(usize, usize, u8)> = None;
     // Track whether we've already emitted a TOC title on this page. Once seen,
     // any subsequent line matching `is_toc_title` (e.g. "Index", "List of
     // Figures") is a TOC entry pointing at that chapter, not another title,
@@ -600,6 +657,7 @@ fn classify_region(
         .filter(|(y, _)| !in_table_band(*y))
         .collect();
     region_interruptions.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let interruption_positions: Vec<f32> = region_interruptions.iter().map(|(y, _)| *y).collect();
     let mut interruptions = region_interruptions.into_iter().peekable();
 
     let mut idx = 0;
@@ -721,13 +779,29 @@ fn classify_region(
         // Promoting them to `##` shreds the document's heading structure (a
         // TOC page is just `# Contents`). Tagged-PDF struct levels are explicit
         // and still win.
-        let outline_level = tagged_level.or_else(|| {
-            if toc_suppress {
-                None
-            } else {
-                outline_heading_level(line, page.page_height, outline, text)
-            }
-        });
+        let outline_match = if tagged_level.is_none() && !toc_suppress {
+            outline_heading_match(line, page.page_height, outline, text, None)
+        } else {
+            None
+        };
+        if let Some(entry) = outline_match
+            && let Some(end) = complete_outline_heading(
+                lines,
+                line_idx,
+                entry,
+                page,
+                outline,
+                &table_covered,
+                &interruption_positions,
+            )
+        {
+            outline_heading_run = Some((line_idx, end, entry.level));
+        }
+        let continuation_level = outline_heading_run
+            .and_then(|(start, end, level)| (line_idx > start && line_idx <= end).then_some(level));
+        let outline_level = tagged_level
+            .or_else(|| outline_match.map(|entry| entry.level))
+            .or(continuation_level);
         // Rotated lines (margin stamps like a sideways "arXiv:…" watermark) are
         // excluded from `build_heading_map`, but their size can still coincide
         // with a map entry built from horizontal text. Suppress font-size
@@ -888,6 +962,7 @@ fn classify_region(
                             level: last_level,
                             text: htext,
                         },
+                    bbox: heading_bbox,
                     ..
                 }) = blocks.last_mut()
                 && *last_level == level
@@ -915,6 +990,7 @@ fn classify_region(
                     heading_run = None;
                     demoted_heading = true;
                 } else {
+                    Rect::extend(heading_bbox, &line.bbox);
                     append_inline_continuation(htext, text, &collapse_whitespace(text));
                     heading_run = Some((level, line_idx));
                     continue;
