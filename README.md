@@ -262,7 +262,7 @@ The CLI is the same across all installations (`npm`, `pip`, `cargo install`).
 
 JSON output includes an `outline` array of resolved PDF bookmarks in document
 order. Each entry has a 1-based `level`, `title`, zero-based `page_index`, and
-optional `y_pdf` coordinate (PDF space, measured from the bottom of the page).
+`y_pdf` coordinate (a number or `null`, measured from the bottom of the page).
 The array is empty when there are no resolved destinations. It covers the whole
 document even when parsing selected pages; unresolved destinations are omitted.
 
