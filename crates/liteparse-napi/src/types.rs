@@ -1062,10 +1062,20 @@ impl JsParsedPage {
 
 #[napi(object)]
 #[derive(Clone)]
+pub struct JsOutlineTarget {
+    pub level: u32,
+    pub title: String,
+    pub page_index: i32,
+    pub y_pdf: Option<f64>,
+}
+
+#[napi(object)]
+#[derive(Clone)]
 pub struct JsParseResult {
     /// Total source-document pages before target/max-page filtering.
     pub total_pages: u32,
     pub pages: Vec<JsParsedPage>,
+    pub outline: Vec<JsOutlineTarget>,
     pub page_errors: Vec<JsPageError>,
     pub text: String,
     pub images: Vec<JsExtractedImage>,
@@ -1356,6 +1366,16 @@ impl JsParseResult {
                         config.extract_text_metadata,
                         config.output_word_boxes(),
                     )
+                })
+                .collect(),
+            outline: result
+                .outline
+                .iter()
+                .map(|entry| JsOutlineTarget {
+                    level: u32::from(entry.level),
+                    title: entry.title.clone(),
+                    page_index: entry.page_index,
+                    y_pdf: entry.y_pdf.map(f64::from),
                 })
                 .collect(),
             page_errors: result

@@ -1,6 +1,7 @@
 use crate::ocr_merge::PageComplexityStats;
 use crate::types::{
-    DocumentAnnotation, FormField, ParsedPage, Rect, StructureTree, VectorGraphics, XfaPacket,
+    DocumentAnnotation, FormField, OutlineTarget, ParsedPage, Rect, StructureTree, VectorGraphics,
+    XfaPacket,
 };
 use serde::Serialize;
 
@@ -74,6 +75,10 @@ pub(crate) struct JsonPage {
 pub(crate) struct ParseResultJson {
     pub total_pages: u32,
     pub pages: Vec<JsonPage>,
+    /// Document outline, when formatting a complete parse result. Page-only
+    /// formatting cannot determine whether a document has bookmarks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outline: Option<Vec<OutlineTarget>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub page_errors: Vec<crate::types::PageError>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -114,6 +119,7 @@ pub(crate) struct JsonImage {
 pub(crate) fn build_json(pages: &[ParsedPage], extract_text_metadata: bool) -> ParseResultJson {
     ParseResultJson {
         total_pages: pages.len().min(u32::MAX as usize) as u32,
+        outline: None,
         images: Vec::new(),
         page_errors: Vec::new(),
         image_error_count: 0,
@@ -182,6 +188,7 @@ pub fn format_json_result(
 ) -> Result<String, serde_json::Error> {
     let mut json = build_json(&result.pages, extract_text_metadata);
     json.total_pages = result.total_pages;
+    json.outline = Some(result.outline.clone());
     json.images = result
         .images
         .iter()
@@ -362,6 +369,47 @@ mod tests {
     fn test_build_json_empty() {
         let j = build_json(&[], false);
         assert!(j.pages.is_empty());
+    }
+
+    #[test]
+    fn complete_result_json_includes_outline_and_page_only_json_does_not() {
+        let parser = crate::LiteParse::new(crate::LiteParseConfig {
+            ocr_enabled: false,
+            ..Default::default()
+        });
+        let outline = vec![
+            OutlineTarget {
+                level: 1,
+                title: "Chapter".into(),
+                page_index: 0,
+                y_pdf: Some(720.0),
+            },
+            OutlineTarget {
+                level: 2,
+                title: "Section".into(),
+                page_index: 3,
+                y_pdf: None,
+            },
+        ];
+        let result = parser.parse_from_pages(vec![], outline);
+        let json: serde_json::Value =
+            serde_json::from_str(&format_json_result(&result, false).unwrap()).unwrap();
+        assert_eq!(
+            json["outline"],
+            serde_json::json!([
+                {"level": 1, "title": "Chapter", "page_index": 0, "y_pdf": 720.0},
+                {"level": 2, "title": "Section", "page_index": 3, "y_pdf": null}
+            ])
+        );
+
+        let without_bookmarks = parser.parse_from_pages(vec![], vec![]);
+        let json: serde_json::Value =
+            serde_json::from_str(&format_json_result(&without_bookmarks, false).unwrap()).unwrap();
+        assert_eq!(json["outline"], serde_json::json!([]));
+
+        let page_only: serde_json::Value =
+            serde_json::from_str(&format_json(&[]).unwrap()).unwrap();
+        assert!(page_only.get("outline").is_none());
     }
 
     #[test]
