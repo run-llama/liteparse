@@ -43,6 +43,7 @@ temp/
 *.txt
 *.png
 !integration_tests_data/receipt.png
+!integration_tests_data/macos_ocr.png
 !integration_tests_data/sample3.docx.doc
 !integration_tests_data/sample.pdf
 !integration_tests_data/filled_acroform.pdf

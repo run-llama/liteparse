@@ -84,6 +84,9 @@ All options are passed to the constructor:
 ```typescript
 const parser = new LiteParse({
   ocrEnabled: true,              // Enable OCR (default: true)
+  ocrBackend: 'auto',            // auto|tesseract|http|macos-vision (macOS only)
+  macOcrLanguages: [],           // Vision tags, e.g. ['en-US']; empty = automatic/default
+  macOcrRecognition: 'accurate', // accurate|fast; language support depends on OS/level
   ocrLanguage: 'eng',           // Tesseract language code
   ocrServerUrl: undefined,       // HTTP OCR server URL (optional)
   tessdataPath: undefined,       // Path to tessdata directory (optional)

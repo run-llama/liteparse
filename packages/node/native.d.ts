@@ -8,7 +8,13 @@ export interface JsLiteParseConfig {
   ocrLanguage?: string
   /** Whether OCR is enabled. */
   ocrEnabled?: boolean
-  /** HTTP OCR server URL. If set, uses HTTP OCR instead of Tesseract. */
+  /** Backend: auto (HTTP/Tesseract), tesseract, http, or macos-vision. */
+  ocrBackend?: string
+  /** Apple Vision language tags in priority order; empty uses automatic/default languages. */
+  macOcrLanguages?: Array<string>
+  /** Apple Vision recognition level: accurate (default) or fast. */
+  macOcrRecognition?: string
+  /** HTTP OCR server URL. In auto mode, selects HTTP instead of Tesseract. */
   ocrServerUrl?: string
   /**
    * Extra HTTP headers sent with every request to `ocrServerUrl`

@@ -25,7 +25,13 @@ pub struct JsLiteParseConfig {
     pub ocr_language: Option<String>,
     /// Whether OCR is enabled.
     pub ocr_enabled: Option<bool>,
-    /// HTTP OCR server URL. If set, uses HTTP OCR instead of Tesseract.
+    /// Backend: auto (HTTP/Tesseract), tesseract, http, or macos-vision.
+    pub ocr_backend: Option<String>,
+    /// Apple Vision language tags in priority order; empty uses automatic/default languages.
+    pub mac_ocr_languages: Option<Vec<String>>,
+    /// Apple Vision recognition level: accurate (default) or fast.
+    pub mac_ocr_recognition: Option<String>,
+    /// HTTP OCR server URL. In auto mode, selects HTTP instead of Tesseract.
     pub ocr_server_url: Option<String>,
     /// Extra HTTP headers sent with every request to `ocrServerUrl`
     /// (e.g. `{ Authorization: "Bearer <token>" }`).
@@ -160,6 +166,15 @@ impl JsLiteParseConfig {
         if let Some(v) = self.ocr_enabled {
             cfg.ocr_enabled = v;
         }
+        if let Some(v) = self.ocr_backend {
+            cfg.ocr_backend = v.parse().map_err(Error::from_reason)?;
+        }
+        if let Some(v) = self.mac_ocr_languages {
+            cfg.mac_ocr_languages = v;
+        }
+        if let Some(v) = self.mac_ocr_recognition {
+            cfg.mac_ocr_recognition = v.parse().map_err(Error::from_reason)?;
+        }
         if let Some(v) = self.ocr_server_url {
             cfg.ocr_server_url = Some(v);
         }
@@ -290,6 +305,9 @@ impl JsLiteParseConfig {
         Self {
             ocr_language: Some(cfg.ocr_language.clone()),
             ocr_enabled: Some(cfg.ocr_enabled),
+            ocr_backend: Some(cfg.ocr_backend.as_str().into()),
+            mac_ocr_languages: Some(cfg.mac_ocr_languages.clone()),
+            mac_ocr_recognition: Some(cfg.mac_ocr_recognition.as_str().into()),
             ocr_server_url: cfg.ocr_server_url.clone(),
             ocr_server_headers: if cfg.ocr_server_headers.is_empty() {
                 None

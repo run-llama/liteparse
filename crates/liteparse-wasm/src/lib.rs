@@ -45,6 +45,11 @@ pub fn __wasm_start() {
 pub struct LiteParseConfig {
     ocr_language: Option<String>,
     ocr_enabled: Option<bool>,
+    #[tsify(type = "\"auto\" | \"tesseract\" | \"http\" | \"macos-vision\"")]
+    ocr_backend: Option<String>,
+    mac_ocr_languages: Option<Vec<String>>,
+    #[tsify(type = "\"accurate\" | \"fast\"")]
+    mac_ocr_recognition: Option<String>,
     ocr_server_url: Option<String>,
     ocr_server_headers: Option<HashMap<String, String>>,
     tessdata_path: Option<String>,
@@ -152,6 +157,15 @@ impl LiteParseConfig {
         }
         if let Some(v) = self.ocr_enabled {
             cfg.ocr_enabled = v;
+        }
+        if let Some(v) = self.ocr_backend {
+            cfg.ocr_backend = v.parse().map_err(|error: String| JsError::new(&error))?;
+        }
+        if let Some(v) = self.mac_ocr_languages {
+            cfg.mac_ocr_languages = v;
+        }
+        if let Some(v) = self.mac_ocr_recognition {
+            cfg.mac_ocr_recognition = v.parse().map_err(|error: String| JsError::new(&error))?;
         }
         if self.ocr_server_url.is_some() {
             cfg.ocr_server_url = self.ocr_server_url;
@@ -291,6 +305,9 @@ impl LiteParseConfig {
         Self {
             ocr_language: Some(cfg.ocr_language.clone()),
             ocr_enabled: Some(cfg.ocr_enabled),
+            ocr_backend: Some(cfg.ocr_backend.as_str().into()),
+            mac_ocr_languages: Some(cfg.mac_ocr_languages.clone()),
+            mac_ocr_recognition: Some(cfg.mac_ocr_recognition.as_str().into()),
             ocr_server_url: cfg.ocr_server_url.clone(),
             ocr_server_headers: if cfg.ocr_server_headers.is_empty() {
                 None

@@ -1236,6 +1236,12 @@ struct PyLiteParseConfig {
     #[pyo3(get)]
     ocr_enabled: bool,
     #[pyo3(get)]
+    ocr_backend: String,
+    #[pyo3(get)]
+    mac_ocr_languages: Vec<String>,
+    #[pyo3(get)]
+    mac_ocr_recognition: String,
+    #[pyo3(get)]
     ocr_server_url: Option<String>,
     #[pyo3(get)]
     ocr_server_headers: Option<HashMap<String, String>>,
@@ -1324,6 +1330,9 @@ impl PyLiteParseConfig {
         Self {
             ocr_language: cfg.ocr_language.clone(),
             ocr_enabled: cfg.ocr_enabled,
+            ocr_backend: cfg.ocr_backend.as_str().into(),
+            mac_ocr_languages: cfg.mac_ocr_languages.clone(),
+            mac_ocr_recognition: cfg.mac_ocr_recognition.as_str().into(),
             ocr_server_url: cfg.ocr_server_url.clone(),
             ocr_server_headers: if cfg.ocr_server_headers.is_empty() {
                 None
@@ -1476,6 +1485,9 @@ impl LiteParse {
         *,
         ocr_language = None,
         ocr_enabled = None,
+        ocr_backend = None,
+        mac_ocr_languages = None,
+        mac_ocr_recognition = None,
         ocr_server_url = None,
         ocr_server_headers = None,
         tessdata_path = None,
@@ -1516,6 +1528,9 @@ impl LiteParse {
     fn new(
         ocr_language: Option<String>,
         ocr_enabled: Option<bool>,
+        ocr_backend: Option<String>,
+        mac_ocr_languages: Option<Vec<String>>,
+        mac_ocr_recognition: Option<String>,
         ocr_server_url: Option<String>,
         ocr_server_headers: Option<HashMap<String, String>>,
         tessdata_path: Option<String>,
@@ -1559,6 +1574,15 @@ impl LiteParse {
         }
         if let Some(v) = ocr_enabled {
             cfg.ocr_enabled = v;
+        }
+        if let Some(v) = ocr_backend {
+            cfg.ocr_backend = v.parse().map_err(pyo3::exceptions::PyValueError::new_err)?;
+        }
+        if let Some(v) = mac_ocr_languages {
+            cfg.mac_ocr_languages = v;
+        }
+        if let Some(v) = mac_ocr_recognition {
+            cfg.mac_ocr_recognition = v.parse().map_err(pyo3::exceptions::PyValueError::new_err)?;
         }
         if let Some(v) = ocr_server_url {
             cfg.ocr_server_url = Some(v);

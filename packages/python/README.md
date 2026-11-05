@@ -50,6 +50,9 @@ All options are passed to the constructor:
 ```python
 parser = LiteParse(
     ocr_enabled=True,              # Enable OCR (default: True)
+    ocr_backend="auto",            # auto|tesseract|http|macos-vision (macOS only)
+    mac_ocr_languages=[],           # Vision tags, e.g. ["en-US"]; empty = automatic/default
+    mac_ocr_recognition="accurate", # accurate|fast; language support depends on OS/level
     ocr_language="eng",            # Tesseract language code
     ocr_server_url=None,           # HTTP OCR server URL (optional)
     tessdata_path=None,            # Path to tessdata directory (optional)

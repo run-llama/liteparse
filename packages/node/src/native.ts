@@ -22,6 +22,9 @@ interface NativeBindings {
 export interface LiteParseNativeConfig {
   ocrLanguage?: string;
   ocrEnabled?: boolean;
+  ocrBackend?: string;
+  macOcrLanguages?: string[];
+  macOcrRecognition?: string;
   ocrServerUrl?: string;
   ocrServerHeaders?: Record<string, string>;
   tessdataPath?: string;

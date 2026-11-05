@@ -104,6 +104,10 @@ jobs:
           echo "OCR output size: $size bytes"
           test "$size" -gt 200
 
+      - name: Test Apple Vision without Tesseract
+        if: runner.os == 'macOS'
+        run: cargo test -p liteparse --no-default-features --test macos_ocr --test ocr_backend
+
   # Test that docker builds
   build-docker-image:
     runs-on: ubuntu-latest

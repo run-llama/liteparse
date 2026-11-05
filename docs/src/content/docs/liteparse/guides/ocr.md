@@ -1,6 +1,6 @@
 ---
 title: OCR Configuration
-description: Configure OCR in LiteParse — built-in Tesseract, or bring your own via HTTP servers.
+description: Configure OCR in LiteParse — Tesseract, native Apple Vision, or HTTP servers.
 sidebar:
   order: 5
 ---
@@ -69,6 +69,66 @@ If you don't need OCR (pure native-text PDFs, or you don't care about images), d
 ```bash
 lit parse document.pdf --no-ocr
 ```
+
+## Native Apple Vision (macOS)
+
+On macOS 10.15 or later, select `macos-vision` to use the system's Vision
+framework. Recognition runs locally without a Python runtime, OCR server,
+or Tesseract language-data download. Both Intel and Apple Silicon are supported.
+
+```bash
+lit parse scan.pdf --ocr-backend macos-vision
+lit parse scan.pdf --ocr-backend macos-vision \
+  --mac-ocr-language en-US --mac-ocr-language fr-FR \
+  --mac-ocr-recognition accurate
+```
+
+```python
+from liteparse import LiteParse
+
+parser = LiteParse(
+    ocr_enabled=True,
+    ocr_backend="macos-vision",
+    mac_ocr_languages=["en-US", "fr-FR"],
+    mac_ocr_recognition="accurate",
+)
+result = parser.parse("scan.pdf")
+```
+
+```typescript
+import { LiteParse } from "@llamaindex/liteparse";
+
+const parser = new LiteParse({
+  ocrEnabled: true,
+  ocrBackend: "macos-vision",
+  macOcrLanguages: ["en-US", "fr-FR"],
+  macOcrRecognition: "accurate",
+});
+const result = await parser.parse("scan.pdf");
+```
+
+Rust callers can set `LiteParseConfig::ocr_backend` to
+`OcrBackend::MacosVision`, with `mac_ocr_languages` and `mac_ocr_recognition`.
+This backend also works with `--no-default-features`; set `ocr_enabled: true`
+when using that build because OCR defaults to disabled without Tesseract.
+
+Vision accepts language tags such as `en-US` and `zh-Hans`. These are separate
+from `ocr_language` / `--ocr-language`, which uses Tesseract language codes.
+The language list defaults to empty: Vision detects languages automatically
+on macOS 13+ and uses its default languages on older systems. Explicit tags
+are checked against the running OS. An unsupported tag returns an error
+listing the available languages.
+
+Recognition defaults to `accurate`; `fast` trades accuracy for speed and may
+support fewer languages. Availability depends on the macOS version and level.
+Vision word boxes are converted to the same page coordinates as other engines,
+including when `emit_word_boxes` / `emitWordBoxes` is enabled.
+
+The default backend is `auto`, which selects HTTP when `ocr_server_url` is set
+and otherwise uses Tesseract. Selecting `macos-vision` on another platform
+(including WASM) returns a platform error when OCR is enabled. Explicit
+`tesseract` or `macos-vision` selection cannot be combined with an OCR server
+URL. Caller-supplied OCR engines keep precedence over built-in selection.
 
 ## HTTP OCR servers
 

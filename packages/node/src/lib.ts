@@ -20,6 +20,8 @@ export { ParseTimeoutError };
 // ---------------------------------------------------------------------------
 
 export type LiteParseInput = string | Buffer | Uint8Array;
+export type OcrBackend = "auto" | "tesseract" | "http" | "macos-vision";
+export type MacOcrRecognition = "accurate" | "fast";
 export type OutputFormat = "json" | "text" | "markdown";
 export type ImageMode = "off" | "placeholder" | "embed";
 
@@ -43,6 +45,12 @@ export interface PoolOptions {
 export interface LiteParseConfig {
   ocrLanguage: string;
   ocrEnabled: boolean;
+  /** auto preserves HTTP/Tesseract selection; macos-vision requires macOS 10.15+. */
+  ocrBackend?: OcrBackend;
+  /** Vision language tags in priority order. Empty uses automatic detection on macOS 13+. */
+  macOcrLanguages?: string[];
+  /** Vision recognition level (default: accurate). Language availability varies by level/OS. */
+  macOcrRecognition?: MacOcrRecognition;
   ocrServerUrl?: string;
   /** Extra HTTP headers sent with every request to `ocrServerUrl`. */
   ocrServerHeaders?: Record<string, string>;
@@ -660,6 +668,9 @@ export class LiteParse {
     const nativeConfig: LiteParseNativeConfig = {
       ocrLanguage: userConfig.ocrLanguage,
       ocrEnabled: userConfig.ocrEnabled,
+      ocrBackend: userConfig.ocrBackend,
+      macOcrLanguages: userConfig.macOcrLanguages,
+      macOcrRecognition: userConfig.macOcrRecognition,
       ocrServerUrl: userConfig.ocrServerUrl,
       ocrServerHeaders: userConfig.ocrServerHeaders,
       tessdataPath: userConfig.tessdataPath,
@@ -721,6 +732,9 @@ export class LiteParse {
     this._config = {
       ocrLanguage: resolved.ocrLanguage ?? "eng",
       ocrEnabled: resolved.ocrEnabled ?? true,
+      ocrBackend: (resolved.ocrBackend as OcrBackend) ?? "auto",
+      macOcrLanguages: resolved.macOcrLanguages ?? [],
+      macOcrRecognition: (resolved.macOcrRecognition as MacOcrRecognition) ?? "accurate",
       ocrServerUrl: resolved.ocrServerUrl ?? undefined,
       ocrServerHeaders: resolved.ocrServerHeaders ?? undefined,
       tessdataPath: resolved.tessdataPath ?? undefined,

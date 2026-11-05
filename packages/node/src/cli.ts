@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 
 import { program } from "commander";
-import { LiteParse, type LiteParseConfig } from "./lib.js";
+import {
+  LiteParse,
+  type LiteParseConfig,
+  type OcrBackend,
+  type MacOcrRecognition,
+} from "./lib.js";
 import { parseResultToCliJson } from "./cli-json.js";
 import { formatText } from "./cli-text.js";
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
@@ -74,6 +79,10 @@ function collectHeader(
   return previous;
 }
 
+function collectLanguages(value: string, previous: string[] = []): string[] {
+  return [...previous, ...value.split(",")];
+}
+
 program
   .command("parse")
   .description("Parse a document and extract text")
@@ -117,6 +126,9 @@ program
   )
   .option("--no-ocr", "Disable OCR")
   .option("--ocr-language <lang>", "OCR language (default: eng)")
+  .option("--ocr-backend <backend>", "OCR backend: auto|tesseract|http|macos-vision")
+  .option("--mac-ocr-language <tag>", "Vision language tag (repeatable or comma-separated)", collectLanguages)
+  .option("--mac-ocr-recognition <level>", "Vision recognition level: accurate|fast")
   .option("--max-pages <n>", "Max pages to parse", parseInt)
   .option(
     "--target-pages <pages>",
@@ -177,6 +189,13 @@ program
         config.ocrServerHeaders = opts.ocrServerHeader as Record<string, string>;
       if (opts.ocr === false) config.ocrEnabled = false;
       if (opts.ocrLanguage) config.ocrLanguage = opts.ocrLanguage as string;
+      if (opts.ocrBackend) config.ocrBackend = opts.ocrBackend as OcrBackend;
+      if (opts.macOcrLanguage)
+        config.macOcrLanguages = opts.macOcrLanguage as string[];
+      if (opts.macOcrRecognition)
+        config.macOcrRecognition = opts.macOcrRecognition as MacOcrRecognition;
+      if (config.ocrBackend && config.ocrBackend !== "auto")
+        config.ocrEnabled ??= true;
       if (opts.maxPages) config.maxPages = opts.maxPages as number;
       if (opts.targetPages) config.targetPages = opts.targetPages as string;
       if (opts.continueOnPageError) config.continueOnPageError = true;
@@ -363,6 +382,9 @@ program
   .option("--format <format>", 'Output format: json|text|markdown (default: "text")')
   .option("--no-ocr", "Disable OCR")
   .option("--ocr-language <lang>", "OCR language (default: eng)")
+  .option("--ocr-backend <backend>", "OCR backend: auto|tesseract|http|macos-vision")
+  .option("--mac-ocr-language <tag>", "Vision language tag (repeatable or comma-separated)", collectLanguages)
+  .option("--mac-ocr-recognition <level>", "Vision recognition level: accurate|fast")
   .option("--ocr-server-url <url>", "HTTP OCR server URL")
   .option(
     "--ocr-server-header <header>",
@@ -412,6 +434,13 @@ program
         config.outputFormat = format as "json" | "text" | "markdown";
         if (opts.ocr === false) config.ocrEnabled = false;
         if (opts.ocrLanguage) config.ocrLanguage = opts.ocrLanguage as string;
+        if (opts.ocrBackend) config.ocrBackend = opts.ocrBackend as OcrBackend;
+        if (opts.macOcrLanguage)
+          config.macOcrLanguages = opts.macOcrLanguage as string[];
+        if (opts.macOcrRecognition)
+          config.macOcrRecognition = opts.macOcrRecognition as MacOcrRecognition;
+        if (config.ocrBackend && config.ocrBackend !== "auto")
+          config.ocrEnabled ??= true;
         if (opts.ocrServerUrl)
           config.ocrServerUrl = opts.ocrServerUrl as string;
         if (opts.ocrServerHeader)

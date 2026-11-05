@@ -10,6 +10,17 @@ use liteparse::ocr::{OcrEngine, OcrOptions, OcrResult};
 use liteparse::stages::{self, OcrRaster};
 use wasm_bindgen_test::wasm_bindgen_test;
 
+#[wasm_bindgen_test]
+fn macos_backend_reports_its_platform_requirement() {
+    let parser = liteparse::LiteParse::new(liteparse::LiteParseConfig {
+        ocr_enabled: true,
+        ocr_backend: liteparse::OcrBackend::MacosVision,
+        ..Default::default()
+    });
+    let error = parser.ocr_engine().err().unwrap().to_string();
+    assert!(error.contains("requires macOS"), "{error}");
+}
+
 #[derive(Default)]
 struct State {
     started: Vec<u32>,

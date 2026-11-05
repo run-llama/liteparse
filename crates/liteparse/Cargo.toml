@@ -49,6 +49,12 @@ flate2 = "1.1.9"
 resvg = "0.44"
 usvg = "0.44"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSDictionary", "NSEnumerator", "NSError", "NSRange", "NSString"] }
+objc2-vision = { version = "0.3", default-features = false, features = ["std", "VNRequest", "VNRecognizeTextRequest", "VNObservation", "VNRequestHandler", "VNTypes", "objc2-core-foundation"] }
+unicode-segmentation = "1"
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 lopdf = { version = "0.42", default-features = false }
 oar-ocr = { version = "0.8", optional = true }

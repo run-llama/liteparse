@@ -35,6 +35,7 @@ hard stuff so your models see clean, structured data and markdown.
 - **Fast Text Parsing**: Spatial text parsing using PDFium, ~2-5ms per page
 - **Flexible OCR System**:
   - **Built-in**: Tesseract (zero setup, bundled with the library)
+  - **macOS**: Native Apple Vision with `--ocr-backend macos-vision`, using system OCR models
   - **HTTP Servers**: Plug in any OCR server (EasyOCR, PaddleOCR, custom)
   - **Standard API**: Simple, well-defined OCR API specification
 - **Complexity Detection**: Cheaply check whether a document needs OCR or heavier parsing — route, reject, or estimate cost before a full parse
@@ -603,6 +604,21 @@ Or pass the path directly:
 ```bash
 lit parse document.pdf --tessdata-path /path/to/tessdata
 ```
+
+### Native Apple Vision (macOS)
+
+On macOS 10.15+, select the system Vision framework for local OCR:
+
+```bash
+lit parse scan.pdf --ocr-backend macos-vision --mac-ocr-language en-US
+```
+
+Use `--mac-ocr-recognition fast` for faster recognition or keep the `accurate`
+default. Language support depends on the macOS version and recognition level.
+The backend is also available through `ocr_backend="macos-vision"` in Python
+and `ocrBackend: "macos-vision"` in Node.js. See the
+[OCR configuration guide](docs/src/content/docs/liteparse/guides/ocr.md#native-apple-vision-macos)
+for language settings and platform requirements.
 
 ### Optional: HTTP OCR Servers
 
