@@ -1,1 +1,3 @@
 crates/liteparse/tests/fixtures/description_lists/*.pdf binary
+integration_tests_data/outline.pdf binary
+integration_tests_data/no_outline.pdf binary
