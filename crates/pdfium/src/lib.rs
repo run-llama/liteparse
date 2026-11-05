@@ -16,8 +16,9 @@ pub use error::PdfiumError;
 pub use font::{Font, FontType};
 pub use library::Library;
 pub use page::{
-    FormPageGuard, ImageBounds, ImageObjectInfo, ImageObjects, Page, PathObject, PathSegment,
-    PdfAnnotation, PdfFormField, PdfLink, SegmentKind, ViewportTransform,
+    FormPageGuard, FormWidgetsGuard, HiddenAnnotations, ImageBounds, ImageObjectInfo, ImageObjects,
+    Page, PathObject, PathSegment, PdfAnnotation, PdfFormField, PdfLink, SegmentKind,
+    ViewportTransform,
 };
 pub use page_object::{ImageMetadata, PageObject, PageObjectKind, PathDrawMode, RawPathSegment};
 pub use struct_tree::{StructNode, StructureAttributeValue, StructureElement, StructureTree};
