@@ -817,12 +817,12 @@ fn parse_heading_role(role: &str) -> Option<u8> {
 /// Second-priority heading source: a document outline (bookmark) entry that
 /// points at this page near this line's y coordinate, with a title that
 /// prefix-matches the line text. Used on untagged PDFs that ship a TOC.
-pub(super) fn outline_heading_level(
+pub(super) fn outline_heading_match<'a>(
     line: &ProjectedLine,
     page_height: f32,
-    outline: &[OutlineTarget],
+    outline: &'a [OutlineTarget],
     line_text: &str,
-) -> Option<u8> {
+) -> Option<&'a OutlineTarget> {
     if outline.is_empty() {
         return None;
     }
@@ -878,7 +878,7 @@ pub(super) fn outline_heading_level(
         if normalized_line.starts_with(&normalized_title)
             || normalized_title.starts_with(&normalized_line)
         {
-            return Some(entry.level.min(MAX_HEADING_LEVELS as u8));
+            return Some(entry);
         }
     }
     None

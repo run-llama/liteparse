@@ -4,7 +4,7 @@ use super::blocks::{Block, Cell, PositionedBlock, paragraph_from_accum};
 use super::headings::{
     HEADING_MAX_TEXT_CHARS, MAX_HEADING_LEVELS, heading_level_for, heading_size_of,
     is_caption_line, is_toc_title, looks_like_bold_heading, looks_like_numbered_bold_heading,
-    outline_heading_level, page_is_toc, struct_heading_level,
+    outline_heading_match, page_is_toc, struct_heading_level,
 };
 use super::hr::detect_horizontal_rules;
 use super::inline::{
@@ -1075,7 +1075,8 @@ fn classify_region(
             if toc_suppress {
                 None
             } else {
-                outline_heading_level(line, page.page_height, outline, text)
+                outline_heading_match(line, page.page_height, outline, text)
+                    .map(|entry| entry.level.min(MAX_HEADING_LEVELS as u8))
             }
         });
         // Rotated lines (margin stamps like a sideways "arXiv:…" watermark) are
