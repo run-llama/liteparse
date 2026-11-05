@@ -24,6 +24,10 @@ use crate::types::{
 };
 use pdfium::Library;
 
+/// Receive filtered OCR text before document-wide layout is available.
+#[cfg(target_arch = "wasm32")]
+pub type OcrPageCallback<'a> = dyn Fn(&ParsedPage) -> Result<(), LiteParseError> + 'a;
+
 /// Result of parsing a document.
 pub struct ParseResult {
     /// Total number of pages in the source document, before `target_pages` or
@@ -627,6 +631,29 @@ impl LiteParse {
             target_pages.as_deref(),
             self.config.max_pages,
             None,
+            #[cfg(target_arch = "wasm32")]
+            None,
+        )
+        .await
+    }
+
+    /// Parse with early OCR previews. Calls can arrive out of page order.
+    /// Callback errors reject parsing; the final result remains authoritative.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn parse_input_with_ocr_page_callback(
+        &self,
+        input: PdfInput,
+        on_ocr_page: &OcrPageCallback<'_>,
+    ) -> Result<ParseResult, LiteParseError> {
+        self.validate_output_config()?;
+        let resolved = self.resolve_input(input).await?;
+        let target_pages = self.resolve_target_pages()?;
+        self.parse_resolved(
+            &resolved,
+            target_pages.as_deref(),
+            self.config.max_pages,
+            None,
+            Some(on_ocr_page),
         )
         .await
     }
@@ -666,6 +693,7 @@ impl LiteParse {
         target_pages: Option<&[u32]>,
         max_pages: usize,
         outline: Option<Vec<OutlineTarget>>,
+        #[cfg(target_arch = "wasm32")] on_ocr_page: Option<&OcrPageCallback<'_>>,
     ) -> Result<ParseResult, LiteParseError> {
         let log = |msg: &str| {
             if !self.config.quiet {
@@ -838,6 +866,8 @@ impl LiteParse {
             )
         };
         let mut pages = pages;
+        #[cfg(target_arch = "wasm32")]
+        let mut projected_previews = std::collections::HashMap::new();
         let t1 = web_time::Instant::now();
 
         if let Some(engine) = ocr_engine {
@@ -846,10 +876,56 @@ impl LiteParse {
             let mut scan_start = 0usize;
             let mut ocr_tasks =
                 stages::OcrWindow::new(engine, &self.config.ocr_language, self.config.num_workers);
+            #[cfg(target_arch = "wasm32")]
+            let mut preview_merge = on_ocr_page.map(|_| {
+                let indices: std::collections::HashMap<_, _> = pages
+                    .iter()
+                    .enumerate()
+                    .map(|(index, page)| (page.page_number, index))
+                    .collect();
+                (stages::OcrMergeState::default(), indices)
+            });
             loop {
                 // Reap completions before deciding whether to render so every
                 // available slot can be refilled immediately.
                 ocr_tasks.complete_ready();
+
+                #[cfg(target_arch = "wasm32")]
+                if let Some((merge, indices)) = preview_merge.as_mut() {
+                    for outcome in ocr_tasks.take_completed() {
+                        let succeeded = outcome.error.is_none();
+                        let index = *indices.get(&outcome.page_number).ok_or_else(|| {
+                            LiteParseError::Other(format!(
+                                "No page for OCR outcome {}",
+                                outcome.page_number
+                            ))
+                        })?;
+                        let page = &mut pages[index];
+                        merge.merge(
+                            std::slice::from_mut(page),
+                            vec![outcome],
+                            self.config.effective_emit_word_boxes(),
+                        )?;
+                        if succeeded && let Some(callback) = on_ocr_page {
+                            // The scan has passed this page; move its data instead of retaining a raw copy.
+                            let raw = std::mem::replace(
+                                page,
+                                Page {
+                                    page_number: page.page_number,
+                                    page_width: page.page_width,
+                                    page_height: page.page_height,
+                                    ..Default::default()
+                                },
+                            );
+                            let mut preview = vec![raw];
+                            stages::apply_content_filters(&mut preview, &self.content_filters());
+                            let preview =
+                                stages::project(preview).pop().expect("one projected page");
+                            callback(&preview)?;
+                            projected_previews.insert(preview.page_number, preview);
+                        }
+                    }
+                }
 
                 if scan_start >= pages.len() || ocr_tasks.available_capacity() == 0 {
                     if !ocr_tasks.complete_one().await {
@@ -875,6 +951,7 @@ impl LiteParse {
             // Merge once, after every page has been recognized:
             // `ocr_failure_fatal` only applies when *every* OCR task failed,
             // which can't be decided from a single page's outcome.
+            // With previews, outcomes were drained above; check their state below.
             ocr_tasks
                 .finish_and_merge(
                     &mut pages,
@@ -882,6 +959,10 @@ impl LiteParse {
                     self.config.effective_emit_word_boxes(),
                 )
                 .await?;
+            #[cfg(target_arch = "wasm32")]
+            if let Some((merge, _)) = preview_merge {
+                merge.finish(self.config.ocr_failure_fatal)?;
+            }
         }
         let t_ocr = web_time::Instant::now();
         log(&format!(
@@ -901,7 +982,25 @@ impl LiteParse {
             .collect();
 
         // Grid projection
+        #[cfg(not(target_arch = "wasm32"))]
         let mut parsed_pages = stages::project(pages);
+        #[cfg(target_arch = "wasm32")]
+        let mut parsed_pages = if projected_previews.is_empty() {
+            stages::project(pages)
+        } else {
+            pages
+                .into_iter()
+                .map(|page| {
+                    projected_previews
+                        .remove(&page.page_number)
+                        .unwrap_or_else(|| {
+                            stages::project(vec![page])
+                                .pop()
+                                .expect("one projected page")
+                        })
+                })
+                .collect::<Vec<_>>()
+        };
 
         // Attach per-page complexity signals, including the layout signals
         // that need the projected page (same as `is_complex()` reports).
@@ -1278,6 +1377,8 @@ impl ParseSession {
                 Some(&targets),
                 targets.len(),
                 Some(self.outline.clone()),
+                #[cfg(target_arch = "wasm32")]
+                None,
             )
             .await?;
 

@@ -51,8 +51,8 @@ pub use crate::layout::{LayoutBlock, LayoutCell};
 pub use crate::markdown_layout::{Block, Cell, PositionedBlock, SpanCell, render_blocks};
 pub use crate::ocr::OcrResult;
 pub use crate::ocr_merge::{
-    ComplexityReason, LayoutComplexityReason, LayoutComplexityStats, OcrRaster, OcrRenderOptions,
-    PageComplexityStats, PageOcrOutcome,
+    ComplexityReason, LayoutComplexityReason, LayoutComplexityStats, OcrMergeState, OcrRaster,
+    OcrRenderOptions, PageComplexityStats, PageOcrOutcome,
 };
 pub use crate::parser::ScreenshotResult;
 /// The PDFium handle types the pdfium-bound stages take. Re-exported so a
@@ -333,6 +333,7 @@ impl OcrWindow {
 /// text, filter engine artifacts, append the surviving results as `OCR`
 /// text items in viewport points. Errors only when every outcome failed and
 /// one of the failed pages had no usable native text (`ocr_failure_fatal`).
+/// Use [`OcrMergeState`] for incremental merging with one final failure check.
 ///
 /// Pass `LiteParseConfig::effective_emit_word_boxes` for `emit_word_boxes`:
 /// each engine result is one word, so this is the only place the OCR path can
