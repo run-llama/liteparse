@@ -740,11 +740,26 @@ impl PyParsedPage {
 
 #[pyclass(frozen, from_py_object)]
 #[derive(Clone)]
+struct PyOutlineTarget {
+    #[pyo3(get)]
+    level: u8,
+    #[pyo3(get)]
+    title: String,
+    #[pyo3(get)]
+    page_index: i32,
+    #[pyo3(get)]
+    y_pdf: Option<f64>,
+}
+
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
 struct PyParseResult {
     #[pyo3(get)]
     total_pages: u32,
     #[pyo3(get)]
     pages: Vec<PyParsedPage>,
+    #[pyo3(get)]
+    outline: Vec<PyOutlineTarget>,
     #[pyo3(get)]
     text: String,
     #[pyo3(get)]
@@ -887,6 +902,16 @@ impl PyParseResult {
                 .pages
                 .into_iter()
                 .map(|page| PyParsedPage::from_rust(page, extract_text_metadata, word_boxes))
+                .collect(),
+            outline: result
+                .outline
+                .into_iter()
+                .map(|entry| PyOutlineTarget {
+                    level: entry.level,
+                    title: entry.title,
+                    page_index: entry.page_index,
+                    y_pdf: entry.y_pdf.map(f64::from),
+                })
                 .collect(),
             text: result.text,
             images: result
@@ -1927,6 +1952,7 @@ fn _liteparse(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LiteParse>()?;
     m.add_class::<PyLiteParseConfig>()?;
     m.add_class::<PyParseResult>()?;
+    m.add_class::<PyOutlineTarget>()?;
     m.add_class::<PyPageError>()?;
     m.add_class::<PyParseBatch>()?;
     m.add_class::<PyParseSession>()?;
