@@ -83,6 +83,13 @@ enum Interruption {
     Table(super::blocks::PositionedBlock),
 }
 
+#[derive(Clone, Copy)]
+struct HeadingRun<'a> {
+    level: u8,
+    last_line: usize,
+    outline: Option<&'a OutlineTarget>,
+}
+
 /// Find a complete wrapped bookmark title without consuming any lines on a
 /// partial match. The normal heading-flow checks still decide how to emit it.
 fn complete_outline_heading(
@@ -883,7 +890,7 @@ fn classify_region(
 ) -> Vec<PositionedBlock> {
     let mut blocks: Vec<PositionedBlock> = Vec::new();
     let mut state = FlowState::default();
-    let mut heading_run: Option<(u8, usize)> = None;
+    let mut heading_run: Option<HeadingRun<'_>> = None;
     let rotated_content = rotated_text_is_content(page);
     // (first line, last line, outline level) for a fully verified title.
     let mut outline_heading_run: Option<(usize, usize, u8)> = None;
@@ -1302,8 +1309,8 @@ fn classify_region(
         if level.is_none()
             && cont_looks_like_heading
             && heading_directly_above
-            && let Some((run_level, run_idx)) = heading_run.as_ref()
-            && continues_heading(&lines[*run_idx], line)
+            && let Some(run) = heading_run
+            && continues_heading(&lines[run.last_line], line)
             && let Some(PositionedBlock {
                 block:
                     Block::Heading {
@@ -1313,31 +1320,42 @@ fn classify_region(
                 bbox: heading_bbox,
                 text_item_indices: heading_items,
             }) = blocks.last_mut()
-            && *last_level == *run_level
+            && *last_level == run.level
         {
             // The continuation line is part of the same heading.
             Rect::extend(heading_bbox, &line.bbox);
             let combined_chars = htext.chars().count() + 1 + text.chars().count();
             if combined_chars <= HEADING_MAX_TEXT_CHARS {
-                let run_level = *run_level;
                 if debug {
                     eprintln!(
                         "[MD heading-wrap-uncond] merge h{} '{}' <- '{}' (prev_idx={} cur_idx={} combined={})",
-                        run_level,
+                        run.level,
                         htext.chars().take(40).collect::<String>(),
                         text.chars().take(60).collect::<String>(),
-                        run_idx,
+                        run.last_line,
                         line_idx,
                         combined_chars
                     );
                 }
                 append_inline_continuation(htext, text, &collapse_whitespace(text));
                 heading_items.extend_from_slice(&line.span_item_indices);
-                heading_run = Some((run_level, line_idx));
+                heading_run = Some(HeadingRun {
+                    last_line: line_idx,
+                    ..run
+                });
                 continue;
             }
         }
         if let Some(level) = level {
+            // Only a complete match to a different bookmark is an unambiguous
+            // new heading; preserve the normal fallback for partial matches.
+            let starts_new_outline = heading_run
+                .and_then(|run| run.outline)
+                .zip(outline_match)
+                .is_some_and(|(previous, current)| {
+                    !std::ptr::eq(previous, current)
+                        && normalize_outline_text(text) == normalize_outline_text(&current.title)
+                });
             // Merge a wrapped continuation into the heading directly above when
             // it flows as one block: same level, the heading is still the last
             // emitted block, and the line continues the paragraph. A real
@@ -1345,10 +1363,12 @@ fn classify_region(
             // so only a genuinely multi-line heading/caption merges here.
             // Without `heading_directly_above`, demotion below would overwrite
             // the pending paragraph and drop its text.
+            // Two lines matching different bookmarks begin distinct headings.
             if heading_directly_above
-                && let Some((run_level, run_idx)) = heading_run.as_ref()
-                && *run_level == level
-                && continues_heading(&lines[*run_idx], line)
+                && !starts_new_outline
+                && let Some(run) = heading_run
+                && run.level == level
+                && continues_heading(&lines[run.last_line], line)
                 && let Some(PositionedBlock {
                     block:
                         Block::Heading {
@@ -1378,9 +1398,9 @@ fn classify_region(
                     state.paragraph = Some(ParaAccum {
                         raw: demoted.clone(),
                         inline: demoted,
-                        last: lines[*run_idx].clone(),
+                        last: lines[run.last_line].clone(),
                         uniform: None,
-                        bbox: Some(lines[*run_idx].bbox.clone()),
+                        bbox: Some(lines[run.last_line].bbox.clone()),
                         item_indices,
                     });
                     heading_run = None;
@@ -1389,7 +1409,10 @@ fn classify_region(
                     Rect::extend(heading_bbox, &line.bbox);
                     append_inline_continuation(htext, text, &collapse_whitespace(text));
                     heading_items.extend_from_slice(&line.span_item_indices);
-                    heading_run = Some((level, line_idx));
+                    heading_run = Some(HeadingRun {
+                        last_line: line_idx,
+                        ..run
+                    });
                     continue;
                 }
             }
@@ -1413,7 +1436,11 @@ fn classify_region(
                     Some(line.bbox.clone()),
                     line.span_item_indices.clone(),
                 ));
-                heading_run = Some((level, line_idx));
+                heading_run = Some(HeadingRun {
+                    level,
+                    last_line: line_idx,
+                    outline: outline_match,
+                });
                 continue;
             }
         }
@@ -1556,7 +1583,11 @@ fn classify_region(
             ));
             // Arm the heading_run so a wrapped continuation on the next line
             // merges into this heading instead of emitting as a second one.
-            heading_run = Some((level, line_idx));
+            heading_run = Some(HeadingRun {
+                level,
+                last_line: line_idx,
+                outline: None,
+            });
             continue;
         }
 

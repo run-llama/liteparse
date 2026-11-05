@@ -58,7 +58,11 @@ fn complete_two_and_three_line_bookmarks_emit_one_heading_with_union_bbox() {
         let lines = fragments
             .iter()
             .enumerate()
-            .map(|(i, text)| line(text, 50.0, 100.0 + i as f32 * 12.0, 10.0, 20.0))
+            .map(|(i, text)| {
+                let mut line = line(text, 50.0, 100.0 + i as f32 * 12.0, 10.0, 20.0);
+                line.span_item_indices = vec![i];
+                line
+            })
             .collect();
         let p = page(lines);
         // The font-size map deliberately disagrees: these lines would be H4
@@ -71,6 +75,10 @@ fn complete_two_and_three_line_bookmarks_emit_one_heading_with_union_bbox() {
             .as_ref()
             .expect("heading should have geometry");
         assert_eq!((bbox.y, bbox.height), (100.0, expected_height));
+        assert_eq!(
+            blocks[0].text_item_indices,
+            (0..fragments.len()).collect::<Vec<_>>()
+        );
     }
 }
 
@@ -160,6 +168,44 @@ fn separate_bookmarks_of_the_same_style_remain_separate_headings() {
             (1, "Second independent heading".into()),
         ]
     );
+}
+
+#[test]
+fn adjacent_headings_with_distinct_bookmarks_remain_separate() {
+    let first = "First independent heading";
+    let second = "Second independent heading";
+    let mut first_line = line(first, 50.0, 100.0, 10.0, 14.0);
+    first_line.span_item_indices = vec![0];
+    let mut second_line = line(second, 50.0, 112.0, 10.0, 14.0);
+    second_line.span_item_indices = vec![1];
+    let blocks = classify(
+        &page(vec![first_line, second_line]),
+        &[(14.0, 1)],
+        &[
+            outline(first, 1, Some(692.0)),
+            outline(second, 1, Some(680.0)),
+        ],
+    );
+
+    assert_eq!(
+        headings(&blocks),
+        vec![(1, first.into()), (1, second.into())]
+    );
+    assert_eq!(blocks[0].text_item_indices, vec![0]);
+    assert_eq!(blocks[1].text_item_indices, vec![1]);
+}
+
+#[test]
+fn repeated_bookmark_prefix_keeps_existing_heading_merge() {
+    for title in ["Safety Safety", "Safety Safety Procedures"] {
+        let p = page(vec![
+            line("Safety", 50.0, 100.0, 10.0, 14.0),
+            line("Safety", 50.0, 112.0, 10.0, 14.0),
+        ]);
+        let blocks = classify(&p, &[(14.0, 1)], &[outline(title, 1, Some(692.0))]);
+
+        assert_eq!(headings(&blocks), vec![(1, "Safety Safety".into())]);
+    }
 }
 
 #[test]
