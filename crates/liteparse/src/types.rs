@@ -405,7 +405,6 @@ pub struct ScreenshotRect {
 /// One entry in the document outline (bookmarks). Coordinates are in PDF
 /// user space (origin bottom-left) — convert to viewport with
 /// `page_height - y` once you know the page.
-#[doc(hidden)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutlineTarget {
     /// Hierarchy depth, 1-based.
