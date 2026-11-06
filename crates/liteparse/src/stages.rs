@@ -23,7 +23,7 @@
 //! | OCR | [`render_for_ocr`] → [`recognize`] → [`merge_ocr`] | pdfium / any / pure |
 //! | content filters | [`apply_content_filters`] | pure |
 //! | projection | [`project`] | pure |
-//! | markdown | [`document_signals`] → [`extract_blocks`] → [`render_page_markdown`] | pure |
+//! | markdown | [`document_signals`] (or [`DocumentSignalsBuilder`]) → [`extract_blocks`] → [`render_page_markdown`] | pure |
 //! | screenshots | [`screenshots`] | pdfium |
 //!
 //! [`Document`] and [`Library`] are the `pdfium` crate's types re-exported
@@ -383,7 +383,7 @@ pub fn project(pages: Vec<Page>) -> Vec<ParsedPage> {
 /// headers/footers are the lines that repeat across pages — neither is
 /// knowable from one page alone. A caller that classifies pages in batches
 /// must compute this over the whole document first, or heading levels drift
-/// between batches.
+/// between batches; [`DocumentSignalsBuilder`] does that one batch at a time.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DocumentSignals {
     /// Dominant body font size in points; `0.0` when no page has sized lines.
@@ -397,20 +397,66 @@ pub struct DocumentSignals {
 
 /// Compute [`DocumentSignals`] over every page of the document.
 pub fn document_signals(pages: &[ParsedPage], keep_headers_footers: bool) -> DocumentSignals {
-    if pages.is_empty() {
-        return DocumentSignals::default();
+    let mut builder = DocumentSignalsBuilder::new(keep_headers_footers);
+    builder.add_pages(pages);
+    builder.finish()
+}
+
+/// Builds [`DocumentSignals`] incrementally, a batch of pages at a time.
+///
+/// For callers that parse a document in page batches to bound memory: feed
+/// every batch's projected pages in document order, drop them, then
+/// [`finish`](Self::finish). The result is identical to
+/// [`document_signals`] over all the pages at once, but only compact
+/// per-document statistics are retained between batches — a font-size
+/// histogram, one small record per distinct line (its text hashed), and the
+/// lines that fall in the header/footer bands.
+#[derive(Debug, Clone)]
+pub struct DocumentSignalsBuilder {
+    keep_headers_footers: bool,
+    pages: usize,
+    body_size: markdown_layout::BodySizeAccumulator,
+    headings: markdown_layout::HeadingMapAccumulator,
+    header_footer: markdown_layout::HeaderFooterAccumulator,
+}
+
+impl DocumentSignalsBuilder {
+    pub fn new(keep_headers_footers: bool) -> Self {
+        Self {
+            keep_headers_footers,
+            pages: 0,
+            body_size: Default::default(),
+            headings: Default::default(),
+            header_footer: Default::default(),
+        }
     }
-    let body_size = markdown_layout::compute_body_size(pages);
-    let heading_map = markdown_layout::build_heading_map(pages, body_size);
-    let header_footer = if keep_headers_footers {
-        HashSet::new()
-    } else {
-        markdown_layout::compute_header_footer_set(pages)
-    };
-    DocumentSignals {
-        body_size,
-        heading_map,
-        header_footer,
+
+    /// Fold the next pages of the document into the signals.
+    pub fn add_pages(&mut self, pages: &[ParsedPage]) {
+        for page in pages {
+            self.pages += 1;
+            self.body_size.add_page(page);
+            self.headings.add_page(page);
+            if !self.keep_headers_footers {
+                self.header_footer.add_page(page);
+            }
+        }
+    }
+
+    pub fn finish(&self) -> DocumentSignals {
+        if self.pages == 0 {
+            return DocumentSignals::default();
+        }
+        let body_size = self.body_size.finish();
+        DocumentSignals {
+            body_size,
+            heading_map: self.headings.finish(body_size),
+            header_footer: if self.keep_headers_footers {
+                HashSet::new()
+            } else {
+                self.header_footer.finish()
+            },
+        }
     }
 }
 
@@ -809,5 +855,112 @@ mod tests {
         canonicalize_image_refs(&mut pages, &mut full_text, &images);
         assert_eq!(pages[0].markdown, "intro\n\n![](img_p1_1.jpg)\n\noutro");
         assert_eq!(full_text, pages[0].markdown);
+    }
+
+    /// A four-page document with a running header/footer and one heading size
+    /// per page, so any page subset sees only some of the heading sizes.
+    fn sectioned_document() -> Vec<ParsedPage> {
+        let headings = [
+            ("Annual Report on Widgets", 24.0),
+            ("Section One Overview", 18.0),
+            ("Subsection Details Here", 14.0),
+            ("Section Two Results", 18.0),
+        ];
+        headings
+            .iter()
+            .enumerate()
+            .map(|(i, (heading, size))| {
+                let n = i + 1;
+                let mut lines = vec![
+                    line("ACME Widget Corporation", 50.0, 20.0, 9.0, 9.0),
+                    line(heading, 50.0, 100.0, *size, *size),
+                ];
+                for j in 0..6 {
+                    lines.push(line(
+                        &format!("Body text line {j} on page {n} with plenty of words in it."),
+                        50.0,
+                        140.0 + j as f32 * 14.0,
+                        10.0,
+                        10.0,
+                    ));
+                }
+                lines.push(line(&format!("Page {n} of 4"), 50.0, 770.0, 9.0, 9.0));
+                page_with(n, lines)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn signals_builder_over_batches_matches_whole_document() {
+        let pages = sectioned_document();
+        let whole = document_signals(&pages, false);
+        assert_eq!(
+            whole
+                .heading_map
+                .iter()
+                .map(|(_, l)| *l)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "24pt, 18pt and 14pt rank as three levels: {:?}",
+            whole.heading_map
+        );
+        assert!(!whole.header_footer.is_empty());
+
+        for batch_size in 1..=pages.len() {
+            let mut builder = DocumentSignalsBuilder::new(false);
+            for batch in pages.chunks(batch_size) {
+                builder.add_pages(batch);
+            }
+            let batched = builder.finish();
+            assert_eq!(
+                batched.body_size, whole.body_size,
+                "batch size {batch_size}"
+            );
+            assert_eq!(
+                batched.heading_map, whole.heading_map,
+                "batch size {batch_size}"
+            );
+            assert_eq!(
+                batched.header_footer, whole.header_footer,
+                "batch size {batch_size}"
+            );
+        }
+    }
+
+    #[test]
+    fn global_signals_keep_heading_levels_stable_across_batches() {
+        let pages = sectioned_document();
+        let options = BlockOptions {
+            outline: &[],
+            image_mode: ImageMode::Placeholder,
+            keep_headers_footers: false,
+        };
+        let render = |page: &ParsedPage, signals: &DocumentSignals| {
+            let blocks = extract_blocks(page, signals, &options);
+            render_page_markdown(page, blocks.as_deref())
+        };
+
+        // Page 2 on its own only sees the 18pt size, so it ranks it H1 …
+        let local = document_signals(&pages[1..2], false);
+        assert!(render(&pages[1], &local).contains("# Section One Overview"));
+        assert!(!render(&pages[1], &local).contains("## Section One Overview"));
+
+        // … but against the whole document it sits under the 24pt title.
+        let mut builder = DocumentSignalsBuilder::new(false);
+        for batch in pages.chunks(1) {
+            builder.add_pages(batch);
+        }
+        let global = builder.finish();
+        assert!(render(&pages[1], &global).contains("## Section One Overview"));
+        assert!(render(&pages[2], &global).contains("### Subsection Details Here"));
+        assert!(!render(&pages[1], &global).contains("ACME Widget Corporation"));
+    }
+
+    #[test]
+    fn signals_builder_with_no_pages_is_default() {
+        let signals = DocumentSignalsBuilder::new(false).finish();
+        assert_eq!(signals.body_size, 0.0);
+        assert!(signals.heading_map.is_empty());
+        assert!(signals.header_footer.is_empty());
     }
 }
