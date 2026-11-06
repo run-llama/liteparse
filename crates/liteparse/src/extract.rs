@@ -362,6 +362,7 @@ fn extract_single_page(
             glyph_resolver,
             output_options.emit_word_boxes,
             output_options.extract_text_metadata,
+            output_options.split_scripts,
             &consumed,
         )?;
         items.extend(emitted.into_iter().map(math_item));
@@ -506,6 +507,9 @@ pub struct ExtractionOutputOptions {
     pub extract_form_fields: bool,
     pub extract_structure_tree: bool,
     pub emit_word_boxes: bool,
+    /// Split items at a superscript / subscript run (a size step with a baseline shift), so
+    /// markdown can mark it. Plain text keeps such runs in their word.
+    pub split_scripts: bool,
 }
 
 fn non_empty(value: &Option<String>) -> Option<String> {
@@ -1586,6 +1590,7 @@ fn extract_page_text_items(
     glyph_resolver: Option<&dyn crate::GlyphResolver>,
     emit_word_boxes: bool,
     extract_text_metadata: bool,
+    split_scripts: bool,
     math_chars: &std::collections::HashSet<i32>,
 ) -> Result<Vec<TextItem>, LiteParseError> {
     let char_count = text_page.char_count();
@@ -1883,23 +1888,24 @@ fn extract_page_text_items(
             // text it follows. A declared size change alone is no script: producers draw the same
             // visible text with different size / matrix pairs ("290-300." after a reference's
             // "Nat. Energy 2018, 3,"), and splitting those let projection misplace the piece.
-            let size_break = seg.font_height.is_some_and(|sh| {
-                let m = obj_meta.meta_for(&ch, cv.text_object());
-                let fh = if m.font_size > 0.0 {
-                    m.scale_y.map(|sy| m.font_size * sy)
-                } else {
-                    None
-                };
-                let shifted = (vp_strict.bottom - seg.last_char_bottom).abs()
-                    > 0.15
-                        * (seg.vp_bottom - seg.vp_top)
-                            .abs()
-                            .max(vp_strict.bottom - vp_strict.top);
-                shifted
-                    && fh.is_some_and(|fh| {
-                        sh > 0.0 && fh > 0.0 && (fh < sh * 0.78 || sh < fh * 0.78)
-                    })
-            });
+            let size_break = split_scripts
+                && seg.font_height.is_some_and(|sh| {
+                    let m = obj_meta.meta_for(&ch, cv.text_object());
+                    let fh = if m.font_size > 0.0 {
+                        m.scale_y.map(|sy| m.font_size * sy)
+                    } else {
+                        None
+                    };
+                    let shifted = (vp_strict.bottom - seg.last_char_bottom).abs()
+                        > 0.15
+                            * (seg.vp_bottom - seg.vp_top)
+                                .abs()
+                                .max(vp_strict.bottom - vp_strict.top);
+                    shifted
+                        && fh.is_some_and(|fh| {
+                            sh > 0.0 && fh > 0.0 && (fh < sh * 0.78 || sh < fh * 0.78)
+                        })
+                });
             if !y_overlap || line_changed || gap >= MAX_INLINE_GAP || dot_leader_break || size_break
             {
                 seg.flush(&mut items);

@@ -447,6 +447,7 @@ fn form_lines(
     median_width: f32,
     median_height: f32,
     page_width: f32,
+    style_runs: bool,
 ) -> Vec<Vec<ProjectedTextItem>> {
     // Y-tolerance for sorting: items within this threshold are considered same line
     let y_sort_tolerance: f32 = (median_height * 0.5).max(5.0);
@@ -846,10 +847,11 @@ fn form_lines(
                         .chars()
                         .next()
                         .is_some_and(|c| c.is_alphabetic());
-                // An emphasis change (bold / italic / struck / monospace) keeps the items
-                // apart: a merged item carries one font, so the second run would render in
-                // the first one's style.
-                let style_change = !same_emphasis(&prev.item, &item.item);
+                // For markdown, an emphasis change (bold / italic / struck / monospace) keeps
+                // the items apart: a merged item carries one font, so the second run would render
+                // in the first one's style. Plain text has no emphasis, and its grid places
+                // columns from the merged items, so it keeps merging across style changes.
+                let style_change = style_runs && !same_emphasis(&prev.item, &item.item);
                 if y_compatible
                     && !both_are_numbers
                     && !alpha_alpha_gap
@@ -1777,6 +1779,7 @@ fn detect_and_render_flowing_lines(
 fn project_to_grid(
     page: &Page,
     mut projection_boxes: Vec<ProjectedTextItem>,
+    style_runs: bool,
 ) -> (Vec<ProjectedTextItem>, String) {
     if projection_boxes.is_empty() {
         return (Vec::new(), String::new());
@@ -1823,6 +1826,7 @@ fn project_to_grid(
         median_width,
         median_height,
         page.page_width,
+        style_runs,
     );
     if lines.is_empty() {
         return (Vec::new(), String::new());
@@ -2902,6 +2906,16 @@ fn clean_rendered_text(text: &str) -> String {
 }
 
 pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
+    project_pages(pages, false)
+}
+
+/// [`project_pages_to_grid`] for markdown output: items whose emphasis differs stay apart, so
+/// each run renders in its own style.
+pub fn project_pages_for_markdown(pages: Vec<Page>) -> Vec<ParsedPage> {
+    project_pages(pages, true)
+}
+
+fn project_pages(pages: Vec<Page>, style_runs: bool) -> Vec<ParsedPage> {
     pages
         .into_iter()
         .map(|page| {
@@ -2927,7 +2941,7 @@ pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
                 })
                 .collect();
 
-            let (projected_items, text) = project_to_grid(&page, projection_boxes);
+            let (projected_items, text) = project_to_grid(&page, projection_boxes, style_runs);
             // Detect figure regions from the page's vector graphics before
             // XY-cut runs so the layout recursion can treat them as obstacles
             // (partition the page around figures rather than slicing through).
@@ -5365,7 +5379,7 @@ mod tests {
             projected_item("", 30.0, 0.0, 20.0),
         ];
 
-        let (_, text) = project_to_grid(&page, projection_boxes);
+        let (_, text) = project_to_grid(&page, projection_boxes, false);
 
         assert!(text.is_empty());
     }
@@ -5408,7 +5422,7 @@ mod tests {
             item_at(".7", 316.478, 149.76, 4.66, 8.42),
             item_at("2.3", 370.9, 149.76, 10.6, 8.42),
         ];
-        let lines = form_lines(&mut items, 10.0, 8.42, 612.0);
+        let lines = form_lines(&mut items, 10.0, 8.42, 612.0, true);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].iter().any(|i| i.item.text == "7.7"));
         assert!(lines[0].iter().all(|i| !i.is_margin_line_number));
@@ -5423,7 +5437,7 @@ mod tests {
             item_at("12", 310.0, 100.0, 8.0, 10.0),
             item_at("right column text", 330.0, 100.0, 230.0, 10.0),
         ];
-        let lines = form_lines(&mut items, 10.0, 10.0, 612.0);
+        let lines = form_lines(&mut items, 10.0, 10.0, 612.0, true);
         let flagged: Vec<_> = lines
             .iter()
             .flatten()
