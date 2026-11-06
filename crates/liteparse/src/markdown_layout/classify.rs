@@ -96,6 +96,21 @@ pub(super) fn is_rotated_line(line: &ProjectedLine) -> bool {
     })
 }
 
+/// Whether the page's rotated lines are its content rather than margin furniture: they carry at
+/// least 30% of its non-whitespace characters. Banners, stamps and vertical legends are a sliver
+/// of a page; a table or figure set sideways is most of it.
+pub(super) fn rotated_text_is_content(page: &ParsedPage) -> bool {
+    let (mut rotated, mut all) = (0usize, 0usize);
+    for line in &page.projected_lines {
+        let n = line.text.chars().filter(|c| !c.is_whitespace()).count();
+        all += n;
+        if is_rotated_line(line) {
+            rotated += n;
+        }
+    }
+    all > 0 && rotated * 10 >= all * 3
+}
+
 /// Classify a single page's `ProjectedLine`s into blocks.
 #[cfg(test)]
 pub(super) fn classify_page(page: &ParsedPage, heading_map: &[(f32, u8)]) -> Vec<PositionedBlock> {
@@ -541,6 +556,7 @@ fn classify_region(
     let mut blocks: Vec<PositionedBlock> = Vec::new();
     let mut state = FlowState::default();
     let mut heading_run: Option<(u8, usize)> = None;
+    let rotated_content = rotated_text_is_content(page);
     // Track whether we've already emitted a TOC title on this page. Once seen,
     // any subsequent line matching `is_toc_title` (e.g. "Index", "List of
     // Figures") is a TOC entry pointing at that chapter, not another title,
@@ -654,8 +670,10 @@ fn classify_region(
         }
         // Skip rotated text (vertical sidebars, arXiv banners, watermarks).
         // Including it would either inject a paragraph of disconnected
-        // characters or be misclassified as a heading.
-        if is_rotated_line(line) {
+        // characters or be misclassified as a heading. Not when rotated text
+        // is the page's content (a table or figure set sideways): projection
+        // has already turned it upright, and skipping it drops the page.
+        if is_rotated_line(line) && !rotated_content {
             continue;
         }
         if debug {

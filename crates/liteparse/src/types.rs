@@ -122,6 +122,18 @@ pub struct TextItem {
     /// markdown emitter to wrap the text in `~~…~~`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub strike: bool,
+    /// Whether a thin horizontal stroke/rect runs just under this item's
+    /// baseline and spans its text (an underline). Populated in `extract.rs`;
+    /// the markdown emitter wraps the text in `<u>…</u>`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub underline: bool,
+    /// Raised (superscript) or lowered (subscript) small text relative to its
+    /// line, e.g. a footnote marker. Set in projection; the markdown emitter
+    /// wraps it in `<sup>…</sup>` / `<sub>…</sub>`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sup: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sub: bool,
     /// Whether this item is LaTeX rebuilt from TeX math fonts (`$…$`).
     /// Populated in `extract.rs`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

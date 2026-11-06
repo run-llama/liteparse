@@ -10,6 +10,9 @@ pub(super) struct SpanStyle {
     pub(super) italic: bool,
     pub(super) mono: bool,
     pub(super) strike: bool,
+    pub(super) underline: bool,
+    pub(super) sup: bool,
+    pub(super) sub: bool,
 }
 
 impl SpanStyle {
@@ -19,11 +22,20 @@ impl SpanStyle {
             italic: is_italic_item(item),
             mono: is_mono_item(item),
             strike: is_strike_item(item),
+            underline: item.underline,
+            sup: item.sup,
+            sub: item.sub,
         }
     }
 
     pub(super) fn is_plain(self) -> bool {
-        !self.bold && !self.italic && !self.mono && !self.strike
+        !self.bold
+            && !self.italic
+            && !self.mono
+            && !self.strike
+            && !self.underline
+            && !self.sup
+            && !self.sub
     }
 }
 
@@ -159,6 +171,9 @@ fn apply_style(inner: &str, style: SpanStyle) -> String {
             let fence = "`".repeat(longest_run + 1);
             format!("{fence} {inner} {fence}")
         }
+    } else if style.sup || style.sub {
+        // a footnote marker or index: the script tag alone (`<sup>**1**</sup>` reads as noise)
+        inner.to_string()
     } else {
         match (style.bold, style.italic) {
             (true, true) => format!("***{}***", inner),
@@ -166,6 +181,20 @@ fn apply_style(inner: &str, style: SpanStyle) -> String {
             (false, true) => format!("*{}*", inner),
             (false, false) => inner.to_string(),
         }
+    };
+    // Raised / lowered script: HTML `<sup>` / `<sub>` (no markdown syntax).
+    let styled = if style.sup {
+        format!("<sup>{}</sup>", styled)
+    } else if style.sub {
+        format!("<sub>{}</sub>", styled)
+    } else {
+        styled
+    };
+    // Underline has no markdown syntax: HTML `<u>…</u>`, outside emphasis and code.
+    let styled = if style.underline {
+        format!("<u>{}</u>", styled)
+    } else {
+        styled
     };
     // Strikethrough (GFM `~~…~~`) wraps outermost so it composes with emphasis
     // and inline code (`~~**foo**~~`, `~~`bar`~~`).
@@ -247,13 +276,44 @@ pub(super) fn render_line_inline(line: &ProjectedLine) -> String {
         if let Some(url) = link {
             rendered = apply_link(&rendered, url);
         }
-        if !out.is_empty() && !out.ends_with(' ') {
+        // Between groups, a space only where the page has one: a style that changes inside a
+        // word (`Taha` + raised `1`, `**Note**` + `:`) abuts its neighbour.
+        if !out.is_empty()
+            && !out.ends_with(' ')
+            && (i == 0 || spans_separated(spans[i - 1], spans[i], &line.text, line.rtl))
+        {
             out.push(' ');
         }
         out.push_str(&rendered);
         i = j;
     }
     out
+}
+
+/// Whether two consecutive spans of a line (in reading order) are separated by a space. The
+/// line's own text (projection's join, which already decided word spacing) answers when it holds
+/// the two spans' touching words either joined or apart (not at a sub/superscript, which its
+/// join spaces off); otherwise the page geometry does: a
+/// gap over an eighth of the smaller span's height (a word space is a quarter em or more).
+fn spans_separated(a: &TextItem, b: &TextItem, line_text: &str, rtl: bool) -> bool {
+    let last = a.text.split_whitespace().next_back().unwrap_or("");
+    let first = b.text.split_whitespace().next().unwrap_or("");
+    // a raised / lowered script hugs its word: projection's join spaces it off, the page doesn't
+    let script = a.sup || a.sub || b.sup || b.sub;
+    if !script && !last.is_empty() && !first.is_empty() {
+        let (l, r) = if rtl { (first, last) } else { (last, first) };
+        let apart = line_text.contains(&format!("{l} {r}"));
+        let joined = line_text.contains(&format!("{l}{r}"));
+        if apart != joined {
+            return apart;
+        }
+    }
+    let gap = if rtl {
+        a.x - (b.x + b.width)
+    } else {
+        b.x - (a.x + a.width)
+    };
+    gap > a.height.min(b.height) * 0.125
 }
 
 /// Render the text portion of a list item with per-span emphasis. The marker
@@ -301,7 +361,43 @@ pub(super) fn append_inline_continuation(
     next_inline: &str,
 ) {
     let next_raw = collapse_whitespace(next_raw);
+    // An emphasis run that continues onto the next line ("*… Network on*" then "*Drug Use …*")
+    // stays one run: the closing marker and the reopening one are dropped at the seam.
+    let next_inline = if prev_text.ends_with("</u>")
+        && next_inline.starts_with("<u>")
+        && !next_inline.starts_with("<u></u>")
+    {
+        prev_text.truncate(prev_text.len() - "</u>".len());
+        &next_inline["<u>".len()..]
+    } else {
+        next_inline
+    };
+    let next_inline = match continued_emphasis(prev_text, next_inline) {
+        Some(n) => {
+            prev_text.truncate(prev_text.len() - n);
+            &next_inline[n..]
+        }
+        None => next_inline,
+    };
     dehyphenate_join(prev_text, &next_raw, next_inline);
+}
+
+/// Length of an emphasis marker (`*`, `**`, `***` or `~~`) that closes `prev` and reopens
+/// `next` identically, with text on both sides of the seam (not `\*`, not a lone marker).
+fn continued_emphasis(prev: &str, next: &str) -> Option<usize> {
+    for (ch, lens) in [('*', &[1usize, 2, 3][..]), ('~', &[2][..])] {
+        let tail = prev.chars().rev().take_while(|&c| c == ch).count();
+        let head = next.chars().take_while(|&c| c == ch).count();
+        if tail == 0 || tail != head || !lens.contains(&tail) {
+            continue;
+        }
+        let before = prev[..prev.len() - tail].chars().last();
+        let after = next[head..].chars().next();
+        let ok = before.is_some_and(|c| !c.is_whitespace() && c != '\\')
+            && after.is_some_and(|c| !c.is_whitespace());
+        return ok.then_some(tail);
+    }
+    None
 }
 
 /// Returns the shared `SpanStyle` of `line` when every non-whitespace span on
@@ -485,6 +581,26 @@ mod tests {
         l.spans[0].link = Some("https://example.com/a b".to_string());
         let out = render_line_inline(&l);
         assert_eq!(out, "[link](<https://example.com/a b>)");
+    }
+
+    #[test]
+    fn emphasis_continues_across_line_join() {
+        let mut prev = "hallucinogen. *South African Network on*".to_string();
+        append_inline_continuation(&mut prev, "Drug Use (2014)", "*Drug Use (2014)*");
+        assert_eq!(
+            prev,
+            "hallucinogen. *South African Network on Drug Use (2014)*"
+        );
+        let mut bold = "**Bold start**".to_string();
+        append_inline_continuation(&mut bold, "ends here", "**ends here** plain");
+        assert_eq!(bold, "**Bold start ends here** plain");
+        // different markers, escaped stars and lone markers are left alone
+        let mut mixed = "**bold**".to_string();
+        append_inline_continuation(&mut mixed, "italic", "*italic*");
+        assert_eq!(mixed, "**bold** *italic*");
+        let mut esc = "price 5\\*".to_string();
+        append_inline_continuation(&mut esc, "x", "*x*");
+        assert_eq!(esc, "price 5\\* *x*");
     }
 
     #[test]

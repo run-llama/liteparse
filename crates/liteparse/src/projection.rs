@@ -724,6 +724,10 @@ fn form_lines(
         line.sort_by(|a, b| a.item.x.total_cmp(&b.item.x));
     }
 
+    for line in lines.iter_mut() {
+        mark_script_items(line);
+    }
+
     // sort lines by y
     lines.sort_by(|a, b| {
         let ay = a.first().map(|v| v.item.y).unwrap_or(f32::INFINITY);
@@ -842,9 +846,14 @@ fn form_lines(
                         .chars()
                         .next()
                         .is_some_and(|c| c.is_alphabetic());
+                // An emphasis change (bold / italic / struck / monospace) keeps the items
+                // apart: a merged item carries one font, so the second run would render in
+                // the first one's style.
+                let style_change = !same_emphasis(&prev.item, &item.item);
                 if y_compatible
                     && !both_are_numbers
                     && !alpha_alpha_gap
+                    && !style_change
                     && delta_x <= MERGE_THRESHOLD
                 {
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
@@ -856,7 +865,7 @@ fn form_lines(
 
                 let prev_len = prev.item.text.chars().count().max(1) as f32;
                 let avg_char_width = prev.item.width / prev_len;
-                if y_compatible && !both_are_numbers && delta_x < avg_char_width {
+                if y_compatible && !both_are_numbers && !style_change && delta_x < avg_char_width {
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
                     join_in_reading_order(&mut prev.item.text, &item.item.text, " ");
                     prev.item.words.append(&mut item.item.words);
@@ -3052,37 +3061,140 @@ fn name_contains_any(name: &str, hints: &[&str]) -> bool {
     hints.iter().any(|h| name.contains(h))
 }
 
+/// Flag the line's short items set clearly smaller than its body text and raised above its
+/// baseline (superscripts: footnote markers, ordinals) or dropped below it (subscripts). The
+/// body is the line's tallest-run text by character count; OCR and math items are left alone
+/// (OCR boxes are too loose to tell a raised glyph from jitter).
+fn mark_script_items(line: &mut [ProjectedTextItem]) {
+    let native = |p: &ProjectedTextItem| p.item.confidence.is_none() && !p.item.math;
+    let mut hs: Vec<(f32, usize)> = line
+        .iter()
+        .filter(|p| native(p) && p.item.height > 0.0)
+        .map(|p| {
+            (
+                p.item.height,
+                p.item.text.chars().filter(|c| !c.is_whitespace()).count(),
+            )
+        })
+        .collect();
+    let total: usize = hs.iter().map(|h| h.1).sum();
+    if total < 4 {
+        return;
+    }
+    hs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (mut acc, mut body_h) = (0, 0.0);
+    for (h, n) in hs {
+        acc += n;
+        if acc * 2 >= total {
+            body_h = h;
+            break;
+        }
+    }
+    let mut bottoms: Vec<f32> = line
+        .iter()
+        .filter(|p| native(p) && p.item.height >= body_h * 0.9)
+        .map(|p| p.item.y + p.item.height)
+        .collect();
+    if bottoms.is_empty() || body_h <= 0.0 {
+        return;
+    }
+    bottoms.sort_by(f32::total_cmp);
+    let base = bottoms[bottoms.len() / 2];
+    for p in line.iter_mut().filter(|p| native(p)) {
+        let it = &mut p.item;
+        let n = it.text.trim().chars().count();
+        if n == 0 || n > 6 || it.height > body_h * 0.78 {
+            continue;
+        }
+        let bottom = it.y + it.height;
+        if bottom <= base - body_h * 0.2 {
+            it.sup = true;
+        } else if bottom >= base + body_h * 0.1 && it.y >= base - body_h * 0.6 {
+            it.sub = true;
+        }
+    }
+    // A script hugs the text it marks ("Taha¹", "CO₂", "substrate⁴¹"): a flagged run of three or
+    // more items or over 8 characters is a smaller-type phrase on a mixed line (a byline next
+    // to a drop cap), and a flagged item with no unflagged neighbour within half the body height
+    // is no script either.
+    let mut order: Vec<usize> = (0..line.len()).collect();
+    order.sort_by(|&a, &b| line[a].item.x.total_cmp(&line[b].item.x));
+    let script = |p: &ProjectedTextItem| p.item.sup || p.item.sub;
+    let mut k = 0;
+    while k < order.len() {
+        if !script(&line[order[k]]) {
+            k += 1;
+            continue;
+        }
+        let mut e = k;
+        while e + 1 < order.len() && script(&line[order[e + 1]]) {
+            e += 1;
+        }
+        let chars: usize = order[k..=e]
+            .iter()
+            .map(|&i| {
+                line[i]
+                    .item
+                    .text
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .count()
+            })
+            .sum();
+        let near = |i: Option<&usize>, left: bool| {
+            i.is_some_and(|&i| {
+                let (a, b) = (&line[order[k]].item, &line[order[e]].item);
+                let n = &line[i].item;
+                let gap = if left {
+                    a.x - (n.x + n.width)
+                } else {
+                    n.x - (b.x + b.width)
+                };
+                !script(&line[i]) && gap <= body_h * 0.5
+            })
+        };
+        let hugs = near(k.checked_sub(1).and_then(|j| order.get(j)), true)
+            || near(order.get(e + 1), false);
+        if e - k + 1 >= 3 || chars > 8 || !hugs {
+            for &i in &order[k..=e] {
+                line[i].item.sup = false;
+                line[i].item.sub = false;
+            }
+        }
+        k = e + 1;
+    }
+}
+
+/// Whether two items render with the same inline emphasis.
+fn same_emphasis(a: &TextItem, b: &TextItem) -> bool {
+    is_bold_item(a) == is_bold_item(b)
+        && is_italic_item(a) == is_italic_item(b)
+        && is_strike_item(a) == is_strike_item(b)
+        && is_mono_item(a) == is_mono_item(b)
+        && a.underline == b.underline
+        && a.sup == b.sup
+        && a.sub == b.sub
+}
+
 pub(crate) fn is_bold_item(item: &TextItem) -> bool {
-    if let Some(flags) = item.font_flags
-        && flags & PDF_FONT_FLAG_FORCE_BOLD != 0
-    {
-        return true;
-    }
-    if let Some(w) = item.font_weight
-        && w >= 600
-    {
-        return true;
-    }
-    if let Some(n) = &item.font_name
-        && name_contains_any(n, BOLD_NAME_HINTS)
-    {
-        return true;
-    }
-    false
+    font_is_bold(item.font_name.as_deref(), item.font_weight, item.font_flags)
 }
 
 pub(crate) fn is_italic_item(item: &TextItem) -> bool {
-    if let Some(flags) = item.font_flags
-        && flags & PDF_FONT_FLAG_ITALIC != 0
-    {
-        return true;
-    }
-    if let Some(n) = &item.font_name
-        && name_contains_any(n, ITALIC_NAME_HINTS)
-    {
-        return true;
-    }
-    false
+    font_is_italic(item.font_name.as_deref(), item.font_flags)
+}
+
+/// Bold from a font's flags (ForceBold), weight (600+) or name.
+pub(crate) fn font_is_bold(name: Option<&str>, weight: Option<i32>, flags: Option<i32>) -> bool {
+    flags.is_some_and(|f| f & PDF_FONT_FLAG_FORCE_BOLD != 0)
+        || weight.is_some_and(|w| w >= 600)
+        || name.is_some_and(|n| name_contains_any(n, BOLD_NAME_HINTS))
+}
+
+/// Italic from a font's flags or name.
+pub(crate) fn font_is_italic(name: Option<&str>, flags: Option<i32>) -> bool {
+    flags.is_some_and(|f| f & PDF_FONT_FLAG_ITALIC != 0)
+        || name.is_some_and(|n| name_contains_any(n, ITALIC_NAME_HINTS))
 }
 
 pub(crate) fn is_strike_item(item: &TextItem) -> bool {
@@ -4181,6 +4293,57 @@ fn x_extent(items: &[ProjectedTextItem], idxs: &[usize]) -> (f32, f32) {
     (lo, hi)
 }
 
+/// Horizontal cut that isolates lines crossing a vertical gutter at `gutter_x` (see
+/// `xy_cut_rec`). A band crosses when one of its items reaches at least three line heights past
+/// the gutter on both sides (a heading or float spanning the columns, not a line of the left
+/// column overhanging a misplaced gutter), and at most a third of the bands cross. Cuts above the first crossing band that has non-crossing bands
+/// above it; when the crossing bands only open the region, cuts below them.
+fn xy_find_crossing_line_cut(
+    items: &[ProjectedTextItem],
+    idxs: &[usize],
+    gutter_x: f32,
+    median_h: f32,
+) -> Option<CutCandidate> {
+    let mut sorted: Vec<usize> = idxs.to_vec();
+    sorted.sort_by(|&a, &b| items[a].item.y.total_cmp(&items[b].item.y));
+    let band_tol = (median_h * 0.5).max(2.0);
+    let reach = 3.0 * median_h.max(4.0);
+    // (y_min, y_max, crosses)
+    let mut bands: Vec<(f32, f32, bool)> = Vec::new();
+    for &i in &sorted {
+        let it = &items[i].item;
+        let (y0, y1) = (it.y, it.y + it.height.max(0.0));
+        let crosses = it.x < gutter_x - reach && it.x + it.width > gutter_x + reach;
+        match bands.last_mut() {
+            Some(last)
+                if y0 <= last.1 - band_tol || (y0 - (last.0 + last.1) * 0.5).abs() <= band_tol =>
+            {
+                last.0 = last.0.min(y0);
+                last.1 = last.1.max(y1);
+                last.2 |= crosses;
+            }
+            _ => bands.push((y0, y1, crosses)),
+        }
+    }
+    // Spanning lines are a minority of a region's lines; when most lines cross, the gutter is
+    // misplaced (inside a column), not crossed.
+    let crossing = bands.iter().filter(|b| b.2).count();
+    if bands.len() < 3 || crossing == 0 || crossing * 3 > bands.len() {
+        return None;
+    }
+    let between = |a: usize| CutCandidate {
+        axis: CutAxis::Horizontal,
+        position: (bands[a].1 + bands[a + 1].0) * 0.5,
+        score: f32::INFINITY,
+    };
+    let first = bands.iter().position(|b| b.2)?;
+    if first > 0 {
+        return Some(between(first - 1));
+    }
+    let last_opening = bands.iter().position(|b| !b.2)? - 1;
+    Some(between(last_opening))
+}
+
 fn xy_find_banner_cut(
     items: &[ProjectedTextItem],
     idxs: &[usize],
@@ -4346,6 +4509,17 @@ fn xy_cut_rec(
     let mut candidates: Vec<CutCandidate> = Vec::new();
     if let Some(bc) = banner {
         candidates.push(bc);
+    }
+    // A line that crosses the would-be gutter (a section heading, a spanning float) separates
+    // column runs; the gutter is the density valley's when there is one (nothing crosses it, so
+    // the check stays quiet), else the column histogram's, which crossing lines don't block.
+    // Cut above it before cutting columns, or the columns of every section join into one
+    // page-long column and a heading is sliced in two.
+    if !effective_tabular
+        && let Some(x) = v.as_ref().or(column_full.as_ref()).map(|c| c.position)
+        && let Some(hc) = xy_find_crossing_line_cut(items, &idxs, x, median_h)
+    {
+        candidates.push(hc);
     }
     if let Some(cc) = column {
         candidates.push(cc);

@@ -335,7 +335,10 @@ pub fn detect_single_page_chrome(
 
     for (idx, line) in page.projected_lines.iter().enumerate() {
         let text = line.text.trim();
-        if text.is_empty() {
+        // Running chrome is horizontal text; a rotated line (a sideways table, which projection
+        // sets upright in a frame taller than the page) would otherwise sit in the "bottom band"
+        // and its year-led rows match the date pattern.
+        if text.is_empty() || super::classify::is_rotated_line(line) {
             continue;
         }
         let in_top = bots[idx] <= top_cutoff;

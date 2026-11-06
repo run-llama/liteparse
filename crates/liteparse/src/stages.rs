@@ -481,6 +481,8 @@ pub fn extract_blocks(
         blocks.retain(|b| !matches!(b.block, Block::HorizontalRule));
     }
     dedupe_rules(&mut blocks);
+    let blocks = markdown_layout::split_repeated_header_tables(blocks);
+    let blocks = markdown_layout::rejoin_paragraphs_around_figures(blocks);
     Some(markdown_layout::splice_soft_hyphens(blocks))
 }
 
