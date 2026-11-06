@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use liteparse::config::{
-    CropBox, ImageMode, LiteParseConfig, OutputFormat, PageOrientationCorrection,
+    CropBox, ImageMode, LiteParseConfig, OutputFormat, PageOrientationCorrection, TableFormat,
 };
 use liteparse::types::PdfInput;
 
@@ -17,6 +17,16 @@ fn parse_output_format(value: &str) -> PyResult<OutputFormat> {
         "markdown" | "md" => Ok(OutputFormat::Markdown),
         _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "invalid output_format: {value} (expected 'json', 'text', or 'markdown')"
+        ))),
+    }
+}
+
+fn parse_table_format(value: &str) -> PyResult<TableFormat> {
+    match value {
+        "markdown" | "md" | "gfm" => Ok(TableFormat::Markdown),
+        "html" => Ok(TableFormat::Html),
+        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "invalid table_format: {value} (expected 'markdown' or 'html')"
         ))),
     }
 }
@@ -1307,6 +1317,8 @@ struct PyLiteParseConfig {
     extract_images: bool,
     #[pyo3(get)]
     extract_vector_graphics: bool,
+    #[pyo3(get)]
+    table_format: String,
 }
 
 #[pymethods]
@@ -1379,6 +1391,10 @@ impl PyLiteParseConfig {
             image_output_dir: cfg.image_output_dir.clone(),
             extract_images: cfg.extract_images,
             extract_vector_graphics: cfg.extract_vector_graphics,
+            table_format: match cfg.table_format {
+                TableFormat::Markdown => "markdown".to_string(),
+                TableFormat::Html => "html".to_string(),
+            },
         }
     }
 }
@@ -1512,6 +1528,7 @@ impl LiteParse {
         page_orientation_corrections = None,
         include_complexity = None,
         extract_vector_graphics = None,
+        table_format = None,
     ))]
     fn new(
         ocr_language: Option<String>,
@@ -1552,6 +1569,7 @@ impl LiteParse {
         page_orientation_corrections: Option<Vec<(u32, u16)>>,
         include_complexity: Option<bool>,
         extract_vector_graphics: Option<bool>,
+        table_format: Option<String>,
     ) -> PyResult<Self> {
         let mut cfg = LiteParseConfig::default();
         if let Some(v) = ocr_language {
@@ -1679,6 +1697,9 @@ impl LiteParse {
         }
         if let Some(v) = extract_vector_graphics {
             cfg.extract_vector_graphics = v;
+        }
+        if let Some(v) = table_format {
+            cfg.table_format = parse_table_format(&v)?;
         }
 
         let inner = liteparse::parser::LiteParse::new(cfg.clone());

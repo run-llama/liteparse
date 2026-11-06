@@ -1,6 +1,7 @@
 use super::inline::escape_inline;
 use super::paragraphs::{ParaAccum, is_soft_hyphen_break};
 use super::tables::escape_table_cell;
+use crate::config::TableFormat;
 use crate::types::Rect;
 use serde::{Deserialize, Serialize};
 
@@ -416,6 +417,14 @@ fn render_html_table(rows: &[Vec<SpanCell>], header_rows: usize, out: &mut Strin
 
 /// Render a list of blocks to a markdown string.
 pub fn render_blocks(blocks: &[PositionedBlock]) -> String {
+    render_blocks_with(blocks, TableFormat::Markdown)
+}
+
+/// Render a list of blocks to a markdown string, choosing how tables are
+/// emitted. `Markdown` gives GFM pipe tables (merged tables still degrade to
+/// HTML when their spans don't fit pipes); `Html` emits `<table>` markup for
+/// every table.
+pub fn render_blocks_with(blocks: &[PositionedBlock], table_format: TableFormat) -> String {
     let mut out = String::new();
     for (i, positioned) in blocks.iter().enumerate() {
         let block = &positioned.block;
@@ -464,6 +473,18 @@ pub fn render_blocks(blocks: &[PositionedBlock]) -> String {
                 out.push_str(&wrap_emphasis(text, *bold, *italic));
             }
             Block::Table { header, rows } => {
+                if table_format == TableFormat::Html {
+                    // HTML has no GFM header-row constraint: a detected header
+                    // becomes `<th>`, a headerless table just renders all-td
+                    // instead of promoting its first row.
+                    let span_rows: Vec<Vec<SpanCell>> = header
+                        .iter()
+                        .chain(rows.iter())
+                        .map(|r| r.iter().map(|c| SpanCell::new(c.text.clone())).collect())
+                        .collect();
+                    render_html_table(&span_rows, usize::from(header.is_some()), &mut out);
+                    continue;
+                }
                 // GFM requires a header row before the separator. When the
                 // detector found no header, promote the first body row instead
                 // of synthesizing a blank `|   |   |` header — a visible empty
@@ -481,7 +502,9 @@ pub fn render_blocks(blocks: &[PositionedBlock]) -> String {
                 if rows.is_empty() {
                     continue;
                 }
-                if is_plain_grid(rows, *header_rows) {
+                if table_format == TableFormat::Html {
+                    render_html_table(rows, *header_rows, &mut out);
+                } else if is_plain_grid(rows, *header_rows) {
                     // Degenerate case — no merges, so pipes are expressive
                     // enough. Reuse the exact same rendering `Block::Table`
                     // gets, including the promote-first-row-when-headerless
@@ -671,6 +694,45 @@ mod tests {
         }];
         let s = render(blocks);
         assert_eq!(s, "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |");
+    }
+
+    #[test]
+    fn table_format_html_renders_plain_table_as_html() {
+        let positioned: Vec<PositionedBlock> = vec![PositionedBlock::unlocated(Block::Table {
+            header: Some(vec!["a".into(), "b".into()]),
+            rows: vec![vec!["1".into(), "2".into()]],
+        })];
+        let s = render_blocks_with(&positioned, TableFormat::Html);
+        assert_eq!(
+            s,
+            "<table>\n<tr>\n<th>a</th>\n<th>b</th>\n</tr>\n<tr>\n<td>1</td>\n<td>2</td>\n</tr>\n</table>"
+        );
+    }
+
+    #[test]
+    fn table_format_html_skips_pipe_fallback_for_plain_merged_grid() {
+        let positioned: Vec<PositionedBlock> =
+            vec![PositionedBlock::unlocated(Block::MergedTable {
+                header_rows: 1,
+                rows: vec![
+                    vec![SpanCell::new("a"), SpanCell::new("b")],
+                    vec![SpanCell::new("1"), SpanCell::new("2")],
+                ],
+            })];
+        let s = render_blocks_with(&positioned, TableFormat::Html);
+        assert!(s.starts_with("<table>"), "expected HTML table, got: {s}");
+        assert!(s.contains("<th>a</th>"));
+    }
+
+    #[test]
+    fn table_format_html_keeps_headerless_table_headerless() {
+        // No first-row promotion: HTML expresses a headerless table directly.
+        let positioned: Vec<PositionedBlock> = vec![PositionedBlock::unlocated(Block::Table {
+            header: None,
+            rows: vec![vec!["1".into(), "2".into()]],
+        })];
+        let s = render_blocks_with(&positioned, TableFormat::Html);
+        assert_eq!(s, "<table>\n<tr>\n<td>1</td>\n<td>2</td>\n</tr>\n</table>");
     }
 
     #[test]

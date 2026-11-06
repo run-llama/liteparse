@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use liteparse::config::{CropBox, ImageMode, OutputFormat, PageOrientationCorrection};
+use liteparse::config::{CropBox, ImageMode, OutputFormat, PageOrientationCorrection, TableFormat};
 use liteparse::ocr::{OcrEngine, OcrOptions, OcrResult};
 use liteparse::stages::{self, Library};
 use liteparse::types::{Page, ParsedPage, PdfInput};
@@ -363,7 +363,8 @@ async fn compose(parser: &LiteParse, input: PdfInput) -> ParseResult {
                 ));
             }
             if markdown {
-                page.markdown = stages::render_page_markdown(page, blocks.as_deref());
+                page.markdown =
+                    stages::render_page_markdown(page, blocks.as_deref(), TableFormat::Markdown);
             }
         }
     }

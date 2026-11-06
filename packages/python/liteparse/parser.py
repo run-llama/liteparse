@@ -503,6 +503,7 @@ class LiteParse:
         page_orientation_corrections: Optional[List[Tuple[int, int]]] = None,
         include_complexity: Optional[bool] = None,
         extract_vector_graphics: Optional[bool] = None,
+        table_format: Optional[str] = None,
         pool_size: Optional[int] = None,
         parse_timeout: Optional[float] = None,
     ):
@@ -592,6 +593,10 @@ class LiteParse:
                 pass.
             extract_vector_graphics: Expose page-scoped vector shapes and
                 merged horizontal/vertical line segments. Default False.
+            table_format: How tables render in markdown output:
+                ``"markdown"`` (default) for GFM pipe tables — merged tables
+                still fall back to HTML when their spans don't fit pipes —
+                or ``"html"`` for ``<table>`` markup on every table.
             pool_size: Route :meth:`parse` through a pool of this many
                 persistent worker processes instead of parsing in-process.
                 Call :meth:`close` (or use ``with``) to shut workers down.
@@ -678,6 +683,8 @@ class LiteParse:
             kwargs["include_complexity"] = include_complexity
         if extract_vector_graphics is not None:
             kwargs["extract_vector_graphics"] = extract_vector_graphics
+        if table_format is not None:
+            kwargs["table_format"] = table_format
 
         self._native = _NativeLiteParse(**kwargs)
 
@@ -993,6 +1000,7 @@ class LiteParse:
             extract_text_metadata=cfg.extract_text_metadata,
             extract_images=cfg.extract_images,
             extract_vector_graphics=cfg.extract_vector_graphics,
+            table_format=cfg.table_format,
             extract_xfa_packets=cfg.extract_xfa_packets,
             extract_document_metadata=cfg.extract_document_metadata,
             extract_content_bounds=cfg.extract_content_bounds,
