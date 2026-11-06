@@ -1,0 +1,42 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+6 0 obj
+<< /Length 621 >>
+stream
+BT /F2 16 Tf 1 0 0 1 48 742 Tm (1) Tj ET
+BT /F2 16 Tf 1 0 0 1 82 742 Tm (GENERAL INFORMATION) Tj ET
+BT /F1 10 Tf 1 0 0 1 48 718 Tm (The maintenance schedule should be followed before each inspection.) Tj ET
+BT /F1 10 Tf 1 0 0 1 48 704 Tm (These instructions describe ordinary service around the panel.) Tj ET
+BT /F2 16 Tf 1 0 0 1 48 670 Tm (2) Tj ET
+BT /F2 16 Tf 1 0 0 1 82 670 Tm (DOCUMENT PURPOSE) Tj ET
+BT /F1 10 Tf 1 0 0 1 48 646 Tm (This manual explains how the equipment should be inspected each day.) Tj ET
+BT /F1 10 Tf 1 0 0 1 48 632 Tm (The operator records any unusual noise after the machine is stopped.) Tj ETendstream
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000251 00000 n 
+0000000321 00000 n 
+0000000396 00000 n 
+trailer
+<< /Size 7 /Root 1 0 R >>
+startxref
+1067
+%%EOF
