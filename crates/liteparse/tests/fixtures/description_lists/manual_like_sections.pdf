@@ -1,0 +1,129 @@
+%PDF-1.3
+%“Œ‹ž ReportLab Generated PDF document (opensource)
+1 0 obj
+<<
+/F1 2 0 R /F2 3 0 R
+>>
+endobj
+2 0 obj
+<<
+/BaseFont /Helvetica /Encoding /WinAnsiEncoding /Name /F1 /Subtype /Type1 /Type /Font
+>>
+endobj
+3 0 obj
+<<
+/BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding /Name /F2 /Subtype /Type1 /Type /Font
+>>
+endobj
+4 0 obj
+<<
+/Contents 12 0 R /MediaBox [ 0 0 595.2756 841.8898 ] /Parent 11 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 /Trans <<
+
+>> 
+  /Type /Page
+>>
+endobj
+5 0 obj
+<<
+/Outlines 7 0 R /PageMode /UseNone /Pages 11 0 R /Type /Catalog
+>>
+endobj
+6 0 obj
+<<
+/Author (Synthetic test fixture) /CreationDate (D:20000101000000+00'00') /Creator (anonymous) /Keywords () /ModDate (D:20000101000000+00'00') /Producer (ReportLab PDF Library - \(opensource\)) 
+  /Subject (unspecified) /Title (Invented Equipment Guide) /Trapped /False
+>>
+endobj
+7 0 obj
+<<
+/Count 4 /First 8 0 R /Last 10 0 R /Type /Outlines
+>>
+endobj
+8 0 obj
+<<
+/Count 1 /Dest [ 4 0 R /Fit ] /First 9 0 R /Last 9 0 R /Next 10 0 R /Parent 7 0 R 
+  /Title (1 GENERAL INFORMATION)
+>>
+endobj
+9 0 obj
+<<
+/Dest [ 4 0 R /Fit ] /Parent 8 0 R /Title (1.1 USING THIS GUIDE)
+>>
+endobj
+10 0 obj
+<<
+/Dest [ 4 0 R /Fit ] /Parent 7 0 R /Prev 8 0 R /Title (2 DOCUMENT PURPOSE)
+>>
+endobj
+11 0 obj
+<<
+/Count 1 /Kids [ 4 0 R ] /Type /Pages
+>>
+endobj
+12 0 obj
+<<
+/Length 2016
+>>
+stream
+1 0 0 1 0 0 cm  BT /F1 12 Tf 14.4 TL ET
+BT /F2 19 Tf 22.8 TL ET
+BT 1 0 0 1 48 786 Tm (EQUIPMENT GUIDE) Tj T* ET
+BT /F2 16 Tf 19.2 TL ET
+BT 1 0 0 1 48 738 Tm (1) Tj T* ET
+BT 1 0 0 1 91 738 Tm (GENERAL INFORMATION) Tj T* ET
+BT /F1 10 Tf 12 TL ET
+BT 1 0 0 1 48 712 Tm (This handbook explains how staff should inspect a fictional device before it is used.) Tj T* ET
+BT 1 0 0 1 48 698 Tm (The maintenance record is completed whenever a change is noticed during a working shift.) Tj T* ET
+BT 1 0 0 1 48 684 Tm (Each observation should include the condition observed and the time of the inspection.) Tj T* ET
+BT 1 0 0 1 48 670 Tm (These notes provide a consistent starting point for discussions between work teams.) Tj T* ET
+BT /F2 13 Tf 15.6 TL ET
+BT 1 0 0 1 48 635 Tm (1.1) Tj T* ET
+BT 1 0 0 1 91 635 Tm (USING THIS GUIDE) Tj T* ET
+BT /F1 10 Tf 12 TL ET
+BT 1 0 0 1 48 609 Tm (This section describes a sample checklist for an imaginary training installation.) Tj T* ET
+BT 1 0 0 1 48 595 Tm (The example helps readers practise the order in which routine observations are recorded.) Tj T* ET
+BT 1 0 0 1 48 581 Tm (Each observation can be reviewed again during the following scheduled inspection.) Tj T* ET
+BT /F1 10 Tf 12 TL ET
+BT 1 0 0 1 77 555 Tm (- Review the sample checklist before starting the demonstration.) Tj T* ET
+BT 1 0 0 1 77 541 Tm (- Record any unexpected condition in the training log.) Tj T* ET
+BT /F2 16 Tf 19.2 TL ET
+BT 1 0 0 1 48 497 Tm (2) Tj T* ET
+BT 1 0 0 1 91 497 Tm (DOCUMENT PURPOSE) Tj T* ET
+BT /F1 10 Tf 12 TL ET
+BT 1 0 0 1 48 471 Tm (This document is an invented example prepared to demonstrate section and paragraph layout.) Tj T* ET
+BT 1 0 0 1 48 457 Tm (The document uses ordinary instructions rather than a two-column table of properties.) Tj T* ET
+BT 1 0 0 1 48 443 Tm (Each paragraph remains aligned with the numbered headings at the left side of the page.) Tj T* ET
+BT 1 0 0 1 48 429 Tm (These example sentences do not describe a real machine or a real maintenance procedure.) Tj T* ET
+ 
+endstream
+endobj
+xref
+0 13
+0000000000 65535 f 
+0000000061 00000 n 
+0000000102 00000 n 
+0000000209 00000 n 
+0000000321 00000 n 
+0000000526 00000 n 
+0000000611 00000 n 
+0000000901 00000 n 
+0000000973 00000 n 
+0000001110 00000 n 
+0000001196 00000 n 
+0000001293 00000 n 
+0000001353 00000 n 
+trailer
+<<
+/ID 
+[<c6a29b14949792b14400cbad78734165><c6a29b14949792b14400cbad78734165>]
+% ReportLab generated PDF document -- digest (opensource)
+
+/Info 6 0 R
+/Root 5 0 R
+/Size 13
+>>
+startxref
+3421
+%%EOF
