@@ -20,6 +20,9 @@ use serde::{Deserialize, Serialize};
 /// text); measured on a 121-page financial report, the trigger fires on ~3
 /// pages at this threshold.
 const UNCOVERED_VECTOR_AREA_THRESHOLD: f32 = 400.0;
+/// Native characters at which a sparse, raster-free page's text layer is taken as its content
+/// (OCR then runs only for vector-drawn text, see `calculate_page_complexity`).
+const SPARSE_TEXT_TRUSTED_LEN: usize = 500;
 
 /// Minimum side length (pt) for a raster image object to count toward image
 /// coverage; smaller objects (rule lines, bullets, icons) are ignored.
@@ -578,8 +581,11 @@ pub(crate) fn calculate_page_complexity(
         if page_obj.has_annotation_text() {
             reasons.push(ComplexityReason::AnnotationText);
         }
-    } else if sparse_text {
-        // There is real text, but it's too thin to be the whole page.
+    } else if sparse_text && (full_page_image || text_length < SPARSE_TEXT_TRUSTED_LEN) {
+        // There is real text, but it's too thin to be the whole page. A page that already
+        // carries plenty of native text and no raster at all has nothing else for OCR to read
+        // but text drawn as vector outlines, which the vector check below measures; OCR'ing it
+        // anyway only re-reads the native text (every result then dropped as overlapping).
         reasons.push(ComplexityReason::SparseText);
     }
     if has_images {
@@ -1269,6 +1275,9 @@ pub fn merge_ocr_results(
         } else {
             garbled_scope(page)
         };
+        // Some fonts dropped, the rest kept: OCR fills lines the dropped fonts held, and a kept
+        // glyph inside such a line (a bullet, a drop cap) must not veto it (see below).
+        let partial = matches!(scope, GarbledScope::Fonts(_));
         match scope {
             GarbledScope::None => page.text_items.retain(|item| !is_unusable_native(item)),
             GarbledScope::WholePage => page.text_items.clear(),
@@ -1286,6 +1295,8 @@ pub fn merge_ocr_results(
         // OCR lines whose bounding boxes touched within tolerance to suppress each
         // other, dropping every second line on scanned pages.
         let native_count = page.text_items.len();
+        // Kept native items an OCR line superseded on a partial page (see `partial`).
+        let mut superseded = vec![false; native_count];
         let debug_ocr = std::env::var_os("LITEPARSE_DEBUG_OCR").is_some();
         // A skewed scan: when all of the page's text is OCR, rotate the items upright about the
         // page centre. Axis-aligned boxes of tilted lines overlap the lines above and below,
@@ -1387,14 +1398,33 @@ pub fn merge_ocr_results(
                 }
                 continue;
             }
-            let overlaps = overlaps_existing_text(
-                &page.text_items[..native_count],
-                ocr_x,
-                ocr_y,
-                ocr_w,
-                ocr_h,
-                2.0,
-            );
+            // Native items inside a line that, on a partial page, supersedes them once added.
+            let mut inside = Vec::new();
+            let overlaps = if partial {
+                // On a partial page the line is the kept text's only when kept native text
+                // covers most of it; otherwise the native items inside it give way to it.
+                let natives = &page.text_items[..native_count];
+                let covered = native_width_coverage(natives, ocr_x, ocr_y, ocr_w, ocr_h);
+                if covered < PARTIAL_NATIVE_COVERAGE {
+                    inside = (0..native_count)
+                        .filter(|&i| {
+                            let it = &natives[i];
+                            let (cx, cy) = (it.x + it.width / 2.0, it.y + it.height / 2.0);
+                            cx >= ocr_x && cx <= ocr_x + ocr_w && cy >= ocr_y && cy <= ocr_y + ocr_h
+                        })
+                        .collect();
+                }
+                covered >= PARTIAL_NATIVE_COVERAGE
+            } else {
+                overlaps_existing_text(
+                    &page.text_items[..native_count],
+                    ocr_x,
+                    ocr_y,
+                    ocr_w,
+                    ocr_h,
+                    2.0,
+                )
+            };
             if debug_ocr {
                 eprintln!(
                     "[ocr-merge]   {} conf={:.2} x={:.1} y={:.1} w={:.1} h={:.1} {:?}",
@@ -1459,6 +1489,17 @@ pub fn merge_ocr_results(
                 confidence: Some((r.confidence * 1000.0).round() / 1000.0),
                 words,
                 ..Default::default()
+            });
+            for i in inside {
+                superseded[i] = true;
+            }
+        }
+        if superseded.iter().any(|&s| s) {
+            let mut i = 0;
+            page.text_items.retain(|_| {
+                let keep = i >= native_count || !superseded[i];
+                i += 1;
+                keep
             });
         }
         if !has_native_text {
@@ -1780,7 +1821,20 @@ fn garbled_scope(page: &Page) -> GarbledScope {
     let (mut total_ctrl, mut total_chars) = (0usize, 0usize);
     let mut per_font_tok: HashMap<Option<&str>, (usize, usize)> = HashMap::new();
     let (mut total_judged, mut total_malformed) = (0usize, 0usize);
+    // Misread glyphs (see `misread_glyphs`), per base font: intruding char -> its distinct words
+    // and the distinct tails it opens.
+    let mut per_base_misread: HashMap<Option<&str>, MisreadByChar> = HashMap::new();
     for it in &page.text_items {
+        if !it.math && !is_symbol_font(it.font_name.as_deref()) {
+            let words = per_base_misread
+                .entry(it.font_name.as_deref().map(base_font_name))
+                .or_default();
+            for m in misread_glyphs(&it.text) {
+                let e = words.entry(m.ch).or_default();
+                e.0.insert(m.word);
+                e.1.insert(m.tail);
+            }
+        }
         // math items carry the TeX pass's own LaTeX (and its fonts' control-position glyphs)
         if !it.math && !is_symbol_font(it.font_name.as_deref()) {
             let (c, n) = control_chars(&it.text);
@@ -1864,6 +1918,26 @@ fn garbled_scope(page: &Page) -> GarbledScope {
             .filter(|&(_, (j, m))| tokens_are_garbled(j, m))
             .map(|(font, _)| font.map(str::to_string)),
     );
+    // A misread glyph condemns every subset of its base font on the page: a producer that
+    // wrote one subset's map wrong wrote the others the same way, and the body subset's few
+    // misreads ("maGor") are too sparse to judge alone.
+    let misread_bases: HashSet<Option<&str>> = per_base_misread
+        .into_iter()
+        .filter(|(_, words)| {
+            words
+                .values()
+                .any(|(w, tails)| w.len() >= MISREAD_MIN_WORDS && tails.len() >= MISREAD_MIN_TAILS)
+        })
+        .map(|(base, _)| base)
+        .collect();
+    if !misread_bases.is_empty() {
+        fonts.extend(
+            page.text_items
+                .iter()
+                .filter(|it| misread_bases.contains(&it.font_name.as_deref().map(base_font_name)))
+                .map(|it| it.font_name.clone()),
+        );
+    }
 
     if fonts.is_empty() {
         GarbledScope::None
@@ -2087,6 +2161,94 @@ fn symbols_are_garbled(letters: usize, intrusions: usize) -> bool {
     intrusions >= SYMBOL_MIN && intrusions as f32 >= letters as f32 * SYMBOL_MIN_RATE
 }
 
+/// Fewest distinct words one misread character must turn up in for its font to count as
+/// garbled (see [`misread_glyphs`]). Brand and camel-case names ("arXiv", "iPad", "McRae")
+/// repeat one word; a wrong map entry hits every word with that glyph. On ParseBench v2 text,
+/// tables and opendataloader (1,210 pages) the broken fonts reach 3-50 words, clean text 2.
+const MISREAD_MIN_WORDS: usize = 3;
+
+/// ...and, for a misread capital, at least this many distinct tails it opens: compound names
+/// end in one repeated part ("HistoAge", "PhenoAge", "GrimAge"), a wrong map entry lands
+/// mid-word in different places ("executiMe", "achieMed").
+const MISREAD_MIN_TAILS: usize = 2;
+
+/// Per misread char: the distinct words it sits in and the distinct tails it opens.
+type MisreadByChar = HashMap<char, (HashSet<String>, HashSet<String>)>;
+
+/// One misread character (see [`misread_glyphs`]): the char, the word it sits in (letters,
+/// lowercased), and the text from it to the word's end (for a symbol, the whole word).
+#[derive(Debug)]
+struct Misread {
+    ch: char,
+    word: String,
+    tail: String,
+}
+
+/// A font's name without its subset tag ("AAAAAB+Futura" -> "Futura").
+fn base_font_name(name: &str) -> &str {
+    name.split_once('+').map_or(name, |(_, b)| b)
+}
+
+/// Characters a font map put where a letter belongs, each with the word (its letters,
+/// lowercased) it sits in. A map that is wrong for only a few glyphs leaves text that reads
+/// almost right, so none of the font-wide rates above catch it:
+/// - `! % *` between two Latin, Greek or Cyrillic letters ("va!í", "kter*ch": č, š, ý lost);
+/// - a capital inside a lowercase word whose lowercase tail (under 3 letters) ends the word
+///   ("maGor", "OecutiMe", "horiQon"). A capital in second place ("iPad"), words with digits
+///   ("dBm", "o9A") and identifiers are skipped.
+///
+/// `"` is no intruder: a quotation printed without its leading space ("expression"put") is real.
+fn misread_glyphs(text: &str) -> Vec<Misread> {
+    let mut out = Vec::new();
+    for tok in text.split_whitespace() {
+        let t = tok.trim_matches(|c: char| {
+            matches!(
+                c,
+                '.' | ',' | ';' | ':' | '(' | ')' | '[' | ']' | '{' | '}' | '\'' | '"' | '!' | '?'
+            ) || "«»“”‘’".contains(c)
+        });
+        if t.starts_with("http") || t.chars().any(|c| matches!(c, '_' | '@' | '\\' | '$' | '/')) {
+            continue;
+        }
+        let cs: Vec<char> = t.chars().collect();
+        if cs.len() < 3 {
+            continue;
+        }
+        let word = || -> String {
+            cs.iter()
+                .filter(|c| c.is_alphabetic())
+                .flat_map(|c| c.to_lowercase())
+                .collect()
+        };
+        let alphabetic = |c: char| c.is_alphabetic() && matches!(script_of(c), 0 | 0x370 | 0x400);
+        for i in 1..cs.len() - 1 {
+            if matches!(cs[i], '!' | '%' | '*') && alphabetic(cs[i - 1]) && alphabetic(cs[i + 1]) {
+                out.push(Misread {
+                    ch: cs[i],
+                    word: word(),
+                    tail: word(),
+                });
+            }
+        }
+        if cs.iter().any(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        for i in 2..cs.len() - 1 {
+            if cs[i - 1].is_lowercase() && cs[i].is_uppercase() && cs[i + 1].is_lowercase() {
+                let tail = cs[i + 1..].iter().take_while(|c| c.is_lowercase()).count();
+                if i + 1 + tail == cs.len() && tail < 3 {
+                    out.push(Misread {
+                        ch: cs[i],
+                        word: word(),
+                        tail: cs[i..].iter().collect(),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
 fn intrusions_are_garbled(script: usize, intrusions: usize) -> bool {
     intrusions >= INTRUSION_MIN && intrusions as f32 >= script as f32 * INTRUSION_MIN_RATE
 }
@@ -2186,6 +2348,36 @@ fn is_rule_artifact(text: &str, w: f32, h: f32) -> bool {
         }
     }
     false
+}
+
+/// Least share of an OCR line's width that kept native text must cover, on a page whose
+/// garbled fonts were dropped, for the line to count as already present (see `partial`).
+const PARTIAL_NATIVE_COVERAGE: f32 = 0.5;
+
+/// Share of the box's width covered by native items on its line (vertical overlap of at
+/// least half the shorter height), their horizontal extents merged.
+fn native_width_coverage(items: &[TextItem], x: f32, y: f32, w: f32, h: f32) -> f32 {
+    if w <= 0.0 {
+        return 1.0;
+    }
+    let mut spans: Vec<(f32, f32)> = items
+        .iter()
+        .filter(|it| {
+            let v = (y + h).min(it.y + it.height) - y.max(it.y);
+            v > 0.5 * h.min(it.height)
+        })
+        .map(|it| (it.x.max(x), (it.x + it.width).min(x + w)))
+        .filter(|(a, b)| b > a)
+        .collect();
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (mut covered, mut end) = (0.0f32, f32::NEG_INFINITY);
+    for (a, b) in spans {
+        if b > end {
+            covered += b - a.max(end);
+            end = b;
+        }
+    }
+    covered / w
 }
 
 fn overlaps_existing_text(
@@ -2892,6 +3084,74 @@ mod tests {
         let mut page = make_font_page(&items);
         page.text_items.last_mut().unwrap().has_unicode_map_error = true;
         assert!(!page_is_garbled(&page));
+    }
+
+    /// A font map wrong for a few glyphs (č -> `"`, ý -> `*`, j -> `G`) leaves text that reads
+    /// almost right. One misread char across three or more words condemns every subset of
+    /// that base font on the page; the healthy font's text stays.
+    #[test]
+    fn misread_glyphs_flag_every_subset_of_the_base_font() {
+        let mut items: Vec<(&str, &str)> = HEALTHY_PARAGRAPH
+            .iter()
+            .map(|t| ("Helvetica", *t))
+            .collect();
+        items.push(("AAAAAB+Futura", "Tato kter*ch nabíječka je jednou z jin*m"));
+        items.push(("AAAAAC+Futura", "nejnověj*ch a b*t"));
+        items.push(("AAAAAD+Futura", "Kontakt"));
+        let page = make_font_page(&items);
+        match garbled_scope(&page) {
+            GarbledScope::Fonts(fonts) => {
+                assert!(fonts.contains(&Some("AAAAAB+Futura".to_string())));
+                assert!(fonts.contains(&Some("AAAAAD+Futura".to_string())));
+                assert!(!fonts.contains(&Some("Helvetica".to_string())));
+            }
+            _ => panic!("expected the Futura subsets to be flagged"),
+        }
+    }
+
+    /// Compound names ending in one repeated part are no broken map either.
+    #[test]
+    fn misread_glyphs_ignore_compound_names_with_one_tail() {
+        let mut items: Vec<(&str, &str)> = HEALTHY_PARAGRAPH
+            .iter()
+            .map(|t| ("Helvetica", *t))
+            .collect();
+        items.push((
+            "STIX-Regular",
+            "HistoAge PhenoAge GrimAge pTau acceleration",
+        ));
+        let page = make_font_page(&items);
+        assert!(matches!(garbled_scope(&page), GarbledScope::None));
+    }
+
+    /// Brand and camel-case names repeat one word, quotations lack a leading space, units carry
+    /// digits: none of them is a misread glyph.
+    #[test]
+    fn misread_glyphs_ignore_names_quotes_and_units() {
+        for text in [
+            "arXiv arXiv arXiv iPad iPad McRae McRae",
+            "the expression\"put out fire\" and emerging\"care in parentheses\"exemplified",
+            "70dBc -94dBc 21dBm 25dBm PubTabNet",
+        ] {
+            let found = misread_glyphs(text);
+            let words: HashSet<&str> = found.iter().map(|m| m.word.as_str()).collect();
+            assert!(words.len() < MISREAD_MIN_WORDS, "{text:?} -> {found:?}");
+        }
+        let found = misread_glyphs("maGor OecutiMe horiQon va!í");
+        assert_eq!(found.iter().map(|m| m.ch).collect::<String>(), "GMQ!");
+        assert_eq!(found[0].word, "magor");
+    }
+
+    /// Kept native glyphs inside an OCR line cover only a sliver of its width.
+    #[test]
+    fn native_width_coverage_merges_overlapping_spans() {
+        let items = vec![
+            make_item(0.0, 0.0, 10.0, 10.0),
+            make_item(5.0, 0.0, 10.0, 10.0),
+        ];
+        assert!((native_width_coverage(&items, 0.0, 0.0, 100.0, 10.0) - 0.15).abs() < 1e-4);
+        // a line above or below does not count
+        assert_eq!(native_width_coverage(&items, 0.0, 20.0, 100.0, 10.0), 0.0);
     }
 
     /// A small run of low-vowel text (acronyms, tickers, part numbers) in its

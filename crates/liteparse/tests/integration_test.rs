@@ -946,9 +946,12 @@ async fn test_ocr_rounds_fill_across_sparse_pages() {
 
     let calls = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
+    // Fewer workers than the fixture's OCR pages (4: 2 sparse-text, 3 with images, overlapping),
+    // so the window has more than one round of pages to fill across native-text pages.
+    let workers = 3;
     let parser = LiteParse::new(LiteParseConfig {
         ocr_enabled: true,
-        num_workers: 8,
+        num_workers: workers,
         dpi: 72.0, // Small rasters: this test is about scheduling, not pixels.
         quiet: true,
         ..Default::default()
@@ -966,7 +969,7 @@ async fn test_ocr_rounds_fill_across_sparse_pages() {
 
     let recognized = calls.load(Ordering::SeqCst);
     assert!(
-        recognized > 8,
+        recognized > workers,
         "expected the fixture to need OCR on more than one round's worth of pages, got {recognized}"
     );
     assert!(
@@ -979,7 +982,7 @@ async fn test_ocr_rounds_fill_across_sparse_pages() {
     // pages are interleaved with native-text pages it skips.
     assert_eq!(
         peak.load(Ordering::SeqCst),
-        8,
+        workers,
         "the OCR window must fill to num_workers across skipped pages; a lower peak means \
          the window is being cut short by page span"
     );
