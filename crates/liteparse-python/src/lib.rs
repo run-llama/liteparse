@@ -1292,6 +1292,10 @@ struct PyLiteParseConfig {
     #[pyo3(get)]
     emit_word_boxes: bool,
     #[pyo3(get)]
+    tight_word_boxes: bool,
+    #[pyo3(get)]
+    logical_word_order: bool,
+    #[pyo3(get)]
     crop_box: Option<(f32, f32, f32, f32)>,
     #[pyo3(get)]
     skip_diagonal_text: bool,
@@ -1364,6 +1368,8 @@ impl PyLiteParseConfig {
             ocr_failure_fatal: cfg.ocr_failure_fatal,
             ocr_hedge_delays_ms: cfg.ocr_hedge_delays_ms.clone(),
             emit_word_boxes: cfg.emit_word_boxes,
+            tight_word_boxes: cfg.tight_word_boxes,
+            logical_word_order: cfg.logical_word_order,
             crop_box: cfg
                 .crop_box
                 .as_ref()
@@ -1506,6 +1512,8 @@ impl LiteParse {
         ocr_failure_fatal = None,
         ocr_hedge_delays_ms = None,
         emit_word_boxes = None,
+        tight_word_boxes = None,
+        logical_word_order = None,
         extract_text_metadata = None,
         crop_box = None,
         skip_diagonal_text = None,
@@ -1546,6 +1554,8 @@ impl LiteParse {
         ocr_failure_fatal: Option<bool>,
         ocr_hedge_delays_ms: Option<Vec<u64>>,
         emit_word_boxes: Option<bool>,
+        tight_word_boxes: Option<bool>,
+        logical_word_order: Option<bool>,
         extract_text_metadata: Option<bool>,
         crop_box: Option<(f32, f32, f32, f32)>,
         skip_diagonal_text: Option<bool>,
@@ -1653,6 +1663,12 @@ impl LiteParse {
         }
         if let Some(v) = emit_word_boxes {
             cfg.emit_word_boxes = v;
+        }
+        if let Some(v) = tight_word_boxes {
+            cfg.tight_word_boxes = v;
+        }
+        if let Some(v) = logical_word_order {
+            cfg.logical_word_order = v;
         }
         if let Some(v) = extract_text_metadata {
             cfg.extract_text_metadata = v;

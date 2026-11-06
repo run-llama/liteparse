@@ -107,6 +107,12 @@ pub struct JsLiteParseConfig {
     /// false. Word boxes roughly double the text-item payload, so enable only
     /// for word-level bbox attribution.
     pub emit_word_boxes: Option<bool>,
+    /// Build word boxes from strict glyph boxes instead of loose font boxes.
+    /// Default false.
+    pub tight_word_boxes: Option<bool>,
+    /// List a right-to-left text item's `words` in logical (reading) order
+    /// instead of visual order. Default false. `text` is unchanged.
+    pub logical_word_order: Option<bool>,
     /// Include rich PDF text metadata on returned text items. Default false.
     pub extract_text_metadata: Option<bool>,
     /// Restrict output to a page sub-region. Each field is the fraction of the
@@ -254,6 +260,12 @@ impl JsLiteParseConfig {
         if let Some(v) = self.emit_word_boxes {
             cfg.emit_word_boxes = v;
         }
+        if let Some(v) = self.tight_word_boxes {
+            cfg.tight_word_boxes = v;
+        }
+        if let Some(v) = self.logical_word_order {
+            cfg.logical_word_order = v;
+        }
         if let Some(v) = self.extract_text_metadata {
             cfg.extract_text_metadata = v;
         }
@@ -337,6 +349,8 @@ impl JsLiteParseConfig {
                     .collect(),
             ),
             emit_word_boxes: Some(cfg.emit_word_boxes),
+            tight_word_boxes: Some(cfg.tight_word_boxes),
+            logical_word_order: Some(cfg.logical_word_order),
             extract_text_metadata: Some(cfg.extract_text_metadata),
             crop_box: cfg.crop_box.map(|c| JsCropBox {
                 top: c.top as f64,

@@ -135,6 +135,16 @@ pub struct LiteParseConfig {
     /// `false`, `TextItem.words` is always empty and the per-word tracking is
     /// skipped entirely (zero allocation).
     pub emit_word_boxes: bool,
+    /// Build `TextItem.words` boxes from the strict glyph boxes instead of the
+    /// loose font boxes (ascent/descent), so a word box hugs its ink. Default
+    /// `false`. Only matters with word boxes on.
+    #[serde(default)]
+    pub tight_word_boxes: bool,
+    /// List the `words` of a right-to-left text item in logical (reading)
+    /// order instead of left-to-right visual order, re-joining words pdfium
+    /// split around punctuation. Default `false`. Does not change `text`.
+    #[serde(default)]
+    pub logical_word_order: bool,
     /// Include rich PDF text metadata on public text items: MCID, glyph width,
     /// font metrics/weight/buggy state, fill/stroke colors, raw character
     /// codes, and generated-trailing-space state. Default `false` to preserve
@@ -319,6 +329,8 @@ impl Default for LiteParseConfig {
             ocr_failure_fatal: true,
             ocr_hedge_delays_ms: Vec::new(),
             emit_word_boxes: false,
+            tight_word_boxes: false,
+            logical_word_order: false,
             extract_text_metadata: false,
             crop_box: None,
             skip_diagonal_text: false,

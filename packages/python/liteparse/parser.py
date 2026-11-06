@@ -497,6 +497,8 @@ class LiteParse:
         ocr_failure_fatal: Optional[bool] = None,
         ocr_hedge_delays_ms: Optional[List[int]] = None,
         emit_word_boxes: Optional[bool] = None,
+        tight_word_boxes: Optional[bool] = None,
+        logical_word_order: Optional[bool] = None,
         extract_text_metadata: Optional[bool] = None,
         crop_box: Optional[Tuple[float, float, float, float]] = None,
         skip_diagonal_text: Optional[bool] = None,
@@ -565,6 +567,12 @@ class LiteParse:
                 (``TextItem.words``). Default False. Word boxes roughly double
                 the text-item payload, so enable only for word-level bbox
                 attribution.
+            tight_word_boxes: Build word boxes from the strict glyph boxes
+                instead of the loose font (ascent/descent) boxes, so each box
+                hugs its ink. Default False. Needs ``emit_word_boxes``.
+            logical_word_order: List the ``words`` of a right-to-left text
+                item in logical (reading) order instead of left-to-right
+                visual order. Default False. ``TextItem.text`` is unchanged.
             extract_text_metadata: Include rich PDF text metadata on returned
                 text items (MCID, glyph width, font metrics/weight/buggy state,
                 colors, raw character codes, and ``trailing_space_generated``). Default False.
@@ -664,6 +672,10 @@ class LiteParse:
             kwargs["ocr_hedge_delays_ms"] = ocr_hedge_delays_ms
         if emit_word_boxes is not None:
             kwargs["emit_word_boxes"] = emit_word_boxes
+        if tight_word_boxes is not None:
+            kwargs["tight_word_boxes"] = tight_word_boxes
+        if logical_word_order is not None:
+            kwargs["logical_word_order"] = logical_word_order
         if extract_text_metadata is not None:
             kwargs["extract_text_metadata"] = extract_text_metadata
         if crop_box is not None:
@@ -986,6 +998,8 @@ class LiteParse:
             ocr_failure_fatal=cfg.ocr_failure_fatal,
             ocr_hedge_delays_ms=list(cfg.ocr_hedge_delays_ms),
             emit_word_boxes=cfg.emit_word_boxes,
+            tight_word_boxes=cfg.tight_word_boxes,
+            logical_word_order=cfg.logical_word_order,
             crop_box=cfg.crop_box,
             skip_diagonal_text=cfg.skip_diagonal_text,
             page_orientation_corrections=list(cfg.page_orientation_corrections),

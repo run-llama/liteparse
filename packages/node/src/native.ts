@@ -52,6 +52,8 @@ export interface LiteParseNativeConfig {
   ocrFailureFatal?: boolean;
   ocrHedgeDelaysMs?: number[];
   emitWordBoxes?: boolean;
+  tightWordBoxes?: boolean;
+  logicalWordOrder?: boolean;
   extractTextMetadata?: boolean;
   cropBox?: NativeCropBox;
   skipDiagonalText?: boolean;

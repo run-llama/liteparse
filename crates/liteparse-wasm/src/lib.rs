@@ -90,6 +90,8 @@ pub struct LiteParseConfig {
     /// also keeps one rendered page raster in memory. Default 1.
     num_workers: Option<usize>,
     emit_word_boxes: Option<bool>,
+    tight_word_boxes: Option<bool>,
+    logical_word_order: Option<bool>,
     /// Restrict output to a page sub-region. Each field is the fraction of the
     /// page cropped from that side; a text item survives only if it lies
     /// entirely inside the remaining rectangle. Unset keeps the whole page.
@@ -245,6 +247,12 @@ impl LiteParseConfig {
         if let Some(v) = self.emit_word_boxes {
             cfg.emit_word_boxes = v;
         }
+        if let Some(v) = self.tight_word_boxes {
+            cfg.tight_word_boxes = v;
+        }
+        if let Some(v) = self.logical_word_order {
+            cfg.logical_word_order = v;
+        }
         if let Some(v) = self.crop_box {
             cfg.crop_box = Some(CoreCropBox {
                 top: v.top,
@@ -330,6 +338,8 @@ impl LiteParseConfig {
             quiet: Some(cfg.quiet),
             num_workers: Some(cfg.num_workers),
             emit_word_boxes: Some(cfg.emit_word_boxes),
+            tight_word_boxes: Some(cfg.tight_word_boxes),
+            logical_word_order: Some(cfg.logical_word_order),
             crop_box: cfg.crop_box.map(|c| CropBox {
                 top: c.top,
                 right: c.right,
