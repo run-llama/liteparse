@@ -1558,7 +1558,7 @@ fn extract_page_text_items(
             seg.flush(&mut items);
             continue;
         }
-        let unicode = cv.unicode();
+        let unicode = lam_alef_order(text_page, i, char_count, cv.unicode(), cv.char_code());
         let is_generated = cv.is_generated();
 
         // Skip invisible text (render mode 3) only when the page also has visible text.
@@ -2707,6 +2707,49 @@ impl<'a> GlyphDecoder<'a> {
     }
 }
 
+const ARABIC_LAM: u32 = 0x0644;
+
+/// How far (points) past a word's rightmost letter a combining mark may sit and still belong
+/// to the letter just before the word (see `SegmentBuilder::place_rtl_mark`).
+const RTL_MARK_REACH: f32 = 3.0;
+
+/// Combining marks of the Hebrew and Arabic blocks (points, cantillation, harakat).
+fn is_rtl_combining_mark(c: char) -> bool {
+    matches!(c as u32, 0x0591..=0x05BD | 0x05BF | 0x05C1..=0x05C2 | 0x05C4..=0x05C5 | 0x05C7
+        | 0x0610..=0x061A | 0x064B..=0x065F | 0x0670 | 0x06D6..=0x06DC | 0x06DF..=0x06E4
+        | 0x06E7..=0x06E8 | 0x06EA..=0x06ED)
+}
+
+/// Alef and its hamza / madda forms, the second letter of a lam-alef ligature.
+fn is_alef(u: u32) -> bool {
+    matches!(u, 0x0622 | 0x0623 | 0x0625 | 0x0627)
+}
+
+/// Logical order for a lam-alef ligature glyph. One glyph draws lam + alef ("لا", "لأ"), and
+/// many producers write its ToUnicode entry in visual order, alef first; PDFium then hands back
+/// two chars sharing the glyph's char code, alef then lam ("األثاث" for "الأثاث"). Separate
+/// alef and lam glyphs (the article "ال") carry different codes and are left alone.
+fn lam_alef_order(text_page: &TextPage, i: i32, char_count: i32, unicode: u32, code: u32) -> u32 {
+    let shares_glyph = |j: i32| {
+        (0..char_count)
+            .contains(&j)
+            .then(|| {
+                let c = text_page.char_at_unchecked(j);
+                (c.char_code() == code).then(|| c.unicode())
+            })
+            .flatten()
+    };
+    if is_alef(unicode) && shares_glyph(i + 1) == Some(ARABIC_LAM) {
+        return ARABIC_LAM;
+    }
+    if unicode == ARABIC_LAM
+        && let Some(prev) = shares_glyph(i - 1).filter(|&u| is_alef(u))
+    {
+        return prev;
+    }
+    unicode
+}
+
 /// Control/PUA/sentinel codepoints that signal a garbage /ToUnicode mapping.
 fn is_suspicious_unicode(unicode: u32) -> bool {
     matches!(unicode, 0 | 0xFFFE | 0xFFFF) || unicode < 0x20 || (0xE000..=0xF8FF).contains(&unicode)
@@ -3240,6 +3283,9 @@ struct SegmentBuilder {
     emit_words: bool,
     // When false, source-code/trailing-space metadata is not accumulated.
     extract_text_metadata: bool,
+    // Right-to-left letters of the segment as (byte end in `text`, loose left, loose right), so
+    // a combining mark drawn over an earlier letter can be placed after it (see `push_char`).
+    rtl_spans: Vec<(usize, f32, f32)>,
 }
 
 impl SegmentBuilder {
@@ -3287,6 +3333,7 @@ impl SegmentBuilder {
             word_has: false,
             emit_words,
             extract_text_metadata,
+            rtl_spans: Vec::new(),
         }
     }
 
@@ -3404,6 +3451,11 @@ impl SegmentBuilder {
     ) {
         self.text.clear();
         self.text.push(c);
+        self.rtl_spans.clear();
+        if crate::bidi::is_rtl_char(c) {
+            self.rtl_spans
+                .push((self.text.len(), vp_loose.left, vp_loose.right));
+        }
         self.vp_left = vp_loose.left;
         self.vp_right = vp_loose.right;
         self.vp_top = vp_loose.top;
@@ -3527,7 +3579,21 @@ impl SegmentBuilder {
         cv: &CharView<'_, '_>,
         recovered: bool,
     ) {
+        if self.place_rtl_mark(c, vp_loose) {
+            // the segment's box still covers the mark; the trailing-edge fields stay on the
+            // last letter, so the next char's gap is measured from it
+            self.vp_left = self.vp_left.min(vp_loose.left);
+            self.vp_right = self.vp_right.max(vp_loose.right);
+            self.vp_top = self.vp_top.min(vp_loose.top);
+            self.vp_bottom = self.vp_bottom.max(vp_loose.bottom);
+            self.char_count += 1;
+            return;
+        }
         self.text.push(c);
+        if crate::bidi::is_rtl_char(c) {
+            self.rtl_spans
+                .push((self.text.len(), vp_loose.left, vp_loose.right));
+        }
         self.add_word_char(c, vp_loose);
         self.vp_left = self.vp_left.min(vp_loose.left);
         self.vp_right = self.vp_right.max(vp_loose.right);
@@ -3566,6 +3632,62 @@ impl SegmentBuilder {
                 self.font_is_buggy = true;
             }
         }
+    }
+
+    /// A right-to-left combining mark (Arabic harakat, Hebrew points) that PDFium hands over
+    /// after the rest of its word ("يقصدُ" for "يُقصد"): insert it after the letter of the
+    /// current word that its box sits over. Returns false when the mark already follows its
+    /// letter, or no letter of the word lies under it; the caller then appends it as usual.
+    fn place_rtl_mark(&mut self, c: char, vp_loose: &RectF) -> bool {
+        if self.dir_rtl != Some(true) || !is_rtl_combining_mark(c) || self.rtl_spans.len() < 2 {
+            return false;
+        }
+        let word_start = self.text.rfind(char::is_whitespace).map_or(0, |i| i + 1);
+        let cx = (vp_loose.left + vp_loose.right) / 2.0;
+        let Some(k) = self
+            .rtl_spans
+            .iter()
+            .position(|&(end, l, r)| end > word_start && cx >= l - 0.5 && cx <= r + 0.5)
+        else {
+            // Just past the word's first (rightmost) letter: the mark sits on the letter before
+            // the word, which PDFium hands over separately and line assembly puts back in front.
+            let word_right = self
+                .rtl_spans
+                .iter()
+                .filter(|s| s.0 > word_start)
+                .map(|s| s.2)
+                .fold(f32::MIN, f32::max);
+            if word_right > f32::MIN && cx > word_right && cx - word_right < RTL_MARK_REACH {
+                self.text.insert(word_start, c);
+                if self.emit_words && self.word_has {
+                    self.cur_word.insert(0, c);
+                }
+                let n = c.len_utf8();
+                for s in self.rtl_spans.iter_mut().filter(|s| s.0 > word_start) {
+                    s.0 += n;
+                }
+                return true;
+            }
+            return false;
+        };
+        if k + 1 == self.rtl_spans.len() {
+            return false;
+        }
+        let at = self.rtl_spans[k].0;
+        self.text.insert(at, c);
+        if self.emit_words && self.word_has {
+            let in_word = self.cur_word.len() + at;
+            if let Some(w) = in_word.checked_sub(self.text.len() - c.len_utf8())
+                && self.cur_word.is_char_boundary(w)
+            {
+                self.cur_word.insert(w, c);
+            }
+        }
+        let n = c.len_utf8();
+        for s in &mut self.rtl_spans[k..] {
+            s.0 += n;
+        }
+        true
     }
 
     /// Append extra characters to the segment text (for ligature expansion).
