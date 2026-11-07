@@ -121,6 +121,7 @@ pub(super) fn classify_page(page: &ParsedPage, heading_map: &[(f32, u8)]) -> Vec
         &[],
         crate::config::ImageMode::Placeholder,
         &std::collections::HashSet::new(),
+        &[],
     )
 }
 
@@ -132,6 +133,10 @@ pub(super) fn classify_page(page: &ParsedPage, heading_map: &[(f32, u8)]) -> Vec
 /// matches this page (or the full outline — out-of-page entries are
 /// ignored). Heading promotion from struct tree + outline outranks the
 /// font-size heading map.
+///
+/// `table_regions` are layout-model table boxes in page points. Lines whose
+/// centers fall inside a box are pulled into one synthetic region and
+/// classified as a table there (see `cross_region::apply_layout_table_regions`).
 pub fn classify_page_with_filters(
     page: &ParsedPage,
     heading_map: &[(f32, u8)],
@@ -139,6 +144,7 @@ pub fn classify_page_with_filters(
     outline: &[OutlineTarget],
     image_mode: crate::config::ImageMode,
     chrome_indices: &std::collections::HashSet<usize>,
+    table_regions: &[crate::types::Rect],
 ) -> Vec<PositionedBlock> {
     let debug = *super::flags::DEBUG_MD;
 
@@ -315,6 +321,20 @@ pub fn classify_page_with_filters(
     };
     let lines: &[ProjectedLine] = global_ruled_owned.as_deref().unwrap_or(lines);
 
+    // Layout-model table boxes claim the lines the global ruled pass left
+    // (TOC pages included: the box outranks the TOC heuristic). The
+    // cross-region pass below leaves the synthetic regions alone.
+    let mut layout_owned: Option<Vec<ProjectedLine>> = None;
+    let mut layout_runs: Vec<(Vec<u16>, Vec<super::tables::TableRun>)> = Vec::new();
+    if !table_regions.is_empty()
+        && let Some((next, runs)) =
+            super::cross_region::apply_layout_table_regions(lines, table_regions, &rule_segments)
+    {
+        layout_owned = Some(next);
+        layout_runs = runs;
+    }
+    let lines: &[ProjectedLine] = layout_owned.as_deref().unwrap_or(lines);
+
     // Cross-region table re-merge: when a V-cut sliced a table into sibling
     // leaves, fuse the slices back into single rows (one synthetic region)
     // before grouping. Each successful merge carries its own validated table
@@ -323,7 +343,7 @@ pub fn classify_page_with_filters(
     // TOC pages are skipped: their split number/title/page-number leaves
     // baseline-align perfectly and fuse into a convincing-but-wrong table.
     let mut cross_merged_owned: Option<Vec<ProjectedLine>> = None;
-    let mut cross_region_runs: Vec<(Vec<u16>, Vec<super::tables::TableRun>)> = Vec::new();
+    let mut cross_region_runs = layout_runs;
     for _ in 0..3 {
         if toc_page {
             break;
@@ -588,6 +608,15 @@ fn classify_region(
         .into_iter()
         .filter(|run| super::tables::run_text_kept(run, lines).is_none_or(|kept| kept >= 0.7))
         .collect();
+    // A ruled run can replace the layout box's own run; it still takes the
+    // box lines above it as header rows, before the repairs run.
+    if lines
+        .first()
+        .is_some_and(super::cross_region::is_layout_region)
+        && let Some(first) = table_runs.first_mut()
+    {
+        super::cross_region::absorb_box_header(lines, first);
+    }
     super::table_repair::repair_region_runs(&mut table_runs, lines);
 
     // Region-wide pre-pass: which line indices carry a lettered/roman marker
@@ -1853,6 +1882,7 @@ mod tests {
             &[],
             crate::config::ImageMode::Placeholder,
             &std::collections::HashSet::new(),
+            &[],
         );
         let s = render_blocks(&blocks);
         assert!(!s.contains("Acme Confidential"), "got: {s}");

@@ -483,6 +483,7 @@ mod tests {
             &[],
             crate::config::ImageMode::Off,
             &std::collections::HashSet::new(),
+            &[],
         );
         render_blocks(&blocks)
     }
@@ -637,6 +638,7 @@ mod tests {
             &[],
             crate::config::ImageMode::Off,
             &std::collections::HashSet::new(),
+            &[],
         );
         assert_eq!(
             blocks

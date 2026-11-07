@@ -431,6 +431,7 @@ impl LiteParse {
             outline,
             image_mode: self.config.image_mode,
             keep_headers_footers: self.config.keep_headers_footers,
+            table_regions: &[],
         }
     }
 

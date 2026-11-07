@@ -488,6 +488,9 @@ pub(super) fn find_cross_region_table_merge(lines: &[ProjectedLine]) -> Option<C
     for i in 0..leaves.len() {
         for j in (i + 1)..leaves.len() {
             let (a, b) = (&leaves[i], &leaves[j]);
+            if is_layout_region(&lines[a.start]) || is_layout_region(&lines[b.start]) {
+                continue;
+            }
             let (left, right) = if a.x1 <= b.x0 - CR_MIN_COL_GAP_PT {
                 (a, b)
             } else if b.x1 <= a.x0 - CR_MIN_COL_GAP_PT {
@@ -531,7 +534,7 @@ pub(super) fn find_cross_region_table_merge(lines: &[ProjectedLine]) -> Option<C
             for (k, leaf) in leaves.iter().enumerate() {
                 let leaf_h = (leaf.y1 - leaf.y0).max(1.0);
                 let leaf_ov = leaf.y1.min(band.1) - leaf.y0.max(band.0);
-                if leaf_ov < 0.5 * leaf_h {
+                if leaf_ov < 0.5 * leaf_h || is_layout_region(&lines[leaf.start]) {
                     continue;
                 }
                 // The leaf must sit predominantly on one side of the cut:
@@ -564,6 +567,7 @@ pub(super) fn find_cross_region_table_merge(lines: &[ProjectedLine]) -> Option<C
                     .enumerate()
                     .filter(|(k, leaf)| {
                         !set_leaves.contains(k)
+                            && !is_layout_region(&lines[leaf.start])
                             && leaf.start >= lo
                             && leaf.end <= hi
                             && stays_on_one_side(leaf)
@@ -720,10 +724,500 @@ pub(super) fn find_cross_region_table_merge(lines: &[ProjectedLine]) -> Option<C
     None
 }
 
+/// First element of the synthetic region path given to the lines of one layout
+/// table box. Real xy_cut paths start at 0, so these never collide.
+pub(super) const LAYOUT_REGION_MARK: u16 = u16::MAX;
+
+pub(super) fn is_layout_region(line: &ProjectedLine) -> bool {
+    line.region_path.first() == Some(&LAYOUT_REGION_MARK)
+}
+
+/// Padding (points) around a layout box when testing whether a line's center
+/// falls inside it. Layout boxes hug the ink; line boxes include leading.
+const LT_BOX_PAD_PT: f32 = 3.0;
+/// Box lines above the first detected run that may join the header band.
+const LT_MAX_HEADER_LINES: usize = 3;
+/// A header-band cell longer than this is a caption or prose, not a header.
+const LT_HEADER_MAX_CELL_CHARS: usize = 40;
+/// The detected runs must cover this share of a box's rows, or the box falls
+/// back to the direct 2-column and whitespace-grid builders.
+const LT_MIN_COVERAGE: f32 = 0.5;
+
+/// Classify each layout table box as its own table region.
+///
+/// For every box (in the order given, which callers sort by confidence), the
+/// unclaimed lines whose centers fall inside it are fused into baseline rows
+/// under one synthetic region path, so no xy_cut V-cut splits them and no
+/// merge pass reaches past the box edge. Rows are classified with 2-column
+/// runs allowed; box lines above the first run join its header row. When the
+/// detectors cover too little of the box, the direct 2-column builder and then
+/// a whitespace-column grid are tried. A box that yields no table is left
+/// alone, as is a box crossed by an interior vertical rule (a ruled grid the
+/// ruled detectors already handle). Returns the rewritten line list and the
+/// runs per synthetic path, in the shape `classify_region` takes as
+/// `precomputed_tables`.
+pub(super) fn apply_layout_table_regions(
+    lines: &[ProjectedLine],
+    boxes: &[Rect],
+    rule_segments: &super::tables::RuleSegments,
+) -> Option<(Vec<ProjectedLine>, Vec<(Vec<u16>, Vec<TableRun>)>)> {
+    let mut claimed = vec![false; lines.len()];
+    // (first original index, fused rows) per accepted box.
+    let mut accepted: Vec<(usize, Vec<ProjectedLine>)> = Vec::new();
+    let mut runs_by_path: Vec<(Vec<u16>, Vec<TableRun>)> = Vec::new();
+    for (k, b) in boxes.iter().enumerate() {
+        if super::tables::has_interior_vertical_rule(rule_segments, b) {
+            continue;
+        }
+        let inside: Vec<usize> = (0..lines.len())
+            .filter(|&i| {
+                let l = &lines[i];
+                let cx = l.bbox.x + l.bbox.width * 0.5;
+                let cy = l.bbox.y + l.bbox.height * 0.5;
+                !claimed[i]
+                    && !l.text.trim().is_empty()
+                    && !super::classify::is_rotated_line(l)
+                    && cx >= b.x - LT_BOX_PAD_PT
+                    && cx <= b.x + b.width + LT_BOX_PAD_PT
+                    && cy >= b.y - LT_BOX_PAD_PT
+                    && cy <= b.y + b.height + LT_BOX_PAD_PT
+            })
+            .collect();
+        if inside.len() < 2 {
+            continue;
+        }
+        let mid_x = b.x + b.width * 0.4;
+        let set: Vec<(&ProjectedLine, bool)> = inside
+            .iter()
+            .map(|&i| (&lines[i], lines[i].bbox.x < mid_x))
+            .collect();
+        let tol =
+            CR_ROW_TOL_FACTOR * median(set.iter().map(|(l, _)| l.bbox.height).collect()).max(1.0);
+        let clusters = cluster_rows(&set, tol);
+        let path = vec![LAYOUT_REGION_MARK, k as u16];
+        let merged: Vec<ProjectedLine> = clusters.iter().map(|c| fuse_cluster(c, &path)).collect();
+        let Some(runs) = layout_box_runs(&merged, &clusters, tol) else {
+            continue;
+        };
+        for &i in &inside {
+            claimed[i] = true;
+        }
+        accepted.push((inside[0], merged));
+        runs_by_path.push((path, runs));
+    }
+    if accepted.is_empty() {
+        return None;
+    }
+    // Each box's rows replace its lines at the position of its first line.
+    let mut out: Vec<ProjectedLine> = Vec::with_capacity(lines.len());
+    let mut at: std::collections::HashMap<usize, Vec<ProjectedLine>> =
+        accepted.into_iter().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(rows) = at.remove(&i) {
+            out.extend(rows);
+        }
+        if !claimed[i] {
+            out.push(line.clone());
+        }
+    }
+    Some((out, runs_by_path))
+}
+
+/// Table runs for one box's fused rows, or `None` when nothing table-shaped
+/// is found. See `apply_layout_table_regions`.
+///
+/// Detection is seeded at each of the box's first `LT_MAX_HEADER_LINES + 1`
+/// rows: a header row with fewer cells than the body (years over value
+/// columns, nothing over the label column) would otherwise set the column
+/// tracks and push the label cells out of the table. Skipped rows join the
+/// first run's header. The seed that puts the most box text into table cells
+/// wins; on a tie, the one with fewer runs (a header split off as its own
+/// table), then the earliest.
+fn layout_box_runs(
+    merged: &[ProjectedLine],
+    clusters: &[Cluster],
+    tol: f32,
+) -> Option<Vec<TableRun>> {
+    let mut best: Option<(usize, Vec<TableRun>)> = None;
+    for skip in 0..=LT_MAX_HEADER_LINES.min(merged.len().saturating_sub(2)) {
+        let mut runs = super::tables::detect_tables_in_box(&merged[skip..]);
+        runs.retain(|r| run_columns(r) >= 2);
+        for r in &mut runs {
+            r.start += skip;
+            r.end += skip;
+            r.body_start += skip;
+        }
+        if let Some(first) = runs.first_mut() {
+            absorb_box_header(merged, first);
+        }
+        let score: usize = runs.iter().map(run_text_chars).sum();
+        let better = best
+            .as_ref()
+            .is_none_or(|(b, prev)| score > *b || (score == *b && runs.len() < prev.len()));
+        if score > 0 && better {
+            best = Some((score, runs));
+        }
+    }
+    let runs = best.map(|(_, r)| r).unwrap_or_default();
+    let covered: usize = runs.iter().map(|r| r.end - r.start).sum();
+    if (covered as f32) < LT_MIN_COVERAGE * merged.len() as f32
+        && let Some(r) =
+            try_two_col_direct(clusters, merged.len(), tol).or_else(|| whitespace_grid(merged))
+    {
+        return Some(r);
+    }
+    (!runs.is_empty()).then_some(runs)
+}
+
+/// Non-whitespace characters in a run's header and body cells.
+fn run_text_chars(run: &TableRun) -> usize {
+    match &run.block {
+        Block::Table { header, rows } => header
+            .iter()
+            .flatten()
+            .chain(rows.iter().flatten())
+            .map(|c| c.text.chars().filter(|ch| !ch.is_whitespace()).count())
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn run_columns(run: &TableRun) -> usize {
+    match &run.block {
+        Block::Table { header, rows } => header
+            .as_ref()
+            .map(|h| h.len())
+            .into_iter()
+            .chain(rows.iter().map(|r| r.len()))
+            .max()
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Pull the box lines above `run` into its header row. Each band cell goes to
+/// the column whose body cells sit nearest its center; several band lines and
+/// an existing header join top to bottom per column. Lines with a long cell
+/// are prose and stop the pull; a one-cell title line bounds it from above.
+pub(super) fn absorb_box_header(merged: &[ProjectedLine], run: &mut TableRun) {
+    if run.start == 0 || run.start > LT_MAX_HEADER_LINES {
+        return;
+    }
+    let Block::Table { header, rows } = &mut run.block else {
+        return;
+    };
+    let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    if ncols < 2 {
+        return;
+    }
+    // Column centers: median x-center of the located body cells per column.
+    let centers: Vec<Option<f32>> = (0..ncols)
+        .map(|c| {
+            let xs: Vec<f32> = rows
+                .iter()
+                .filter_map(|r| r.get(c))
+                .filter(|cell| !cell.text.trim().is_empty())
+                .filter_map(|cell| cell.bbox.as_ref().map(|b| b.x + b.width * 0.5))
+                .collect();
+            (!xs.is_empty()).then(|| median(xs))
+        })
+        .collect();
+    if centers.iter().all(|c| c.is_none()) {
+        return;
+    }
+    // A one-cell line with no digits ("Standard Group") titles the table; it
+    // and everything above it stay outside. Year rows keep their digits.
+    let band_start = merged[..run.start]
+        .iter()
+        .rposition(|line| {
+            let cells = super::tables::split_cells(line);
+            cells.len() == 1 && !cells[0].text.chars().any(|c| c.is_ascii_digit())
+        })
+        .map_or(0, |j| j + 1);
+    if band_start == run.start {
+        return;
+    }
+    let mut band: Vec<Vec<String>> = vec![Vec::new(); ncols];
+    let mut band_rect: Option<Rect> = None;
+    for line in &merged[band_start..run.start] {
+        let cells = super::tables::split_cells(line);
+        if cells.is_empty()
+            || cells
+                .iter()
+                .any(|c| c.text.trim().chars().count() > LT_HEADER_MAX_CELL_CHARS)
+        {
+            return;
+        }
+        for cell in &cells {
+            let cx = (cell.start_x + cell.end_x) * 0.5;
+            let col = centers
+                .iter()
+                .enumerate()
+                .filter_map(|(i, c)| c.map(|c| (i, (c - cx).abs())))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            band[col].push(cell.text.trim().to_string());
+        }
+        Rect::extend(&mut band_rect, &line.bbox);
+    }
+    let mut new_header: Vec<Cell> = band
+        .into_iter()
+        .map(|parts| Cell {
+            text: parts.join(" "),
+            bbox: None,
+        })
+        .collect();
+    match header.take() {
+        Some(old) => {
+            for (i, cell) in old.into_iter().enumerate() {
+                if i >= new_header.len() {
+                    new_header.push(cell);
+                } else if !cell.text.trim().is_empty() {
+                    let t = &mut new_header[i].text;
+                    if !t.is_empty() {
+                        t.push(' ');
+                    }
+                    t.push_str(cell.text.trim());
+                    new_header[i].bbox = cell.bbox;
+                }
+            }
+        }
+        None => {}
+    }
+    *header = Some(new_header);
+    if let Some(r) = &band_rect {
+        Rect::extend(&mut run.bbox, r);
+    }
+    run.start = band_start;
+}
+
+/// Last-resort grid for a layout box: columns are the x-intervals occupied by
+/// the cells of multi-cell rows, unioned across rows; every cell goes to the
+/// interval holding its center. The first row is the header. Rejects shapes
+/// with fewer than two columns or two rows, and prose-like cell text.
+fn whitespace_grid(merged: &[ProjectedLine]) -> Option<Vec<TableRun>> {
+    let rows: Vec<Vec<super::tables::TableCell>> =
+        merged.iter().map(super::tables::split_cells).collect();
+    let mut spans: Vec<(f32, f32)> = rows
+        .iter()
+        .filter(|r| r.len() >= 2)
+        .flat_map(|r| r.iter().map(|c| (c.start_x, c.end_x)))
+        .collect();
+    if spans.len() < 4 {
+        return None;
+    }
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut cols: Vec<(f32, f32)> = Vec::new();
+    for (x0, x1) in spans {
+        match cols.last_mut() {
+            Some(last) if x0 <= last.1 => last.1 = last.1.max(x1),
+            _ => cols.push((x0, x1)),
+        }
+    }
+    if cols.len() < 2 {
+        return None;
+    }
+    let col_of = |cx: f32| {
+        cols.iter()
+            .enumerate()
+            .min_by(|a, b| {
+                let da = if cx < a.1.0 {
+                    a.1.0 - cx
+                } else {
+                    (cx - a.1.1).max(0.0)
+                };
+                let db = if cx < b.1.0 {
+                    b.1.0 - cx
+                } else {
+                    (cx - b.1.1).max(0.0)
+                };
+                da.total_cmp(&db)
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    };
+    let (mut cells, mut long) = (0usize, 0usize);
+    let mut grid: Vec<Vec<Cell>> = Vec::new();
+    for (line, row) in merged.iter().zip(&rows) {
+        if row.is_empty() {
+            continue;
+        }
+        let mut out = vec![Cell::default(); cols.len()];
+        for c in row {
+            let t = c.text.trim();
+            cells += 1;
+            if t.split_whitespace().count() >= CR_LONG_CELL_WORDS {
+                long += 1;
+            }
+            let slot = &mut out[col_of((c.start_x + c.end_x) * 0.5)];
+            if !slot.text.is_empty() {
+                slot.text.push(' ');
+            }
+            slot.text.push_str(t);
+            let r = Rect {
+                x: c.start_x,
+                y: line.bbox.y,
+                width: (c.end_x - c.start_x).max(0.0),
+                height: line.bbox.height,
+            };
+            Rect::extend(&mut slot.bbox, &r);
+        }
+        grid.push(out);
+    }
+    if grid.len() < 2 || (long as f32) > CR_VALIDATE_MAX_LONG_CELL_FRAC * cells as f32 {
+        return None;
+    }
+    let header = grid.remove(0);
+    let bbox = merged.iter().fold(None, |mut acc: Option<Rect>, l| {
+        Rect::extend(&mut acc, &l.bbox);
+        acc
+    });
+    Some(vec![TableRun {
+        start: 0,
+        end: merged.len(),
+        body_start: 1.min(merged.len()),
+        bbox,
+        block: Block::Table {
+            header: Some(header),
+            rows: grid,
+        },
+        interstitials: Vec::new(),
+    }])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::markdown_layout::test_helpers::{line, line_with_spans};
+
+    fn render_with_regions(lines: Vec<ProjectedLine>, regions: &[Rect]) -> String {
+        let page = crate::markdown_layout::test_helpers::page(lines);
+        let blocks = crate::markdown_layout::classify_page_with_filters(
+            &page,
+            &[],
+            &std::collections::HashSet::new(),
+            &[],
+            crate::config::ImageMode::Placeholder,
+            &std::collections::HashSet::new(),
+            regions,
+        );
+        crate::markdown_layout::blocks::render_blocks(&blocks)
+    }
+
+    /// A label column in its own xy_cut leaf, values and a year header row in
+    /// another. The layout box puts labels, values and years in one table.
+    fn label_column_lines() -> Vec<ProjectedLine> {
+        let mut lines = Vec::new();
+        for (i, label) in ["Net sales", "Cost of sales", "Gross margin"]
+            .iter()
+            .enumerate()
+        {
+            lines.push(at_region(
+                line_with_spans(&[(label, 72.0)], 130.0 + 15.0 * i as f32, 10.0),
+                &[0, 0],
+            ));
+        }
+        lines.push(at_region(
+            line_with_spans(&[("2025", 300.0), ("2024", 380.0)], 112.0, 10.0),
+            &[0, 1],
+        ));
+        for (i, (a, b)) in [("100", "90"), ("60", "55"), ("40", "35")]
+            .iter()
+            .enumerate()
+        {
+            lines.push(at_region(
+                line_with_spans(&[(a, 300.0), (b, 380.0)], 130.0 + 15.0 * i as f32, 10.0),
+                &[0, 1],
+            ));
+        }
+        lines
+    }
+
+    #[test]
+    fn layout_box_joins_label_column_and_year_header() {
+        let boxed = Rect {
+            x: 70.0,
+            y: 108.0,
+            width: 340.0,
+            height: 70.0,
+        };
+        let md = render_with_regions(label_column_lines(), &[boxed]);
+        assert!(md.contains("| Cost of sales | 60 | 55 |"), "{md}");
+        assert!(
+            md.contains("2025") && md.lines().any(|l| l.starts_with('|') && l.contains("2025")),
+            "{md}"
+        );
+        assert_eq!(md.matches("Net sales").count(), 1, "{md}");
+    }
+
+    #[test]
+    fn without_layout_box_label_column_stays_outside() {
+        let md = render_with_regions(label_column_lines(), &[]);
+        assert!(!md.contains("| Cost of sales | 60 | 55 |"), "{md}");
+    }
+
+    #[test]
+    fn layout_box_title_line_stays_outside_header() {
+        let mut lines = vec![line_with_spans(&[("Standard Group", 200.0)], 96.0, 10.0)];
+        lines.extend(label_column_lines());
+        let boxed = Rect {
+            x: 70.0,
+            y: 94.0,
+            width: 340.0,
+            height: 84.0,
+        };
+        let md = render_with_regions(lines, &[boxed]);
+        assert!(md.starts_with("Standard Group"), "{md}");
+        assert!(md.contains("| Cost of sales | 60 | 55 |"), "{md}");
+    }
+
+    #[test]
+    fn layout_box_two_by_two_becomes_table() {
+        let lines = vec![
+            line_with_spans(&[("Age", 72.0), ("Rate", 200.0)], 100.0, 10.0),
+            line_with_spans(&[("35", 72.0), ("1.25", 200.0)], 115.0, 10.0),
+        ];
+        let boxed = Rect {
+            x: 70.0,
+            y: 98.0,
+            width: 160.0,
+            height: 30.0,
+        };
+        let md = render_with_regions(lines, &[boxed]);
+        assert!(
+            md.contains("| Age | Rate |") && md.contains("| 35 | 1.25 |"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn prose_in_a_layout_box_stays_prose() {
+        let lines = vec![
+            line(
+                "The company recognized revenue when control of the goods passed to",
+                72.0,
+                100.0,
+                10.0,
+                10.0,
+            ),
+            line(
+                "the customer, which generally occurs upon shipment of the product.",
+                72.0,
+                113.0,
+                10.0,
+                10.0,
+            ),
+        ];
+        let boxed = Rect {
+            x: 70.0,
+            y: 98.0,
+            width: 400.0,
+            height: 30.0,
+        };
+        let md = render_with_regions(lines, &[boxed]);
+        assert!(!md.contains('|'), "{md}");
+    }
 
     fn at_region(mut l: ProjectedLine, path: &[u16]) -> ProjectedLine {
         l.region_path = path.to_vec();

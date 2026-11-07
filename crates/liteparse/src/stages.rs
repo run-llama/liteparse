@@ -43,7 +43,7 @@ use crate::ocr_merge;
 use crate::projection;
 use crate::render;
 use crate::types::{
-    DocumentMetadata, ExtractedImage, OutlineTarget, Page, ParsedPage, PdfInput, XfaPacket,
+    DocumentMetadata, ExtractedImage, OutlineTarget, Page, ParsedPage, PdfInput, Rect, XfaPacket,
 };
 
 pub use crate::extract::{ExtractedPages, ExtractionOutputOptions};
@@ -430,6 +430,10 @@ pub struct BlockOptions<'a> {
     /// Disable running-chrome suppression (both the cross-page set in the
     /// signals and the single-page detector).
     pub keep_headers_footers: bool,
+    /// Table regions for this page from an outside layout model, in page
+    /// points (top-left origin). Each region's lines are classified as one
+    /// table candidate. Empty keeps text-geometry-only detection.
+    pub table_regions: &'a [Rect],
 }
 
 /// Classify one projected page into its final block sequence: headings,
@@ -475,6 +479,7 @@ pub fn extract_blocks(
         &page_outline,
         options.image_mode,
         &chrome_indices,
+        options.table_regions,
     );
     // A page whose only surviving blocks are horizontal rules (all its text
     // was stripped as chrome) should render empty, not as a stack of bare
@@ -692,6 +697,7 @@ mod tests {
             outline: &[],
             image_mode: ImageMode::Placeholder,
             keep_headers_footers: false,
+            table_regions: &[],
         };
         pages
             .iter()

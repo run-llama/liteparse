@@ -1871,7 +1871,7 @@ pub(super) fn detect_tables_banded(
     page_height: f32,
 ) -> Vec<TableRun> {
     let pieces = compute_line_pieces(lines);
-    let runs = detect_tables_with_pieces(lines, &pieces, true);
+    let runs = detect_tables_with_pieces(lines, &pieces, true, false);
     let bands = rule_bands(segs, page_height);
     if bands.is_empty() {
         return runs;
@@ -2019,19 +2019,28 @@ pub(crate) fn validated_ruled_table_rects(
 
 fn detect_tables_impl(lines: &[ProjectedLine], include_desc_lists: bool) -> Vec<TableRun> {
     let pieces = compute_line_pieces(lines);
-    detect_tables_with_pieces(lines, &pieces, include_desc_lists)
+    detect_tables_with_pieces(lines, &pieces, include_desc_lists, false)
+}
+
+/// `detect_tables` for the lines of one layout-model table box: the box is the
+/// evidence that the lines are tabular, so two-column runs are allowed.
+pub(super) fn detect_tables_in_box(lines: &[ProjectedLine]) -> Vec<TableRun> {
+    let pieces = compute_line_pieces(lines);
+    detect_tables_with_pieces(lines, &pieces, true, true)
 }
 
 fn detect_tables_with_pieces(
     lines: &[ProjectedLine],
     pieces: &[Vec<SpanPiece<'_>>],
     include_desc_lists: bool,
+    allow_two_col: bool,
 ) -> Vec<TableRun> {
     let mut out = Vec::new();
     let mut i = 0;
     let mut floor = 0;
     while i < lines.len() {
-        if let Some(run) = try_detect_table_inferred(lines, pieces, i, floor, false, false) {
+        if let Some(run) = try_detect_table_inferred(lines, pieces, i, floor, false, allow_two_col)
+        {
             floor = run.end;
             i = run.end;
             out.push(run);
@@ -3638,6 +3647,19 @@ pub(super) struct RuleSegments {
     raw_vs: Vec<VSeg>,
     /// Vertical segments, clustered by x.
     vs: Vec<VSeg>,
+}
+
+/// True when a drawn vertical rule runs through the inside of `rect` (a column
+/// divider, not the outer border) over at least a quarter of its height: the
+/// region is a ruled grid that the ruled detectors own.
+pub(super) fn has_interior_vertical_rule(segs: &RuleSegments, rect: &Rect) -> bool {
+    const BORDER_INSET_PT: f32 = 6.0;
+    let (y0, y1) = (rect.y, rect.y + rect.height);
+    segs.vs.iter().any(|v| {
+        v.x > rect.x + BORDER_INSET_PT
+            && v.x < rect.x + rect.width - BORDER_INSET_PT
+            && v.y_max.min(y1) - v.y_min.max(y0) >= 0.25 * rect.height
+    })
 }
 
 pub(super) fn extract_rule_segments(graphics: &[GraphicPrimitive]) -> RuleSegments {
