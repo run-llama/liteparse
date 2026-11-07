@@ -339,7 +339,9 @@ pub(super) fn append_to_paragraph(accum: &mut ParaAccum, next_line: &ProjectedLi
     // won't strip and falls through to a space join — exactly the prior
     // behavior, now via one helper.
     dehyphenate_join(&mut accum.raw, &next_raw, &next_raw);
-    dehyphenate_join(&mut accum.inline, &next_raw, &next_inline);
+    // the inline side first rejoins an emphasis run split at the line break ("*… Man-*" +
+    // "*ager …*"), so the hyphen is at its seam again
+    super::inline::append_inline_continuation(&mut accum.inline, &next_raw, &next_inline);
 
     // Maintain the running uniform-style flag.
     accum.uniform = match (accum.uniform, next_uniform) {

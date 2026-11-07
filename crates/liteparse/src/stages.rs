@@ -375,6 +375,11 @@ pub fn project(pages: Vec<Page>) -> Vec<ParsedPage> {
     projection::project_pages_to_grid(pages)
 }
 
+/// [`project`] for markdown output: emphasis runs within a line stay separate items.
+pub fn project_for_markdown(pages: Vec<Page>) -> Vec<ParsedPage> {
+    projection::project_pages_for_markdown(pages)
+}
+
 // ── Markdown ───────────────────────────────────────────────────────────
 
 /// Whole-document signals the block classifier needs: computed once over
@@ -481,6 +486,8 @@ pub fn extract_blocks(
         blocks.retain(|b| !matches!(b.block, Block::HorizontalRule));
     }
     dedupe_rules(&mut blocks);
+    let blocks = markdown_layout::split_repeated_header_tables(blocks);
+    let blocks = markdown_layout::rejoin_paragraphs_around_figures(blocks);
     Some(markdown_layout::splice_soft_hyphens(blocks))
 }
 
