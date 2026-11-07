@@ -284,6 +284,16 @@ pub fn classify_page_with_filters(
         if table_column_count(&run.block) < 2 {
             continue;
         }
+        let mut run = run;
+        let mut consumed = consumed;
+        if let Some(header_idx) = super::table_repair::repair_global_run(
+            &mut run,
+            &consumed,
+            &global_ruled_consumed,
+            lines,
+        ) {
+            consumed.push(header_idx);
+        }
         let top_y = consumed
             .iter()
             .map(|&i| lines[i].bbox.y)
@@ -574,10 +584,11 @@ fn classify_region(
     // the rest, since the loop below skips the span. Handing back lines no
     // cell took a word from cannot help when every line shares a word with
     // the cells, so such a run is read as text: every value kept, no grid.
-    let table_runs: Vec<_> = merge_table_runs(ruled_runs, borderless_runs)
+    let mut table_runs: Vec<_> = merge_table_runs(ruled_runs, borderless_runs)
         .into_iter()
         .filter(|run| super::tables::run_text_kept(run, lines).is_none_or(|kept| kept >= 0.7))
         .collect();
+    super::table_repair::repair_region_runs(&mut table_runs, lines);
 
     // Region-wide pre-pass: which line indices carry a lettered/roman marker
     // (`a.`, `i.`) that belongs to a confirmed sequential list run. Only these

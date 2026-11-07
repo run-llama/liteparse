@@ -465,7 +465,7 @@ fn recover_merged_cell(mut cells: Vec<TableCell>, tracks: &[f32]) -> Option<Vec<
 
 /// Vertical-gap check for table rows. Looser than paragraph continuation
 /// because table rows often have extra padding between them.
-fn table_rows_adjacent(prev: &ProjectedLine, cur: &ProjectedLine) -> bool {
+pub(super) fn table_rows_adjacent(prev: &ProjectedLine, cur: &ProjectedLine) -> bool {
     // Intentionally don't require region_path equality. Indented sub-group
     // rows (e.g. an indented "MEMORYBANK" row in a grouped academic results
     // table) sometimes land in a different XY-cut leaf than the rest of the
@@ -840,17 +840,22 @@ pub(super) fn run_text_kept(run: &TableRun, lines: &[ProjectedLine]) -> Option<f
 /// line that shares even one word with the table stays with it, so nothing
 /// the table already shows is repeated.
 pub(super) fn lines_left_out(run: &TableRun, lines: &[ProjectedLine]) -> Vec<usize> {
-    let Block::Table { header, rows } = &run.block else {
-        return Vec::new();
+    let texts: Vec<&str> = match &run.block {
+        Block::Table { header, rows } => header
+            .iter()
+            .flatten()
+            .chain(rows.iter().flatten())
+            .map(|c| c.text.as_str())
+            .collect(),
+        Block::MergedTable { rows, .. } => rows.iter().flatten().map(|c| c.text.as_str()).collect(),
+        _ => return Vec::new(),
     };
     let mut words: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for cell in header
-        .iter()
-        .flatten()
-        .chain(rows.iter().flatten())
-        .chain(&run.interstitials)
+    for text in texts
+        .into_iter()
+        .chain(run.interstitials.iter().map(|c| c.text.as_str()))
     {
-        for w in cell.text.split_whitespace() {
+        for w in text.split_whitespace() {
             *words.entry(w).or_default() += 1;
         }
     }

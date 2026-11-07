@@ -16,6 +16,7 @@ mod inline;
 mod lists;
 mod paragraphs;
 mod repetition;
+mod table_repair;
 mod tables;
 
 pub use blocks::{
