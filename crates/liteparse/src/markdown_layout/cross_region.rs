@@ -737,11 +737,12 @@ pub(super) fn is_layout_region(line: &ProjectedLine) -> bool {
 const LT_BOX_PAD_PT: f32 = 3.0;
 /// Box lines above the first detected run that may join the header band.
 const LT_MAX_HEADER_LINES: usize = 3;
-/// A header-band cell longer than this is a caption or prose, not a header.
-const LT_HEADER_MAX_CELL_CHARS: usize = 40;
 /// The detected runs must cover this share of a box's rows, or the box falls
 /// back to the direct 2-column and whitespace-grid builders.
 const LT_MIN_COVERAGE: f32 = 0.5;
+
+/// Table runs per synthetic region path, as `classify_region` takes them.
+pub(super) type PathRuns = Vec<(Vec<u16>, Vec<TableRun>)>;
 
 /// Classify each layout table box as its own table region.
 ///
@@ -760,7 +761,7 @@ pub(super) fn apply_layout_table_regions(
     lines: &[ProjectedLine],
     boxes: &[Rect],
     rule_segments: &super::tables::RuleSegments,
-) -> Option<(Vec<ProjectedLine>, Vec<(Vec<u16>, Vec<TableRun>)>)> {
+) -> Option<(Vec<ProjectedLine>, PathRuns)> {
     let mut claimed = vec![false; lines.len()];
     // (first original index, fused rows) per accepted box.
     let mut accepted: Vec<(usize, Vec<ProjectedLine>)> = Vec::new();
@@ -847,6 +848,7 @@ fn layout_box_runs(
             r.end += skip;
             r.body_start += skip;
         }
+        super::table_repair::repair_region_runs(&mut runs, merged);
         if let Some(first) = runs.first_mut() {
             absorb_box_header(merged, first);
         }
@@ -858,15 +860,53 @@ fn layout_box_runs(
             best = Some((score, runs));
         }
     }
-    let runs = best.map(|(_, r)| r).unwrap_or_default();
+    let mut runs = best.map(|(_, r)| r).unwrap_or_default();
     let covered: usize = runs.iter().map(|r| r.end - r.start).sum();
     if (covered as f32) < LT_MIN_COVERAGE * merged.len() as f32
         && let Some(r) =
             try_two_col_direct(clusters, merged.len(), tol).or_else(|| whitespace_grid(merged))
     {
-        return Some(r);
+        runs = r;
     }
-    (!runs.is_empty()).then_some(runs)
+    if runs.is_empty() || runs.iter().any(run_is_ordered_list) {
+        return None;
+    }
+    Some(runs)
+}
+
+/// `1.`, `12)`, `a.`, `iv)`: a list marker with nothing after it.
+fn is_ordered_marker(text: &str) -> bool {
+    let Some(body) = text.trim().strip_suffix(['.', ')']) else {
+        return false;
+    };
+    let lower = body.to_ascii_lowercase();
+    (!body.is_empty() && body.len() <= 3 && body.bytes().all(|b| b.is_ascii_digit()))
+        || (body.len() == 1 && body.bytes().all(|b| b.is_ascii_alphabetic()))
+        || (!body.is_empty() && body.len() <= 4 && lower.bytes().all(|b| b"ivx".contains(&b)))
+}
+
+/// A 2-column run whose rows mostly start with a bare list marker is a
+/// numbered list that a wrong layout box framed as a table.
+fn run_is_ordered_list(run: &TableRun) -> bool {
+    let Block::Table { header, rows } = &run.block else {
+        return false;
+    };
+    if run_columns(run) != 2 {
+        return false;
+    }
+    // A marker row promoted to a header still belongs to the list body.
+    let promoted = header
+        .as_ref()
+        .filter(|h| h.first().is_some_and(|cell| is_ordered_marker(&cell.text)));
+    let marker_rows = promoted
+        .into_iter()
+        .chain(rows.iter())
+        .filter(|row| {
+            row.first()
+                .is_some_and(|cell| is_ordered_marker(&cell.text))
+        })
+        .count();
+    marker_rows >= 3 && marker_rows * 2 >= rows.len() + usize::from(promoted.is_some())
 }
 
 /// Non-whitespace characters in a run's header and body cells.
@@ -876,6 +916,11 @@ fn run_text_chars(run: &TableRun) -> usize {
             .iter()
             .flatten()
             .chain(rows.iter().flatten())
+            .map(|c| c.text.chars().filter(|ch| !ch.is_whitespace()).count())
+            .sum(),
+        Block::MergedTable { rows, .. } => rows
+            .iter()
+            .flatten()
             .map(|c| c.text.chars().filter(|ch| !ch.is_whitespace()).count())
             .sum(),
         _ => 0,
@@ -897,8 +942,8 @@ fn run_columns(run: &TableRun) -> usize {
 
 /// Pull the box lines above `run` into its header row. Each band cell goes to
 /// the column whose body cells sit nearest its center; several band lines and
-/// an existing header join top to bottom per column. Lines with a long cell
-/// are prose and stop the pull; a one-cell title line bounds it from above.
+/// an existing header join top to bottom per column. Captions, prose and
+/// one-cell titles bound the band from above.
 pub(super) fn absorb_box_header(merged: &[ProjectedLine], run: &mut TableRun) {
     if run.start == 0 || run.start > LT_MAX_HEADER_LINES {
         return;
@@ -925,13 +970,13 @@ pub(super) fn absorb_box_header(merged: &[ProjectedLine], run: &mut TableRun) {
     if centers.iter().all(|c| c.is_none()) {
         return;
     }
-    // A one-cell line with no digits ("Standard Group") titles the table; it
-    // and everything above it stay outside. Year rows keep their digits.
+    // Titles, captions and prose stay outside the header band.
     let band_start = merged[..run.start]
         .iter()
         .rposition(|line| {
             let cells = super::tables::split_cells(line);
-            cells.len() == 1 && !cells[0].text.chars().any(|c| c.is_ascii_digit())
+            (cells.len() == 1 && !cells[0].text.chars().any(|c| c.is_ascii_digit()))
+                || !super::table_repair::header_line_plausible(line, &cells)
         })
         .map_or(0, |j| j + 1);
     if band_start == run.start {
@@ -941,11 +986,7 @@ pub(super) fn absorb_box_header(merged: &[ProjectedLine], run: &mut TableRun) {
     let mut band_rect: Option<Rect> = None;
     for line in &merged[band_start..run.start] {
         let cells = super::tables::split_cells(line);
-        if cells.is_empty()
-            || cells
-                .iter()
-                .any(|c| c.text.trim().chars().count() > LT_HEADER_MAX_CELL_CHARS)
-        {
+        if cells.is_empty() {
             return;
         }
         for cell in &cells {
@@ -968,22 +1009,19 @@ pub(super) fn absorb_box_header(merged: &[ProjectedLine], run: &mut TableRun) {
             bbox: None,
         })
         .collect();
-    match header.take() {
-        Some(old) => {
-            for (i, cell) in old.into_iter().enumerate() {
-                if i >= new_header.len() {
-                    new_header.push(cell);
-                } else if !cell.text.trim().is_empty() {
-                    let t = &mut new_header[i].text;
-                    if !t.is_empty() {
-                        t.push(' ');
-                    }
-                    t.push_str(cell.text.trim());
-                    new_header[i].bbox = cell.bbox;
+    if let Some(old) = header.take() {
+        for (i, cell) in old.into_iter().enumerate() {
+            if i >= new_header.len() {
+                new_header.push(cell);
+            } else if !cell.text.trim().is_empty() {
+                let t = &mut new_header[i].text;
+                if !t.is_empty() {
+                    t.push(' ');
                 }
+                t.push_str(cell.text.trim());
+                new_header[i].bbox = cell.bbox;
             }
         }
-        None => {}
     }
     *header = Some(new_header);
     if let Some(r) = &band_rect {
@@ -1189,6 +1227,111 @@ mod tests {
             md.contains("| Age | Rate |") && md.contains("| 35 | 1.25 |"),
             "{md}"
         );
+    }
+
+    #[test]
+    fn layout_box_ordered_list_stays_a_list() {
+        let lines = vec![
+            line_with_spans(&[("1.", 50.0), ("Open the door", 150.0)], 100.0, 10.0),
+            line_with_spans(&[("2.", 50.0), ("Close the window", 150.0)], 120.0, 10.0),
+            line_with_spans(&[("3.", 50.0), ("Turn off lights", 150.0)], 140.0, 10.0),
+        ];
+        let boxed = Rect {
+            x: 45.0,
+            y: 95.0,
+            width: 220.0,
+            height: 60.0,
+        };
+        let md = render_with_regions(lines, &[boxed]);
+        assert!(!md.contains('|') && !md.contains("<table>"), "{md}");
+        for text in ["Open the door", "Close the window", "Turn off lights"] {
+            assert!(md.contains(text), "{md}");
+        }
+    }
+
+    #[test]
+    fn layout_box_spanning_band_keeps_colspans() {
+        let mut lines = vec![
+            line_with_spans(
+                &[("Non-Tobacco rates", 170.0), ("Tobacco rates band", 375.0)],
+                100.0,
+                10.0,
+            ),
+            line_with_spans(
+                &[
+                    ("Age", 50.0),
+                    ("Female", 150.0),
+                    ("Male", 250.0),
+                    ("Female", 350.0),
+                    ("Male", 450.0),
+                ],
+                115.0,
+                10.0,
+            ),
+        ];
+        for (i, age) in ["65", "66", "67"].iter().enumerate() {
+            lines.push(line_with_spans(
+                &[
+                    (age, 50.0),
+                    ("1,205", 150.0),
+                    ("1,387", 250.0),
+                    ("1,338", 350.0),
+                    ("1,541", 450.0),
+                ],
+                130.0 + i as f32 * 15.0,
+                10.0,
+            ));
+        }
+        let boxed = Rect {
+            x: 45.0,
+            y: 95.0,
+            width: 440.0,
+            height: 80.0,
+        };
+        let md = render_with_regions(lines, &[boxed]);
+        for label in ["Non-Tobacco rates", "Tobacco rates band"] {
+            assert!(
+                md.contains(&format!("<th colspan=\"2\">{label}</th>")),
+                "{md}"
+            );
+        }
+    }
+
+    #[test]
+    fn layout_box_caption_stays_outside_table() {
+        let mut lines = vec![line_with_spans(
+            &[("Table 1.", 270.0), ("Suggested values", 390.0)],
+            100.0,
+            10.0,
+        )];
+        for (i, (label, a, b)) in [
+            ("Beauty", "324", "307"),
+            ("Full Assortment", "181", "156"),
+            ("Total", "505", "463"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            lines.push(line_with_spans(
+                &[(label, 50.0), (a, 330.0), (b, 450.0)],
+                115.0 + i as f32 * 15.0,
+                10.0,
+            ));
+        }
+        let boxed = Rect {
+            x: 45.0,
+            y: 95.0,
+            width: 440.0,
+            height: 65.0,
+        };
+        let md = render_with_regions(lines, &[boxed]);
+        assert!(md.contains("Table 1."), "{md}");
+        assert!(
+            md.lines()
+                .all(|line| !line.contains("Table 1.") || !line.contains('|')),
+            "{md}"
+        );
+        assert!(md.contains("| Full Assortment | 181 | 156 |"), "{md}");
     }
 
     #[test]

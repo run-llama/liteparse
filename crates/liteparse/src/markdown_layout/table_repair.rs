@@ -252,7 +252,7 @@ fn header_cell_plausible(text: &str) -> bool {
 }
 
 /// Header-line shape: short cells, not a sentence, not a unit note.
-fn header_line_plausible(line: &ProjectedLine, cells: &[TableCell]) -> bool {
+pub(super) fn header_line_plausible(line: &ProjectedLine, cells: &[TableCell]) -> bool {
     let text = line.text.trim();
     if text.is_empty() || text.chars().count() > 160 || text.ends_with(['.', ';', ',']) {
         return false;
