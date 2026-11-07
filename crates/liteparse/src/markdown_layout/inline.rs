@@ -216,12 +216,24 @@ fn apply_style(inner: &str, style: SpanStyle) -> String {
 ///
 /// Falls back to `collapse_whitespace(line.text)` when the line has no usable
 /// spans (e.g. OCR-only lines where TextItem styling isn't populated).
-pub(super) fn render_line_inline(line: &ProjectedLine) -> String {
-    let spans: Vec<&TextItem> = line
-        .spans
+/// A line's spans as the renderer styles them: a merged item that kept its differently-styled
+/// pieces (`TextItem::style_pieces`) contributes those pieces.
+fn styled_spans(line: &ProjectedLine) -> Vec<&TextItem> {
+    line.spans
         .iter()
+        .flat_map(|s| {
+            if s.style_pieces.is_empty() {
+                std::slice::from_ref(s)
+            } else {
+                s.style_pieces.as_slice()
+            }
+        })
         .filter(|s| !s.text.trim().is_empty())
-        .collect();
+        .collect()
+}
+
+pub(super) fn render_line_inline(line: &ProjectedLine) -> String {
+    let spans: Vec<&TextItem> = styled_spans(line);
     if spans.is_empty() {
         return collapse_whitespace(&line.text);
     }
@@ -416,11 +428,7 @@ pub(super) fn line_uniform_style(line: &ProjectedLine) -> Option<SpanStyle> {
     {
         return None;
     }
-    let mut iter = line
-        .spans
-        .iter()
-        .filter(|s| !s.text.trim().is_empty())
-        .map(SpanStyle::from_item);
+    let mut iter = styled_spans(line).into_iter().map(SpanStyle::from_item);
     let first = iter.next()?;
     for s in iter {
         if s != first {

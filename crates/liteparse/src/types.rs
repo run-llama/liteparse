@@ -134,6 +134,16 @@ pub struct TextItem {
     pub sup: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sub: bool,
+    /// The pieces an item was merged from, when their emphasis differs (bold / italic / struck /
+    /// monospace / underline / script): the markdown renderer styles each piece, while lines,
+    /// tables and blocks see the one merged item. Empty otherwise. Internal.
+    #[serde(skip)]
+    pub style_pieces: Vec<TextItem>,
+    /// A super/subscript run split from its line at a size step: its own glyph box `(y, height)`.
+    /// `y` / `height` then hold the host text's band, so lines and tables group the run with its
+    /// host as before the split; script detection reads this box. Internal.
+    #[serde(skip)]
+    pub script_geom: Option<(f32, f32)>,
     /// Whether this item is LaTeX rebuilt from TeX math fonts (`$…$`).
     /// Populated in `extract.rs`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

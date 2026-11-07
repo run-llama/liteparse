@@ -569,6 +569,11 @@ fn form_lines(
         y_tolerance: f32,
         h_tolerance: f32,
     ) -> bool {
+        // a super/subscript run shares its host's band (`TextItem::script_geom`) but must reach
+        // script flagging on its own; the later word merge joins it, keeping it as a piece
+        if prev.item.script_geom.is_some() || cur.item.script_geom.is_some() {
+            return false;
+        }
         if (cur.item.y - prev.item.y).abs() <= y_tolerance
             && (cur.item.height - prev.item.height).abs() <= h_tolerance
         {
@@ -847,17 +852,20 @@ fn form_lines(
                         .chars()
                         .next()
                         .is_some_and(|c| c.is_alphabetic());
-                // For markdown, an emphasis change (bold / italic / struck / monospace) keeps
-                // the items apart: a merged item carries one font, so the second run would render
-                // in the first one's style. Plain text has no emphasis, and its grid places
-                // columns from the merged items, so it keeps merging across style changes.
-                let style_change = style_runs && !same_emphasis(&prev.item, &item.item);
+                // Items merge whatever their emphasis, so lines, tables and blocks see the same
+                // items in every output; for markdown a merge across an emphasis change keeps
+                // the pieces, so each renders in its own style (`record_style_piece`).
+                let keep_pieces = style_runs
+                    && (!prev.item.style_pieces.is_empty()
+                        || !same_emphasis(&prev.item, &item.item));
                 if y_compatible
                     && !both_are_numbers
                     && !alpha_alpha_gap
-                    && !style_change
                     && delta_x <= MERGE_THRESHOLD
                 {
+                    if keep_pieces {
+                        record_style_piece(&mut prev.item, &item.item);
+                    }
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
                     join_in_reading_order(&mut prev.item.text, &item.item.text, "");
                     prev.item.words.append(&mut item.item.words);
@@ -867,7 +875,10 @@ fn form_lines(
 
                 let prev_len = prev.item.text.chars().count().max(1) as f32;
                 let avg_char_width = prev.item.width / prev_len;
-                if y_compatible && !both_are_numbers && !style_change && delta_x < avg_char_width {
+                if y_compatible && !both_are_numbers && delta_x < avg_char_width {
+                    if keep_pieces {
+                        record_style_piece(&mut prev.item, &item.item);
+                    }
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
                     join_in_reading_order(&mut prev.item.text, &item.item.text, " ");
                     prev.item.words.append(&mut item.item.words);
@@ -3081,12 +3092,14 @@ fn name_contains_any(name: &str, hints: &[&str]) -> bool {
 /// (OCR boxes are too loose to tell a raised glyph from jitter).
 fn mark_script_items(line: &mut [ProjectedTextItem]) {
     let native = |p: &ProjectedTextItem| p.item.confidence.is_none() && !p.item.math;
+    // an item's own glyph box: a run split off at a size step carries its host's band
+    let geom = |it: &TextItem| it.script_geom.unwrap_or((it.y, it.height));
     let mut hs: Vec<(f32, usize)> = line
         .iter()
-        .filter(|p| native(p) && p.item.height > 0.0)
+        .filter(|p| native(p) && geom(&p.item).1 > 0.0)
         .map(|p| {
             (
-                p.item.height,
+                geom(&p.item).1,
                 p.item.text.chars().filter(|c| !c.is_whitespace()).count(),
             )
         })
@@ -3106,8 +3119,8 @@ fn mark_script_items(line: &mut [ProjectedTextItem]) {
     }
     let mut bottoms: Vec<f32> = line
         .iter()
-        .filter(|p| native(p) && p.item.height >= body_h * 0.9)
-        .map(|p| p.item.y + p.item.height)
+        .filter(|p| native(p) && geom(&p.item).1 >= body_h * 0.9)
+        .map(|p| geom(&p.item).0 + geom(&p.item).1)
         .collect();
     if bottoms.is_empty() || body_h <= 0.0 {
         return;
@@ -3117,13 +3130,14 @@ fn mark_script_items(line: &mut [ProjectedTextItem]) {
     for p in line.iter_mut().filter(|p| native(p)) {
         let it = &mut p.item;
         let n = it.text.trim().chars().count();
-        if n == 0 || n > 6 || it.height > body_h * 0.78 {
+        let (gy, gh) = geom(it);
+        if n == 0 || n > 6 || gh > body_h * 0.78 {
             continue;
         }
-        let bottom = it.y + it.height;
+        let bottom = gy + gh;
         if bottom <= base - body_h * 0.2 {
             it.sup = true;
-        } else if bottom >= base + body_h * 0.1 && it.y >= base - body_h * 0.6 {
+        } else if bottom >= base + body_h * 0.1 && gy >= base - body_h * 0.6 {
             it.sub = true;
         }
     }
@@ -3176,6 +3190,23 @@ fn mark_script_items(line: &mut [ProjectedTextItem]) {
             }
         }
         k = e + 1;
+    }
+}
+
+/// Before `next` merges into `prev`: keep both as styled pieces (`TextItem::style_pieces`), `prev`
+/// as it was before any merge and `next` with its own pieces flattened in.
+fn record_style_piece(prev: &mut TextItem, next: &TextItem) {
+    if prev.style_pieces.is_empty() {
+        let mut first = prev.clone();
+        first.words.clear();
+        prev.style_pieces.push(first);
+    }
+    if next.style_pieces.is_empty() {
+        let mut piece = next.clone();
+        piece.words.clear();
+        prev.style_pieces.push(piece);
+    } else {
+        prev.style_pieces.extend(next.style_pieces.iter().cloned());
     }
 }
 

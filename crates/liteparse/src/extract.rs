@@ -360,9 +360,7 @@ fn extract_single_page(
             &text_page,
             &view_box,
             glyph_resolver,
-            output_options.emit_word_boxes,
-            output_options.extract_text_metadata,
-            output_options.split_scripts,
+            output_options,
             &consumed,
         )?;
         items.extend(emitted.into_iter().map(math_item));
@@ -1588,11 +1586,15 @@ fn extract_page_text_items(
     text_page: &TextPage,
     view_box: &RectF,
     glyph_resolver: Option<&dyn crate::GlyphResolver>,
-    emit_word_boxes: bool,
-    extract_text_metadata: bool,
-    split_scripts: bool,
+    output_options: &ExtractionOutputOptions,
     math_chars: &std::collections::HashSet<i32>,
 ) -> Result<Vec<TextItem>, LiteParseError> {
+    let ExtractionOutputOptions {
+        emit_word_boxes,
+        extract_text_metadata,
+        split_scripts,
+        ..
+    } = *output_options;
     let char_count = text_page.char_count();
     if char_count <= 0 {
         return Ok(Vec::new());
@@ -1908,6 +1910,15 @@ fn extract_page_text_items(
                 });
             if !y_overlap || line_changed || gap >= MAX_INLINE_GAP || dot_leader_break || size_break
             {
+                // A break for the size step alone into smaller type: the run keeps its host's band.
+                let host = (size_break
+                    && y_overlap
+                    && !line_changed
+                    && gap < MAX_INLINE_GAP
+                    && !dot_leader_break
+                    && (vp_loose.bottom - vp_loose.top).abs()
+                        < 0.85 * (seg.vp_bottom - seg.vp_top).abs())
+                .then_some((seg.vp_top, seg.vp_bottom));
                 seg.flush(&mut items);
                 let meta = obj_meta.meta_for(&ch, cv.text_object());
                 seg.start(
@@ -1919,6 +1930,7 @@ fn extract_page_text_items(
                     page_rotation,
                     &meta,
                 );
+                seg.host_band = host;
                 seg.append_ligature_tail(ligature_tail);
             } else if seg.pending_space {
                 let avg_cw = seg.avg_char_width();
@@ -3356,6 +3368,12 @@ struct SegmentBuilder {
     emit_words: bool,
     // When false, source-code/trailing-space metadata is not accumulated.
     extract_text_metadata: bool,
+    // Set on a run split off at a size step into smaller raised / lowered type: the host
+    // segment's (top, bottom), which the item takes as its band (see `TextItem::script_geom`).
+    host_band: Option<(f32, f32)>,
+    // The last run that took a host band: (top, bottom, right edge), so a later small-type
+    // segment continuing it ("LC" "50" ... "(mg/L)", other cells drawn in between) takes it too.
+    last_script: Option<(f32, f32, f32)>,
 }
 
 impl SegmentBuilder {
@@ -3403,6 +3421,8 @@ impl SegmentBuilder {
             word_has: false,
             emit_words,
             extract_text_metadata,
+            host_band: None,
+            last_script: None,
         }
     }
 
@@ -3518,6 +3538,26 @@ impl SegmentBuilder {
         page_rotation: i32,
         meta: &ObjTextMeta,
     ) {
+        // a run in smaller raised / lowered type keeps its host's band past a space or other
+        // break while it stays in that type on that line; full-size type ends it
+        let small_inside = |top: f32, bottom: f32| {
+            // line-box (loose) heights on both sides: a full-size `(` has less ink than the
+            // host's box, but the same box
+            let mid = (vp_loose.top + vp_loose.bottom) * 0.5;
+            mid > top
+                && mid < bottom
+                && (vp_loose.bottom - vp_loose.top).abs() < 0.85 * (bottom - top).abs()
+        };
+        self.host_band = self
+            .host_band
+            .filter(|&(top, bottom)| small_inside(top, bottom))
+            .or_else(|| {
+                self.last_script.and_then(|(top, bottom, right)| {
+                    let near = vp_loose.left >= right - 1.0
+                        && vp_loose.left - right < 2.0 * (bottom - top).abs();
+                    (near && small_inside(top, bottom)).then_some((top, bottom))
+                })
+            });
         self.text.clear();
         self.text.push(c);
         self.vp_left = vp_loose.left;
@@ -3737,12 +3777,19 @@ impl SegmentBuilder {
         let trimmed = self.text.trim();
         if !trimmed.is_empty() {
             let width = self.vp_right - self.vp_left;
-            let height = self.vp_bottom - self.vp_top;
+            let (band_top, band_bottom) = self.host_band.unwrap_or((self.vp_top, self.vp_bottom));
+            if let Some((t, b)) = self.host_band {
+                self.last_script = Some((t, b, self.vp_right));
+            }
+            let script_geom = self
+                .host_band
+                .map(|_| (self.vp_top, self.vp_bottom - self.vp_top));
+            let height = band_bottom - band_top;
 
             items.push(TextItem {
                 text: trimmed.to_string(),
                 x: self.vp_left,
-                y: self.vp_top,
+                y: band_top,
                 width,
                 height,
                 rotation: self.rotation_deg,
@@ -3777,6 +3824,8 @@ impl SegmentBuilder {
                 underline: false,
                 sup: false,
                 sub: false,
+                style_pieces: Vec::new(),
+                script_geom,
                 math: false,
                 words: std::mem::take(&mut self.words),
             });
