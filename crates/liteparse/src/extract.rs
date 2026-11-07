@@ -352,7 +352,10 @@ fn extract_single_page(
     // walk — so the whole path costs one `form_type()` call for most files.
     let extract_text = |page: &Page| -> Result<Vec<TextItem>, LiteParseError> {
         let text_page = page.text()?;
-        extract_page_text_items(
+        let spans = page_math_spans(page, &text_page, &view_box, &paths, glyph_resolver)
+            .unwrap_or_default();
+        let (emitted, consumed) = crate::tex_math::emitted(&spans);
+        let mut items = extract_page_text_items(
             page,
             &text_page,
             &view_box,
@@ -360,7 +363,10 @@ fn extract_single_page(
             output_options.emit_word_boxes,
             output_options.tight_word_boxes,
             output_options.extract_text_metadata,
-        )
+            &consumed,
+        )?;
+        items.extend(emitted.into_iter().map(math_item));
+        Ok(items)
     };
     let widget_text_rects = if document_has_form {
         page.form_widget_text_rects(&view_box)
@@ -398,6 +404,7 @@ fn extract_single_page(
 
     Ok(PageExtraction {
         page: LitePage {
+            ocr_deskew: None,
             page_number: page_number as usize,
             page_label: document.page_label(page_index),
             page_width,
@@ -660,7 +667,8 @@ fn assign_strikethrough(items: &mut [TextItem], graphics: &[GraphicPrimitive]) {
     }
 
     for item in items.iter_mut() {
-        if item.width <= 0.0 || item.height <= 0.0 || item.text.trim().is_empty() {
+        // A fraction bar runs through the middle of its math item.
+        if item.math || item.width <= 0.0 || item.height <= 0.0 || item.text.trim().is_empty() {
             continue;
         }
         // Viewport space is top-left origin, so `y` is the top edge. The middle
@@ -1494,6 +1502,7 @@ fn extract_page_text_items(
     emit_word_boxes: bool,
     tight_word_boxes: bool,
     extract_text_metadata: bool,
+    math_chars: &std::collections::HashSet<i32>,
 ) -> Result<Vec<TextItem>, LiteParseError> {
     let char_count = text_page.char_count();
     if char_count <= 0 {
@@ -1548,11 +1557,11 @@ fn extract_page_text_items(
             ch: &ch,
             rec: char_chunks.as_mut().and_then(|chunks| chunks.record(i)),
         };
-        if clips.hides(&cv) {
+        if clips.hides(&cv) || math_chars.contains(&i) {
             seg.flush(&mut items);
             continue;
         }
-        let unicode = cv.unicode();
+        let unicode = lam_alef_order(text_page, i, char_count, cv.unicode(), cv.char_code());
         let is_generated = cv.is_generated();
 
         // Skip invisible text (render mode 3) only when the page also has visible text.
@@ -1945,6 +1954,179 @@ fn extract_page_text_items(
     }
 
     Ok(items)
+}
+
+/// Math spans for a page (see [`crate::tex_math`]), or None when the page
+/// isn't set in TeX.
+fn page_math_spans(
+    page: &Page,
+    text_page: &TextPage,
+    view_box: &RectF,
+    paths: &[PathObject],
+    glyph_resolver: Option<&dyn crate::GlyphResolver>,
+) -> Option<Vec<crate::tex_math::MathSpan>> {
+    use crate::tex_math::{RawChar, RawText, Rule};
+    let char_count = text_page.char_count();
+    if char_count <= 0 {
+        return None;
+    }
+    // Most pages have no TeX math font: check each text object's font once
+    // before paying for glyph boxes and decoding.
+    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let has_tex_font = (0..char_count).any(|i| {
+        let ch = text_page.char_at_unchecked(i);
+        let obj = ch.text_object();
+        if !seen.insert(obj.map_or(0, |p| p as usize)) {
+            return false;
+        }
+        obj.and_then(|o| unsafe { Font::from_text_object(o) })
+            .and_then(|f| f.base_name())
+            .or_else(|| ch.font_name())
+            .is_some_and(|n| crate::tex_math::is_tex_math_font(&n))
+    });
+    if !has_tex_font {
+        return None;
+    }
+    let clips = crate::text_clip::TextClip::new(page);
+    let page_rotation = page.rotation();
+    let vp_xform = page.viewport_transform(view_box);
+    let (_, page_h) = page.viewport_size(view_box);
+    let mut char_chunks = CharInfoChunks::new(text_page);
+    // The same glyph-name recovery as the text pass: a Symbol font with no
+    // ToUnicode otherwise reads as Latin ("t" for tau).
+    let mut glyph_decoder =
+        GlyphDecoder::new(false, std::collections::HashSet::new(), glyph_resolver);
+    // Per text object: font name, effective size, descent at that size, and
+    // the font when it has no ToUnicode.
+    type ObjInfo = (std::rc::Rc<str>, f32, f32, Option<std::rc::Rc<Font>>);
+    let mut objs: std::collections::HashMap<usize, ObjInfo> = std::collections::HashMap::new();
+    // (font handle, char code) -> glyph-name text.
+    let mut names: std::collections::HashMap<(usize, u32), Option<char>> =
+        std::collections::HashMap::new();
+    let mut chars = Vec::new();
+    for i in 0..char_count {
+        let ch = text_page.char_at_unchecked(i);
+        let cv = CharView {
+            ch: &ch,
+            rec: char_chunks.as_mut().and_then(|chunks| chunks.record(i)),
+        };
+        if cv.is_generated() || cv.text_render_mode() == Some(3) || clips.hides(&cv) {
+            continue;
+        }
+        // Upright glyphs only.
+        let angle = adjust_angle_for_rotation(cv.ch.angle().max(0.0), page_rotation);
+        if angle > 0.01 && angle < 2.0 * std::f32::consts::PI - 0.01 {
+            continue;
+        }
+        let obj = cv.text_object();
+        let key = obj.map_or(0, |p| p as usize);
+        let (font_name, size, descent, no_tu_font) = objs
+            .entry(key)
+            .or_insert_with(|| {
+                let font = obj.and_then(|o| unsafe { Font::from_text_object(o) });
+                let name = font
+                    .as_ref()
+                    .and_then(|f| f.base_name())
+                    .or_else(|| ch.font_name())
+                    .unwrap_or_default();
+                let fs = ch.font_size() as f32;
+                let scale = ch.matrix().map_or(1.0, |m| decompose_scale(&m).1);
+                let descent = font.as_ref().and_then(|f| f.descent(fs)).unwrap_or(0.0);
+                let no_tu = font.filter(|f| !f.has_to_unicode()).map(std::rc::Rc::new);
+                (name.into(), fs * scale, descent * scale, no_tu)
+            })
+            .clone();
+        let unicode = cv.unicode();
+        // Note: with no ToUnicode, the encoding's glyph name is the truth: a
+        // Symbol font under WinAnsiEncoding + Differences names "tau" for
+        // the code PDFium reads as "t".
+        let named = no_tu_font.and_then(|f| {
+            let code = cv.char_code();
+            *names.entry((f.handle() as usize, code)).or_insert_with(|| {
+                f.char_glyph_name(code)
+                    .as_deref()
+                    .and_then(resolve_glyph_name)
+                    .and_then(|r| {
+                        let mut cs = r.chars();
+                        cs.next().filter(|c| !c.is_control() && cs.next().is_none())
+                    })
+            })
+        });
+        let text = if let Some(c) = named.or_else(|| {
+            glyph_decoder
+                .decode(&cv, unicode)
+                .and_then(|d| d.chars().next())
+        }) {
+            RawText::Unicode(c)
+        } else if cv.has_unicode_map_error() || unicode < 0x20 {
+            RawText::Code(cv.char_code())
+        } else {
+            match char::from_u32(unicode) {
+                Some(c) => RawText::Unicode(c),
+                None => continue,
+            }
+        };
+        let (Some((ox, oy)), Some(loose)) = (ch.origin(), cv.loose_char_box()) else {
+            continue;
+        };
+        let (_, origin_y) = vp_xform.transform_point(ox as f32, oy as f32);
+        let vp_loose = vp_xform.transform_bounds(&loose);
+        let ink = cv.strict_char_box().map(|b| vp_xform.transform_bounds(&b));
+        chars.push(RawChar {
+            index: i,
+            text,
+            font_name,
+            size: if size > 0.0 {
+                size
+            } else {
+                vp_loose.bottom - vp_loose.top
+            },
+            descent,
+            origin_y,
+            x0: vp_loose.left,
+            x1: vp_loose.right,
+            ink: ink.map(|b| (b.top, b.bottom)),
+            loose: (vp_loose.top, vp_loose.bottom),
+        });
+    }
+    // Note: PDFium pads a stroked path's bounds by the stroke width on every
+    // side (a 0.6pt fraction bar reads 1.2pt tall); take the geometric line.
+    let mut rules: Vec<Rule> = paths
+        .iter()
+        .filter_map(|p| {
+            let pad = if p.is_stroked {
+                p.stroke_width.max(0.0)
+            } else {
+                0.0
+            };
+            let b = &p.bbox;
+            let (x0, x1) = (b.left + pad, (b.right - pad).max(b.left + pad));
+            let (top, bottom) = (b.top + pad, (b.bottom - pad).max(b.top + pad));
+            Rule::from_box(x0, x1, top, bottom, page_h)
+        })
+        .collect();
+    // Note: some PDFs draw rules as stretched 1x1 images.
+    rules.extend(
+        page.image_bounds(0.0, f32::INFINITY)
+            .into_iter()
+            .filter_map(|b| Rule::from_box(b.x, b.x + b.width, b.y, b.y + b.height, page_h)),
+    );
+    crate::tex_math::page_math(&chars, &rules, page_h)
+}
+
+/// The text item a math span is spliced in as.
+fn math_item(span: &crate::tex_math::MathSpan) -> TextItem {
+    TextItem {
+        text: format!("${}$", span.tex),
+        x: span.x0,
+        y: span.top,
+        width: span.x1 - span.x0,
+        height: span.bottom - span.top,
+        font_size: Some(span.size),
+        font_height: Some(span.size),
+        math: true,
+        ..Default::default()
+    }
 }
 
 /// Remove duplicate text items: exact text matches with any bbox overlap,
@@ -2528,6 +2710,49 @@ impl<'a> GlyphDecoder<'a> {
     }
 }
 
+const ARABIC_LAM: u32 = 0x0644;
+
+/// How far (points) past a word's rightmost letter a combining mark may sit and still belong
+/// to the letter just before the word (see `SegmentBuilder::place_rtl_mark`).
+const RTL_MARK_REACH: f32 = 3.0;
+
+/// Combining marks of the Hebrew and Arabic blocks (points, cantillation, harakat).
+fn is_rtl_combining_mark(c: char) -> bool {
+    matches!(c as u32, 0x0591..=0x05BD | 0x05BF | 0x05C1..=0x05C2 | 0x05C4..=0x05C5 | 0x05C7
+        | 0x0610..=0x061A | 0x064B..=0x065F | 0x0670 | 0x06D6..=0x06DC | 0x06DF..=0x06E4
+        | 0x06E7..=0x06E8 | 0x06EA..=0x06ED)
+}
+
+/// Alef and its hamza / madda forms, the second letter of a lam-alef ligature.
+fn is_alef(u: u32) -> bool {
+    matches!(u, 0x0622 | 0x0623 | 0x0625 | 0x0627)
+}
+
+/// Logical order for a lam-alef ligature glyph. One glyph draws lam + alef ("لا", "لأ"), and
+/// many producers write its ToUnicode entry in visual order, alef first; PDFium then hands back
+/// two chars sharing the glyph's char code, alef then lam ("األثاث" for "الأثاث"). Separate
+/// alef and lam glyphs (the article "ال") carry different codes and are left alone.
+fn lam_alef_order(text_page: &TextPage, i: i32, char_count: i32, unicode: u32, code: u32) -> u32 {
+    let shares_glyph = |j: i32| {
+        (0..char_count)
+            .contains(&j)
+            .then(|| {
+                let c = text_page.char_at_unchecked(j);
+                (c.char_code() == code).then(|| c.unicode())
+            })
+            .flatten()
+    };
+    if is_alef(unicode) && shares_glyph(i + 1) == Some(ARABIC_LAM) {
+        return ARABIC_LAM;
+    }
+    if unicode == ARABIC_LAM
+        && let Some(prev) = shares_glyph(i - 1).filter(|&u| is_alef(u))
+    {
+        return prev;
+    }
+    unicode
+}
+
 /// Control/PUA/sentinel codepoints that signal a garbage /ToUnicode mapping.
 fn is_suspicious_unicode(unicode: u32) -> bool {
     matches!(unicode, 0 | 0xFFFE | 0xFFFF) || unicode < 0x20 || (0xE000..=0xF8FF).contains(&unicode)
@@ -3063,6 +3288,9 @@ struct SegmentBuilder {
     tight_words: bool,
     // When false, source-code/trailing-space metadata is not accumulated.
     extract_text_metadata: bool,
+    // Right-to-left letters of the segment as (byte end in `text`, loose left, loose right), so
+    // a combining mark drawn over an earlier letter can be placed after it (see `push_char`).
+    rtl_spans: Vec<(usize, f32, f32)>,
 }
 
 impl SegmentBuilder {
@@ -3111,6 +3339,7 @@ impl SegmentBuilder {
             emit_words,
             tight_words,
             extract_text_metadata,
+            rtl_spans: Vec::new(),
         }
     }
 
@@ -3236,6 +3465,11 @@ impl SegmentBuilder {
     ) {
         self.text.clear();
         self.text.push(c);
+        self.rtl_spans.clear();
+        if crate::bidi::is_rtl_char(c) {
+            self.rtl_spans
+                .push((self.text.len(), vp_loose.left, vp_loose.right));
+        }
         self.vp_left = vp_loose.left;
         self.vp_right = vp_loose.right;
         self.vp_top = vp_loose.top;
@@ -3359,7 +3593,21 @@ impl SegmentBuilder {
         cv: &CharView<'_, '_>,
         recovered: bool,
     ) {
+        if self.place_rtl_mark(c, vp_loose) {
+            // the segment's box still covers the mark; the trailing-edge fields stay on the
+            // last letter, so the next char's gap is measured from it
+            self.vp_left = self.vp_left.min(vp_loose.left);
+            self.vp_right = self.vp_right.max(vp_loose.right);
+            self.vp_top = self.vp_top.min(vp_loose.top);
+            self.vp_bottom = self.vp_bottom.max(vp_loose.bottom);
+            self.char_count += 1;
+            return;
+        }
         self.text.push(c);
+        if crate::bidi::is_rtl_char(c) {
+            self.rtl_spans
+                .push((self.text.len(), vp_loose.left, vp_loose.right));
+        }
         self.add_word_char(c, vp_loose, vp_strict);
         self.vp_left = self.vp_left.min(vp_loose.left);
         self.vp_right = self.vp_right.max(vp_loose.right);
@@ -3398,6 +3646,62 @@ impl SegmentBuilder {
                 self.font_is_buggy = true;
             }
         }
+    }
+
+    /// A right-to-left combining mark (Arabic harakat, Hebrew points) that PDFium hands over
+    /// after the rest of its word ("يقصدُ" for "يُقصد"): insert it after the letter of the
+    /// current word that its box sits over. Returns false when the mark already follows its
+    /// letter, or no letter of the word lies under it; the caller then appends it as usual.
+    fn place_rtl_mark(&mut self, c: char, vp_loose: &RectF) -> bool {
+        if self.dir_rtl != Some(true) || !is_rtl_combining_mark(c) || self.rtl_spans.len() < 2 {
+            return false;
+        }
+        let word_start = self.text.rfind(char::is_whitespace).map_or(0, |i| i + 1);
+        let cx = (vp_loose.left + vp_loose.right) / 2.0;
+        let Some(k) = self
+            .rtl_spans
+            .iter()
+            .position(|&(end, l, r)| end > word_start && cx >= l - 0.5 && cx <= r + 0.5)
+        else {
+            // Just past the word's first (rightmost) letter: the mark sits on the letter before
+            // the word, which PDFium hands over separately and line assembly puts back in front.
+            let word_right = self
+                .rtl_spans
+                .iter()
+                .filter(|s| s.0 > word_start)
+                .map(|s| s.2)
+                .fold(f32::MIN, f32::max);
+            if word_right > f32::MIN && cx > word_right && cx - word_right < RTL_MARK_REACH {
+                self.text.insert(word_start, c);
+                if self.emit_words && self.word_has {
+                    self.cur_word.insert(0, c);
+                }
+                let n = c.len_utf8();
+                for s in self.rtl_spans.iter_mut().filter(|s| s.0 > word_start) {
+                    s.0 += n;
+                }
+                return true;
+            }
+            return false;
+        };
+        if k + 1 == self.rtl_spans.len() {
+            return false;
+        }
+        let at = self.rtl_spans[k].0;
+        self.text.insert(at, c);
+        if self.emit_words && self.word_has {
+            let in_word = self.cur_word.len() + at;
+            if let Some(w) = in_word.checked_sub(self.text.len() - c.len_utf8())
+                && self.cur_word.is_char_boundary(w)
+            {
+                self.cur_word.insert(w, c);
+            }
+        }
+        let n = c.len_utf8();
+        for s in &mut self.rtl_spans[k..] {
+            s.0 += n;
+        }
+        true
     }
 
     /// Append extra characters to the segment text (for ligature expansion).
@@ -3490,6 +3794,7 @@ impl SegmentBuilder {
                 confidence: None,
                 link: None,
                 strike: false,
+                math: false,
                 words: std::mem::take(&mut self.words),
             });
         }
@@ -4240,6 +4545,7 @@ mod tests {
 
     fn page_with(items: Vec<TextItem>) -> LitePage {
         LitePage {
+            ocr_deskew: None,
             page_number: 1,
             page_label: None,
             page_width: 100.0,

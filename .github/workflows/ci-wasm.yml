@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - 'packages/wasm/**'
       - 'scripts/browser-compat/**'
       - 'scripts/edge-compat/**'
@@ -13,6 +15,8 @@ on:
     branches: [main]
     paths:
       - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - 'packages/wasm/**'
       - 'scripts/browser-compat/**'
       - 'scripts/edge-compat/**'

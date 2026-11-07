@@ -1,6 +1,6 @@
 {
   "name": "@llamaindex/liteparse",
-  "version": "2.17.0",
+  "version": "2.18.0",
   "description": "Fast, lightweight PDF and document parsing with spatial text extraction",
   "type": "module",
   "main": "./dist/lib.cjs",
@@ -64,13 +64,13 @@
     "typescript": "~5.9.2"
   },
   "optionalDependencies": {
-    "@llamaindex/liteparse-darwin-arm64": "2.17.0",
-    "@llamaindex/liteparse-darwin-x64": "2.17.0",
-    "@llamaindex/liteparse-linux-arm64-gnu": "2.17.0",
-    "@llamaindex/liteparse-linux-x64-gnu": "2.17.0",
-    "@llamaindex/liteparse-win32-arm64-msvc": "2.17.0",
-    "@llamaindex/liteparse-win32-x64-msvc": "2.17.0",
-    "@llamaindex/liteparse-linux-x64-musl": "2.17.0"
+    "@llamaindex/liteparse-darwin-arm64": "2.18.0",
+    "@llamaindex/liteparse-darwin-x64": "2.18.0",
+    "@llamaindex/liteparse-linux-arm64-gnu": "2.18.0",
+    "@llamaindex/liteparse-linux-x64-gnu": "2.18.0",
+    "@llamaindex/liteparse-win32-arm64-msvc": "2.18.0",
+    "@llamaindex/liteparse-win32-x64-msvc": "2.18.0",
+    "@llamaindex/liteparse-linux-x64-musl": "2.18.0"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -88,5 +88,8 @@
     "url": "https://github.com/run-llama/liteparse.git"
   },
   "author": "LlamaIndex",
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "overrides": {
+    "esbuild": "^0.28.2"
+  }
 }

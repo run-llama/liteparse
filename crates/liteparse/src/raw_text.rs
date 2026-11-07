@@ -93,6 +93,14 @@ pub struct RawTextItem {
     pub angle_radians: f32,
     /// Sum of the glyphs' advance widths in text space.
     pub text_width: f32,
+    /// One advance width per glyph, parallel to `char_codes`, in the units of
+    /// `text_width` (0 where the font reports none). A ligature's advance is split
+    /// evenly across the chars it decodes to. `Some` only from
+    /// [`extract_raw_text_items_with_glyph_widths`].
+    pub glyph_widths: Option<Vec<f32>>,
+    /// One entry per glyph, parallel to `char_codes`: its loose and strict boxes.
+    /// `Some` only from [`extract_raw_text_items_with_glyph_widths`].
+    pub glyph_boxes: Option<Vec<GlyphBoxes>>,
     pub x: f32,
     pub y: f32,
     pub width: f32,
@@ -128,6 +136,17 @@ pub struct RawTextItem {
     pub stroke_color: Option<u32>,
 }
 
+/// One glyph's boxes in viewport space, as pdfium reports them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GlyphBoxes {
+    /// The glyph's advance cell: its advance along the baseline, the font's
+    /// ascent to descent across it (`FPDFText_GetLooseCharBox`).
+    pub loose: RectF,
+    /// The glyph's ink (`FPDFText_GetCharBox`). Not meaningful for a generated glyph.
+    /// The chars a ligature decodes to each get the whole ligature's box.
+    pub strict: RectF,
+}
+
 /// Everything read per glyph before items are formed.
 struct Glyph {
     index: i32,
@@ -155,6 +174,28 @@ pub fn extract_raw_text_items(
     view_box: &RectF,
     glyph_resolver: Option<&dyn GlyphResolver>,
 ) -> Vec<RawTextItem> {
+    extract(page, text_page, view_box, glyph_resolver, false)
+}
+
+/// [`extract_raw_text_items`] that also fills [`RawTextItem::glyph_widths`] and
+/// [`RawTextItem::glyph_boxes`], for
+/// callers that split an item's box per glyph.
+pub fn extract_raw_text_items_with_glyph_widths(
+    page: &Page,
+    text_page: &TextPage,
+    view_box: &RectF,
+    glyph_resolver: Option<&dyn GlyphResolver>,
+) -> Vec<RawTextItem> {
+    extract(page, text_page, view_box, glyph_resolver, true)
+}
+
+fn extract(
+    page: &Page,
+    text_page: &TextPage,
+    view_box: &RectF,
+    glyph_resolver: Option<&dyn GlyphResolver>,
+    keep_glyph_widths: bool,
+) -> Vec<RawTextItem> {
     let char_count = text_page.char_count();
     let page_rotation = page.rotation();
     let mut chunks = CharInfoChunks::new(text_page);
@@ -176,6 +217,7 @@ pub fn extract_raw_text_items(
             run,
             glyph_resolver,
             &mut outline_cache,
+            keep_glyph_widths,
         ) {
             items.push(item);
         }
@@ -259,6 +301,22 @@ fn load_glyph(
     }
 }
 
+/// pdfium decodes a ligature such as `fi` into one char per letter, each with
+/// the ligature's char code, loose box and full advance. Split that one advance
+/// evenly across its letters so the widths add up to the printed advance.
+/// `text_width` keeps the repeated advances, as the C extractor does.
+fn split_ligature_advances(glyphs: &[Glyph], mut widths: Vec<f32>) -> Vec<f32> {
+    let mut start = 0;
+    for run in glyphs.chunk_by(|a, b| {
+        !a.generated && !b.generated && a.char_code == b.char_code && a.loose == b.loose
+    }) {
+        let share = widths[start] / run.len() as f32;
+        widths[start..start + run.len()].fill(share);
+        start += run.len();
+    }
+    widths
+}
+
 /// Counter-clockwise baseline rotation of a text matrix, in radians, from the
 /// direction of its first column. Formed the way the C extractor forms it — the
 /// degrees wrapped into `[0, 360)` first, then negated and converted — so an
@@ -321,6 +379,7 @@ fn build_item(
     glyphs: &[Glyph],
     glyph_resolver: Option<&dyn GlyphResolver>,
     outline_cache: &mut OutlineSupportCache,
+    keep_glyph_widths: bool,
 ) -> Option<RawTextItem> {
     let first = glyphs.first()?;
     let first_char = text_page.char_at_unchecked(first.index);
@@ -330,7 +389,6 @@ fn build_item(
         .and_then(|obj| unsafe { Font::from_text_object(obj) });
 
     let mut bounds = first.loose;
-    let mut text_width = 0.0f32;
     let mut font_name = String::new();
     let mut font_ascent = 0.0f32;
     let mut font_descent = 0.0f32;
@@ -342,9 +400,6 @@ fn build_item(
         font_descent = font.descent(font_size).unwrap_or(0.0);
         font_is_embedded = font.is_embedded();
         font_is_buggy = font_is_embedded && is_buggy_font(&font_name, font.font_type());
-        if let Some(width) = font.glyph_width_from_char_code(first.char_code, font_size) {
-            text_width += width;
-        }
     }
     let font_height = if first.text_object.is_some() {
         let scale_y = first_char
@@ -361,17 +416,23 @@ fn build_item(
         bounds.top = bounds.top.min(glyph.loose.top);
         bounds.right = bounds.right.max(glyph.loose.right);
         bounds.bottom = bounds.bottom.max(glyph.loose.bottom);
-        if let Some(font) = &font {
-            let width = if glyph.generated {
+    }
+    // Generated glyphs after the first are read by unicode; every other glyph by char code.
+    let widths: Vec<f32> = glyphs
+        .iter()
+        .enumerate()
+        .map(|(i, glyph)| {
+            let font = font.as_ref()?;
+            if i > 0 && glyph.generated {
                 font.glyph_width(glyph.unicode, font_size)
             } else {
                 font.glyph_width_from_char_code(glyph.char_code, font_size)
-            };
-            if let Some(width) = width {
-                text_width += width;
             }
-        }
-    }
+        })
+        .map(|width| width.unwrap_or(0.0))
+        .collect();
+    // Summed in glyph order; adding a 0 for a missing width leaves the sum unchanged.
+    let text_width = widths.iter().fold(0.0f32, |sum, width| sum + width);
     // A control / private-use decode in an embedded font flags the whole item.
     // `unicode` is 0 for an unmapped glyph, so those count too.
     if font_is_embedded && !font_is_buggy {
@@ -422,6 +483,16 @@ fn build_item(
         glyph_names,
         angle_radians: first.angle,
         text_width,
+        glyph_widths: keep_glyph_widths.then(|| split_ligature_advances(glyphs, widths)),
+        glyph_boxes: keep_glyph_widths.then(|| {
+            glyphs
+                .iter()
+                .map(|glyph| GlyphBoxes {
+                    loose: glyph.loose,
+                    strict: glyph.strict,
+                })
+                .collect()
+        }),
         x: bounds.left,
         y: bounds.top,
         width: bounds.right - bounds.left,
@@ -1018,6 +1089,8 @@ mod tests {
             glyph_names: None,
             angle_radians: angle,
             text_width: 0.0,
+            glyph_widths: None,
+            glyph_boxes: None,
             x,
             y,
             width,

@@ -122,6 +122,10 @@ pub struct TextItem {
     /// markdown emitter to wrap the text in `~~…~~`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub strike: bool,
+    /// Whether this item is LaTeX rebuilt from TeX math fonts (`$…$`).
+    /// Populated in `extract.rs`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub math: bool,
     /// Per-word sub-boxes within this item, split on the inter-word spaces seen
     /// during segment building. A segment groups several words together (it only
     /// breaks at line/column boundaries), so this exposes the finer word-level
@@ -214,6 +218,11 @@ pub struct WordBox {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Page {
     pub page_number: usize,
+    /// Tilt (degrees) the OCR merge removed from this page's OCR items: on a skewed scan the
+    /// items are rotated upright about the page centre so lines group into rows correctly,
+    /// and their output boxes are rotated back after layout (`ParsedPage::ocr_deskew`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocr_deskew: Option<f32>,
     /// The document's `/PageLabels` entry for this page ("iv", "A-1"), when
     /// the PDF defines one. This is what a reader displays for the page and
     /// is not always its position in the document; `None` means the PDF has
@@ -853,6 +862,7 @@ mod tests {
     #[test]
     fn page_serializes() {
         let p = Page {
+            ocr_deskew: None,
             page_number: 1,
             page_label: None,
             page_width: 100.0,

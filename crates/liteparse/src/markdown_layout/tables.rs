@@ -808,6 +808,68 @@ fn is_alpha_dominant(text: &str) -> bool {
     letters > digits
 }
 
+/// Share of the non-space characters of the lines a run spans that its cells
+/// and interstitials carry, or `None` for a run that is not a pipe table. The
+/// classifier skips the whole span, so whatever the table leaves out is
+/// dropped from the markdown. Header replication can push it above 1.
+pub(super) fn run_text_kept(run: &TableRun, lines: &[ProjectedLine]) -> Option<f32> {
+    let Block::Table { header, rows } = &run.block else {
+        return None;
+    };
+    let chars = |t: &str| t.chars().filter(|c| !c.is_whitespace()).count();
+    let span: usize = lines
+        .get(run.start..run.end)?
+        .iter()
+        .map(|l| chars(&l.text))
+        .sum();
+    if span == 0 {
+        return None;
+    }
+    let kept: usize = header
+        .iter()
+        .flatten()
+        .chain(rows.iter().flatten())
+        .chain(&run.interstitials)
+        .map(|c| chars(&c.text))
+        .sum();
+    Some(kept as f32 / span as f32)
+}
+
+/// Lines inside a run's span that none of its cells or interstitials took a
+/// word from. The classifier skips the span, so these would be dropped. A
+/// line that shares even one word with the table stays with it, so nothing
+/// the table already shows is repeated.
+pub(super) fn lines_left_out(run: &TableRun, lines: &[ProjectedLine]) -> Vec<usize> {
+    let Block::Table { header, rows } = &run.block else {
+        return Vec::new();
+    };
+    let mut words: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for cell in header
+        .iter()
+        .flatten()
+        .chain(rows.iter().flatten())
+        .chain(&run.interstitials)
+    {
+        for w in cell.text.split_whitespace() {
+            *words.entry(w).or_default() += 1;
+        }
+    }
+    (run.start..run.end.min(lines.len()))
+        .filter(|&i| {
+            let mut taken = false;
+            for w in lines[i].text.split_whitespace() {
+                if let Some(n) = words.get_mut(w)
+                    && *n > 0
+                {
+                    *n -= 1;
+                    taken = true;
+                }
+            }
+            !taken && !lines[i].text.trim().is_empty()
+        })
+        .collect()
+}
+
 /// Measurement-value shape: a decimal number ("2.28"), currency/percent,
 /// comma-grouped number ("1,240"), or a dash placeholder ("--" / "—").
 /// Bare integers (years, codes) deliberately do NOT match — they appear in
@@ -5795,9 +5857,19 @@ fn cell_continues(prev: &str, cur: &str) -> bool {
 /// stays valid. Newlines should be impossible inside a single cell (we built
 /// cells from spans on the same projected line) but guard anyway.
 pub(super) fn escape_table_cell(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('|', "\\|")
-        .replace('\n', " ")
+    super::inline::math_runs(s)
+        .into_iter()
+        .map(|(is_math, run)| {
+            // Inline math keeps its backslashes; only the pipe is escaped
+            // (GFM splits cells before parsing inlines).
+            let run = if is_math {
+                run.to_string()
+            } else {
+                run.replace('\\', "\\\\")
+            };
+            run.replace('|', "\\|").replace('\n', " ")
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -6793,6 +6865,11 @@ mod tests {
     }
 
     #[test]
+    fn escapes_math_cell_pipes_but_keeps_backslashes() {
+        assert_eq!(escape_table_cell(r"$\|x\|_{2}$ a\b"), r"$\\|x\\|_{2}$ a\\b");
+    }
+
+    #[test]
     fn escapes_pipe_inside_cell() {
         assert_eq!(escape_table_cell("a|b"), "a\\|b");
     }
@@ -7720,5 +7797,53 @@ mod tests {
             &[],
         ));
         assert!(md.contains(r"Dose \*as written\*"), "{md}");
+    }
+
+    #[test]
+    fn run_text_kept_counts_what_the_table_carries() {
+        use super::super::test_helpers::line;
+        let lines = vec![
+            line("Model Capacity", 10.0, 10.0, 12.0, 10.0),
+            line("50D 5,000 @ 24 2,270 @ 600 26-79", 10.0, 25.0, 12.0, 10.0),
+        ];
+        let run = |rows: Vec<Vec<Cell>>| TableRun {
+            interstitials: Vec::new(),
+            start: 0,
+            end: 2,
+            body_start: 0,
+            bbox: None,
+            block: Block::Table { header: None, rows },
+        };
+        let whole = run(vec![
+            vec!["Model".into(), "Capacity".into()],
+            vec!["50D".into(), "5,000 @ 24 2,270 @ 600 26-79".into()],
+        ]);
+        assert_eq!(run_text_kept(&whole, &lines), Some(1.0));
+        // Only the model column made it into the cells: the capacities are
+        // inside the span the classifier skips, so they would be lost.
+        let partial = run(vec![vec!["Model".into()], vec!["50D".into()]]);
+        assert!(run_text_kept(&partial, &lines).unwrap() < 0.7);
+    }
+
+    #[test]
+    fn lines_left_out_names_lines_no_cell_took() {
+        use super::super::test_helpers::line;
+        let lines = vec![
+            line("Model Order No.", 10.0, 10.0, 12.0, 10.0),
+            line("50D 659249", 10.0, 25.0, 12.0, 10.0),
+            line("Integral arms.", 10.0, 40.0, 12.0, 10.0),
+        ];
+        let run = TableRun {
+            interstitials: Vec::new(),
+            start: 0,
+            end: 3,
+            body_start: 0,
+            bbox: None,
+            block: Block::Table {
+                header: Some(vec!["Model".into(), "Order No.".into()]),
+                rows: vec![vec!["50D".into(), "659249".into()]],
+            },
+        };
+        assert_eq!(lines_left_out(&run, &lines), vec![2]);
     }
 }

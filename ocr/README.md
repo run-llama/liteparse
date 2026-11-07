@@ -6,14 +6,14 @@ These servers allow you to use alternative OCR engines instead of the built-in T
 
 ## Why Use an External OCR Server?
 
-| Feature | Tesseract.js (built-in) | EasyOCR | PaddleOCR | Surya | Indra |
-|---------|-------------------------|---------|-----------|-------|-------|
-| Setup | Zero (included) | uv | uv | uv | uv |
-| Speed | Moderate | Moderate | Fast (2-3x) | Moderate (GPU recommended) | Fast (CPU only) |
-| Accuracy (Latin) | Good | Good | Good | Excellent | Very good |
-| Accuracy (CJK) | Fair | Good | Excellent | Excellent | Good (Chinese only) |
-| Languages | 100+ | 80+ | 80+ | 91 | ~55 (Latin, Cyrillic, Greek, Devanagari, Bengali, Chinese) |
-| Memory | In-process | Separate | Separate | Separate | Separate |
+| Feature | Tesseract.js (built-in) | EasyOCR | PaddleOCR | Surya | Indra | MiniCPM-OCR |
+|---------|-------------------------|---------|-----------|-------|-------|-------------|
+| Setup | Zero (included) | uv | uv | uv | uv | uv + inference server |
+| Speed | Moderate | Moderate | Fast (2-3x) | Moderate (GPU recommended) | Fast (CPU only) | ~1.2 pages/s (GPU) |
+| Accuracy (Latin) | Good | Good | Good | Excellent | Very good | Excellent |
+| Accuracy (CJK) | Fair | Good | Excellent | Excellent | Good (Chinese only) | Excellent |
+| Languages | 100+ | 80+ | 80+ | 91 | ~55 (Latin, Cyrillic, Greek, Devanagari, Bengali, Chinese) | zh, en |
+| Memory | In-process | Separate | Separate | Separate | Separate | Separate (layout in-process) |
 
 **Recommendations:**
 - **Quick start**: Use built-in Tesseract (no setup)
@@ -21,6 +21,7 @@ These servers allow you to use alternative OCR engines instead of the built-in T
 - **Multilingual / broad scripts**: Use Surya (strong multilingual accuracy)
 - **General use**: EasyOCR (good balance)
 - **Fast CPU OCR / scans**: Use Indra (no GPU; check the model-weights license)
+- **Document parsing (tables, formulas, seals)**: Use MiniCPM-OCR (Chinese and English)
 
 ## Available Servers
 
@@ -49,6 +50,13 @@ FastAPI server wrapping Indra OCR.
 - Line-level output; straightens skewed and sideways pages
 - Model weights are under a modified OpenRAIL-M license (see its README)
 
+### [minicpmocr/](./minicpmocr/)
+FastAPI server wrapping MiniCPM-OCR 1.0.
+- Port: **8832**
+- Chinese and English document parsing, including tables and formulas
+- Runs the PP-DocLayout layout detector in-process and needs a MiniCPM-OCR
+  inference server (vLLM, SGLang, llama.cpp, or Ollama) via `MINICPM_OCR_BASE_URL`
+
 ## Quick Start
 
 ```bash
@@ -67,6 +75,10 @@ uv run server.py
 # OR start Indra OCR server
 cd ocr/indraocr
 uv run server.py
+
+# OR start MiniCPM-OCR server (needs a MiniCPM-OCR inference server)
+cd ocr/minicpmocr
+MINICPM_OCR_BASE_URL=http://localhost:18499 uv run server.py
 ```
 
 Then use with LiteParse:
