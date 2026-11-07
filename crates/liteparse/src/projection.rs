@@ -3221,11 +3221,19 @@ fn same_emphasis(a: &TextItem, b: &TextItem) -> bool {
         && a.sub == b.sub
 }
 
+/// Bold: for an item merged from differently-styled pieces, only when every piece is (a bold
+/// run-in lead merged with the plain sentence after it is not a bold line).
 pub(crate) fn is_bold_item(item: &TextItem) -> bool {
+    if !item.style_pieces.is_empty() {
+        return item.style_pieces.iter().all(is_bold_item);
+    }
     font_is_bold(item.font_name.as_deref(), item.font_weight, item.font_flags)
 }
 
 pub(crate) fn is_italic_item(item: &TextItem) -> bool {
+    if !item.style_pieces.is_empty() {
+        return item.style_pieces.iter().all(is_italic_item);
+    }
     font_is_italic(item.font_name.as_deref(), item.font_flags)
 }
 
