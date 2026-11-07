@@ -360,8 +360,7 @@ fn extract_single_page(
             &text_page,
             &view_box,
             glyph_resolver,
-            output_options.emit_word_boxes,
-            output_options.extract_text_metadata,
+            output_options,
             &consumed,
         )?;
         items.extend(emitted.into_iter().map(math_item));
@@ -400,6 +399,7 @@ fn extract_single_page(
     };
     assign_links(&mut text_items, &links);
     assign_strikethrough(&mut text_items, &graphics);
+    assign_underline(&mut text_items, &graphics);
 
     Ok(PageExtraction {
         page: LitePage {
@@ -505,6 +505,9 @@ pub struct ExtractionOutputOptions {
     pub extract_form_fields: bool,
     pub extract_structure_tree: bool,
     pub emit_word_boxes: bool,
+    /// Split items at a superscript / subscript run (a size step with a baseline shift), so
+    /// markdown can mark it. Plain text keeps such runs in their word.
+    pub split_scripts: bool,
 }
 
 fn non_empty(value: &Option<String>) -> Option<String> {
@@ -682,6 +685,92 @@ fn assign_strikethrough(items: &mut [TextItem], graphics: &[GraphicPrimitive]) {
             if overlap >= item.width * STRIKE_MIN_COVER_FRACTION {
                 item.strike = true;
                 break;
+            }
+        }
+    }
+}
+
+/// Mark text items underlined by a thin horizontal line just below their baseline. Unlike a
+/// strikethrough, an underline is judged per line rather than per item: the text sitting on it
+/// must cover most of its length, so table borders, rules and dividers (which run on past the
+/// text above them) underline nothing, while one underline under several word items marks them
+/// all.
+fn assign_underline(items: &mut [TextItem], graphics: &[GraphicPrimitive]) {
+    let mut segs: Vec<(f32, f32, f32)> = Vec::new();
+    for g in graphics {
+        match g {
+            GraphicPrimitive::Stroke {
+                x1,
+                y1,
+                x2,
+                y2,
+                width,
+                ..
+            } => {
+                let (dx, dy) = ((x1 - x2).abs(), (y1 - y2).abs());
+                if dy <= STRIKE_MAX_THICKNESS_PT
+                    && *width <= STRIKE_MAX_THICKNESS_PT
+                    && dx > 4.0 * dy.max(0.1)
+                {
+                    segs.push((x1.min(*x2), x1.max(*x2), (y1 + y2) * 0.5));
+                }
+            }
+            GraphicPrimitive::Rect { bbox, .. } => {
+                if bbox.height <= STRIKE_MAX_THICKNESS_PT && bbox.width > 4.0 * bbox.height.max(0.1)
+                {
+                    segs.push((bbox.x, bbox.x + bbox.width, bbox.y + bbox.height * 0.5));
+                }
+            }
+        }
+    }
+    for &(sx0, sx1, sy) in &segs {
+        let len = sx1 - sx0;
+        if len < 2.0 {
+            continue;
+        }
+        // Items whose baseline region the line runs under: below the lower fifth of the box,
+        // at most a quarter of the box height (2 pt floor) beneath it.
+        let on: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| {
+                !it.math
+                    && it.width > 0.0
+                    && it.height > 0.0
+                    && it.rotation.rem_euclid(360.0) < 1.0
+                    && !it.text.trim().is_empty()
+                    && sy >= it.y + it.height * 0.80
+                    && sy <= it.y + it.height + (it.height * 0.25).max(2.0)
+                    && it.x < sx1
+                    && it.x + it.width > sx0
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if on.is_empty() {
+            continue;
+        }
+        // Covered length of the line (union of the items' clipped extents).
+        let mut spans: Vec<(f32, f32)> = on
+            .iter()
+            .map(|&i| (items[i].x.max(sx0), (items[i].x + items[i].width).min(sx1)))
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (mut covered, mut reach) = (0.0f32, f32::NEG_INFINITY);
+        for (a, b) in spans {
+            let a = a.max(reach);
+            if b > a {
+                covered += b - a;
+            }
+            reach = reach.max(b);
+        }
+        if covered < len * 0.7 {
+            continue;
+        }
+        for i in on {
+            let it = &mut items[i];
+            let overlap = ((it.x + it.width).min(sx1) - it.x.max(sx0)).max(0.0);
+            if overlap >= it.width * 0.5 {
+                it.underline = true;
             }
         }
     }
@@ -1497,10 +1586,15 @@ fn extract_page_text_items(
     text_page: &TextPage,
     view_box: &RectF,
     glyph_resolver: Option<&dyn crate::GlyphResolver>,
-    emit_word_boxes: bool,
-    extract_text_metadata: bool,
+    output_options: &ExtractionOutputOptions,
     math_chars: &std::collections::HashSet<i32>,
 ) -> Result<Vec<TextItem>, LiteParseError> {
+    let ExtractionOutputOptions {
+        emit_word_boxes,
+        extract_text_metadata,
+        split_scripts,
+        ..
+    } = *output_options;
     let char_count = text_page.char_count();
     if char_count <= 0 {
         return Ok(Vec::new());
@@ -1791,7 +1885,40 @@ fn extract_page_text_items(
                     c,
                 );
             }
-            if !y_overlap || line_changed || gap >= MAX_INLINE_GAP || dot_leader_break {
+            // A size step with a baseline shift (a superscript / subscript run, or back from
+            // one) starts a new item, so projection can tell the raised or lowered run from the
+            // text it follows. A declared size change alone is no script: producers draw the same
+            // visible text with different size / matrix pairs ("290-300." after a reference's
+            // "Nat. Energy 2018, 3,"), and splitting those let projection misplace the piece.
+            let size_break = split_scripts
+                && seg.font_height.is_some_and(|sh| {
+                    let m = obj_meta.meta_for(&ch, cv.text_object());
+                    let fh = if m.font_size > 0.0 {
+                        m.scale_y.map(|sy| m.font_size * sy)
+                    } else {
+                        None
+                    };
+                    let shifted = (vp_strict.bottom - seg.last_char_bottom).abs()
+                        > 0.15
+                            * (seg.vp_bottom - seg.vp_top)
+                                .abs()
+                                .max(vp_strict.bottom - vp_strict.top);
+                    shifted
+                        && fh.is_some_and(|fh| {
+                            sh > 0.0 && fh > 0.0 && (fh < sh * 0.78 || sh < fh * 0.78)
+                        })
+                });
+            if !y_overlap || line_changed || gap >= MAX_INLINE_GAP || dot_leader_break || size_break
+            {
+                // A break for the size step alone into smaller type: the run keeps its host's band.
+                let host = (size_break
+                    && y_overlap
+                    && !line_changed
+                    && gap < MAX_INLINE_GAP
+                    && !dot_leader_break
+                    && (vp_loose.bottom - vp_loose.top).abs()
+                        < 0.85 * (seg.vp_bottom - seg.vp_top).abs())
+                .then_some((seg.vp_top, seg.vp_bottom));
                 seg.flush(&mut items);
                 let meta = obj_meta.meta_for(&ch, cv.text_object());
                 seg.start(
@@ -1803,6 +1930,7 @@ fn extract_page_text_items(
                     page_rotation,
                     &meta,
                 );
+                seg.host_band = host;
                 seg.append_ligature_tail(ligature_tail);
             } else if seg.pending_space {
                 let avg_cw = seg.avg_char_width();
@@ -3240,6 +3368,12 @@ struct SegmentBuilder {
     emit_words: bool,
     // When false, source-code/trailing-space metadata is not accumulated.
     extract_text_metadata: bool,
+    // Set on a run split off at a size step into smaller raised / lowered type: the host
+    // segment's (top, bottom), which the item takes as its band (see `TextItem::script_geom`).
+    host_band: Option<(f32, f32)>,
+    // The last run that took a host band: (top, bottom, right edge), so a later small-type
+    // segment continuing it ("LC" "50" ... "(mg/L)", other cells drawn in between) takes it too.
+    last_script: Option<(f32, f32, f32)>,
 }
 
 impl SegmentBuilder {
@@ -3287,6 +3421,8 @@ impl SegmentBuilder {
             word_has: false,
             emit_words,
             extract_text_metadata,
+            host_band: None,
+            last_script: None,
         }
     }
 
@@ -3402,6 +3538,26 @@ impl SegmentBuilder {
         page_rotation: i32,
         meta: &ObjTextMeta,
     ) {
+        // a run in smaller raised / lowered type keeps its host's band past a space or other
+        // break while it stays in that type on that line; full-size type ends it
+        let small_inside = |top: f32, bottom: f32| {
+            // line-box (loose) heights on both sides: a full-size `(` has less ink than the
+            // host's box, but the same box
+            let mid = (vp_loose.top + vp_loose.bottom) * 0.5;
+            mid > top
+                && mid < bottom
+                && (vp_loose.bottom - vp_loose.top).abs() < 0.85 * (bottom - top).abs()
+        };
+        self.host_band = self
+            .host_band
+            .filter(|&(top, bottom)| small_inside(top, bottom))
+            .or_else(|| {
+                self.last_script.and_then(|(top, bottom, right)| {
+                    let near = vp_loose.left >= right - 1.0
+                        && vp_loose.left - right < 2.0 * (bottom - top).abs();
+                    (near && small_inside(top, bottom)).then_some((top, bottom))
+                })
+            });
         self.text.clear();
         self.text.push(c);
         self.vp_left = vp_loose.left;
@@ -3621,12 +3777,19 @@ impl SegmentBuilder {
         let trimmed = self.text.trim();
         if !trimmed.is_empty() {
             let width = self.vp_right - self.vp_left;
-            let height = self.vp_bottom - self.vp_top;
+            let (band_top, band_bottom) = self.host_band.unwrap_or((self.vp_top, self.vp_bottom));
+            if let Some((t, b)) = self.host_band {
+                self.last_script = Some((t, b, self.vp_right));
+            }
+            let script_geom = self
+                .host_band
+                .map(|_| (self.vp_top, self.vp_bottom - self.vp_top));
+            let height = band_bottom - band_top;
 
             items.push(TextItem {
                 text: trimmed.to_string(),
                 x: self.vp_left,
-                y: self.vp_top,
+                y: band_top,
                 width,
                 height,
                 rotation: self.rotation_deg,
@@ -3658,6 +3821,11 @@ impl SegmentBuilder {
                 confidence: None,
                 link: None,
                 strike: false,
+                underline: false,
+                sup: false,
+                sub: false,
+                style_pieces: Vec::new(),
+                script_geom,
                 math: false,
                 words: std::mem::take(&mut self.words),
             });
