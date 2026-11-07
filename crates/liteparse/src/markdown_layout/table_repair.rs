@@ -118,6 +118,9 @@ fn merge_symbol_columns(block: &mut Block) {
     // `3,915.6 $ | 4,083.6 $ | 4,065.8`: the projection attached each `$` to
     // the cell on its left. Move it to the start of the next cell.
     for row in rows.iter_mut() {
+        if row[width - 1].text.trim().ends_with(CURRENCY) {
+            continue;
+        }
         for k in 0..width - 1 {
             let t = row[k].text.trim_end();
             let Some(last) = t.chars().last() else {
@@ -244,6 +247,10 @@ fn is_value_like(t: &str) -> bool {
         && !(t.len() == 4 && t.chars().all(|c| c.is_ascii_digit()))
 }
 
+fn header_cell_plausible(text: &str) -> bool {
+    text.chars().count() <= 40 && text.split_whitespace().count() <= 6
+}
+
 /// Header-line shape: short cells, not a sentence, not a unit note.
 fn header_line_plausible(line: &ProjectedLine, cells: &[TableCell]) -> bool {
     let text = line.text.trim();
@@ -256,7 +263,7 @@ fn header_line_plausible(line: &ProjectedLine, cells: &[TableCell]) -> bool {
     }
     // Captions and section titles sit right above tables too.
     const TITLE_WORDS: &[&str] = &[
-        "table", "figure", "exhibit", "schedule", "appendix", "note", "source",
+        "table", "tab", "figure", "fig", "exhibit", "schedule", "appendix", "note", "source",
     ];
     let first = lower.split_whitespace().next().unwrap_or("");
     if TITLE_WORDS
@@ -265,9 +272,7 @@ fn header_line_plausible(line: &ProjectedLine, cells: &[TableCell]) -> bool {
     {
         return false;
     }
-    cells
-        .iter()
-        .all(|c| c.text.chars().count() <= 40 && c.text.split_whitespace().count() <= 6)
+    cells.iter().all(|c| header_cell_plausible(&c.text))
 }
 
 /// Try to absorb `cand` (the line directly above the table, with `below` the
@@ -395,20 +400,27 @@ fn absorb_header_above(block: &mut Block, cand: &ProjectedLine, below: &Projecte
     }
 
     // Band row with colspans above the existing header rows.
-    let lower_header: Option<Vec<Cell>> = match header.take() {
-        Some(h) => Some(h),
-        None if rows.len() >= 3 && rows[0].iter().skip(1).all(|c| !is_value_like(&c.text)) => {
-            Some(rows.remove(0))
-        }
-        None => None,
+    // The band labels the header row below it: the existing header, or the
+    // first body row when it holds no values. That row must read as a header,
+    // with cells as short as the absorbed line's.
+    let promote = header.is_none()
+        && rows.len() >= 3
+        && rows[0].iter().skip(1).all(|c| !is_value_like(&c.text));
+    let lower = if promote {
+        Some(&rows[0])
+    } else {
+        header.as_ref()
+    };
+    if lower.is_some_and(|h| !h.iter().all(|c| header_cell_plausible(&c.text))) {
+        return false;
+    }
+    let lower_header = if promote {
+        Some(rows.remove(0))
+    } else {
+        header.take()
     };
     let mut band: Vec<SpanCell> = Vec::new();
-    let stub_rowspan = if lower_header.is_some() { 2 } else { 1 };
-    let stub_join = join_text(
-        stub_text.map_or("", |s| s.text.as_str()),
-        lower_header.as_ref().map_or("", |h| h[0].text.as_str()),
-    );
-    let mut stub_cell = SpanCell::spanning(stub_join, 1, stub_rowspan);
+    let mut stub_cell = SpanCell::new(stub_text.map_or("", |s| s.text.trim()));
     if let Some(s) = stub_text {
         stub_cell = stub_cell.with_bbox(cell_bbox(s));
     }
@@ -442,7 +454,7 @@ fn absorb_header_above(block: &mut Block, cand: &ProjectedLine, below: &Projecte
     let mut out: Vec<Vec<SpanCell>> = vec![band];
     let mut header_rows = 1;
     if let Some(h) = &lower_header {
-        out.push(to_span(&h[1..]));
+        out.push(to_span(h));
         header_rows = 2;
     }
     out.extend(rows.iter().map(|r| to_span(r)));
@@ -457,7 +469,9 @@ fn absorb_header_above(block: &mut Block, cand: &ProjectedLine, below: &Projecte
 mod tests {
     use super::*;
     use crate::markdown_layout::test_helpers::{line_with_spans, page};
-    use crate::markdown_layout::{classify_page_with_filters, render_blocks};
+    use crate::markdown_layout::{
+        classify_page_with_filters, render_blocks, split_repeated_header_tables,
+    };
 
     fn render(lines: Vec<ProjectedLine>) -> String {
         let p = page(lines);
@@ -524,9 +538,8 @@ mod tests {
         assert!(on.contains("Table 1."), "{on}");
     }
 
-    #[test]
-    fn spanning_band_renders_colspan() {
-        let lines = vec![
+    fn spanning_band_page() -> Vec<ProjectedLine> {
+        vec![
             line_with_spans(
                 &[("Non-Tobacco rates", 170.0), ("Tobacco rates band", 375.0)],
                 100.0,
@@ -576,8 +589,12 @@ mod tests {
                 160.0,
                 10.0,
             ),
-        ];
-        let on = render(lines);
+        ]
+    }
+
+    #[test]
+    fn spanning_band_renders_colspan() {
+        let on = render(spanning_band_page());
         assert!(
             on.contains("<th colspan=\"2\">Non-Tobacco rates</th>"),
             "{on}"
@@ -586,7 +603,85 @@ mod tests {
             on.contains("<th colspan=\"2\">Tobacco rates band</th>"),
             "{on}"
         );
-        assert!(on.contains("<th rowspan=\"2\">Age</th>"), "{on}");
+        assert!(on.contains("<th>Age</th>"), "{on}");
+        assert!(!on.contains("rowspan"), "{on}");
+    }
+
+    #[test]
+    fn abbreviated_caption_above_band_table_is_not_absorbed() {
+        for caption in ["Fig. 1: Quarterly results", "Tab. 1: Quarterly results"] {
+            let mut lines = spanning_band_page();
+            lines[0] = line_with_spans(&[(caption, 170.0)], 100.0, 10.0);
+            let on = render(lines);
+            assert!(!on.contains("colspan"), "{on}");
+            assert!(on.contains(caption), "{on}");
+        }
+    }
+
+    #[test]
+    fn spanning_band_with_repeated_lower_header_splits() {
+        let mut lines = spanning_band_page();
+        for mut line in spanning_band_page().into_iter().skip(1) {
+            line.bbox.y += 60.0;
+            for span in &mut line.spans {
+                span.y += 60.0;
+            }
+            lines.push(line);
+        }
+        let p = page(lines);
+        let none = std::collections::HashSet::new();
+        let blocks = classify_page_with_filters(
+            &p,
+            &[],
+            &none,
+            &[],
+            crate::config::ImageMode::Off,
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|b| matches!(b.block, Block::MergedTable { .. }))
+                .count(),
+            1
+        );
+        let blocks = split_repeated_header_tables(blocks);
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|b| matches!(b.block, Block::Table { .. } | Block::MergedTable { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn spanning_band_over_long_prose_is_not_absorbed() {
+        let mut b = table(&[
+            &[
+                "This is a long prose stub cell",
+                "Here are more than six short words",
+                "Yet more than six short words here",
+            ],
+            &["First", "100", "200"],
+            &["Second", "300", "400"],
+        ]);
+        let Block::Table { rows, .. } = &mut b else {
+            panic!()
+        };
+        for (i, row) in rows.iter_mut().enumerate() {
+            for (k, cell) in row.iter_mut().enumerate() {
+                cell.bbox = Some(Rect {
+                    x: 50.0 + k as f32 * 100.0,
+                    y: 115.0 + i as f32 * 15.0,
+                    width: 30.0,
+                    height: 10.0,
+                });
+            }
+        }
+        let cand = line_with_spans(&[("Combined rates band", 170.0)], 100.0, 10.0);
+        let below = line_with_spans(&[("First row", 50.0)], 115.0, 10.0);
+        assert!(!absorb_header_above(&mut b, &cand, &below));
     }
 
     fn table(rows: &[&[&str]]) -> Block {
@@ -635,6 +730,60 @@ mod tests {
             texts(&b)[0],
             vec!["Fees", "$ 3,915.6", "$ 4,083.6", "$ 4,065.8"]
         );
+    }
+
+    /// The existing header is held to the same limit, and a rejected band
+    /// leaves it in place.
+    #[test]
+    fn spanning_band_over_prose_header_is_not_absorbed() {
+        let located = |rows: &[&[&str]], y0: f32| -> Vec<Vec<Cell>> {
+            rows.iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    r.iter()
+                        .enumerate()
+                        .map(|(k, t)| {
+                            let rect = Rect {
+                                x: 50.0 + k as f32 * 100.0,
+                                y: y0 + i as f32 * 15.0,
+                                width: 30.0,
+                                height: 10.0,
+                            };
+                            Cell::located(*t, rect)
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        let header = located(
+            &[&["Stub", "Here are more than six short words", "Two words"]],
+            115.0,
+        );
+        let mut b = Block::Table {
+            header: header.into_iter().next(),
+            rows: located(
+                &[&["First", "100", "200"], &["Second", "300", "400"]],
+                130.0,
+            ),
+        };
+        let cand = line_with_spans(&[("Combined rates band", 170.0)], 100.0, 10.0);
+        let below = line_with_spans(&[("Stub", 50.0)], 115.0, 10.0);
+        assert!(!absorb_header_above(&mut b, &cand, &below));
+        let Block::Table { header, .. } = &b else {
+            panic!()
+        };
+        assert_eq!(
+            header.as_ref().map(|h| h[1].text.as_str()),
+            Some("Here are more than six short words")
+        );
+    }
+
+    #[test]
+    fn suffix_currency_stays_in_its_cell() {
+        let mut b = table(&[&["Fee", "100 €", "200 £"], &["Other", "5 €", "6 £"]]);
+        let before = texts(&b);
+        merge_symbol_columns(&mut b);
+        assert_eq!(texts(&b), before);
     }
 
     /// A band turns the run into a `MergedTable`. A line inside its span that
