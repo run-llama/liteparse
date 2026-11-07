@@ -376,6 +376,7 @@ impl LiteParse {
                 extract_annotations: self.config.extract_annotations,
                 extract_form_fields: self.config.extract_form_fields,
                 extract_structure_tree: self.config.extract_structure_tree,
+                split_scripts: self.style_runs(),
             },
         }
     }
@@ -902,16 +903,7 @@ impl LiteParse {
             .collect();
 
         // Grid projection
-        let mut parsed_pages = stages::project(pages);
-        if self.config.logical_word_order {
-            for item in parsed_pages
-                .iter_mut()
-                .flat_map(|p| p.text_items.iter_mut())
-            {
-                crate::bidi::words_to_logical_order(&mut item.words);
-                crate::bidi::join_touching_words(&mut item.words, 0.15 * item.height);
-            }
-        }
+        let mut parsed_pages = self.project(pages);
 
         // Attach per-page complexity signals, including the layout signals
         // that need the projected page (same as `is_complex()` reports).
@@ -994,9 +986,33 @@ impl LiteParse {
     /// configured output formatter, so it touches neither PDFium nor OCR and
     /// is fully synchronous. Used when an external extractor (e.g. with its
     /// own font-recovery pipeline) owns text extraction.
+    /// Markdown output and layout blocks keep emphasis and super/subscript runs apart; plain
+    /// text and JSON keep such runs inside their word, as the text grid was always built.
+    /// Blocks follow markdown so `extract_blocks` reports the same blocks under every format.
+    fn style_runs(&self) -> bool {
+        self.config.output_format == crate::config::OutputFormat::Markdown
+            || self.config.extract_blocks
+    }
+
+    /// Grid projection (see [`Self::style_runs`]).
+    fn project(&self, pages: Vec<Page>) -> Vec<ParsedPage> {
+        let mut parsed = if self.style_runs() {
+            stages::project_for_markdown(pages)
+        } else {
+            stages::project(pages)
+        };
+        if self.config.logical_word_order {
+            for item in parsed.iter_mut().flat_map(|p| p.text_items.iter_mut()) {
+                crate::bidi::words_to_logical_order(&mut item.words);
+                crate::bidi::join_touching_words(&mut item.words, 0.15 * item.height);
+            }
+        }
+        parsed
+    }
+
     pub fn parse_from_pages(&self, pages: Vec<Page>, outline: Vec<OutlineTarget>) -> ParseResult {
         let total_pages = pages.len().min(u32::MAX as usize) as u32;
-        let mut parsed_pages = stages::project(pages);
+        let mut parsed_pages = self.project(pages);
 
         let full_text = if let Some(md) = apply_layout(self, &mut parsed_pages, &outline) {
             md
@@ -1088,7 +1104,7 @@ impl LiteParse {
         let all_blocks = if page_filtered { None } else { all_blocks };
 
         let markdown_out = self.config.output_format == crate::config::OutputFormat::Markdown;
-        let mut parsed_pages = stages::project(pages);
+        let mut parsed_pages = self.project(pages);
         for ((page, blocks), stats) in parsed_pages.iter_mut().zip(&page_blocks).zip(page_stats) {
             if markdown_out {
                 page.markdown = stages::render_blocks(blocks);
