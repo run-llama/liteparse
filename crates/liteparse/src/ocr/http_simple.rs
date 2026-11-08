@@ -7,7 +7,7 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::ocr::{OcrEngine, OcrOptions, OcrResult};
+use crate::ocr::{OcrEngine, OcrOptions, OcrResult, OcrWord};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HttpOcrResponseItem {
@@ -19,6 +19,10 @@ pub struct HttpOcrResponseItem {
     /// glyphs' upright reading frame.
     #[serde(default)]
     polygon: Option<[[f32; 2]; 4]>,
+    /// Optional measured words of this result, returned when the request set
+    /// `return_word_boxes`.
+    #[serde(default)]
+    words: Vec<OcrWord>,
 }
 
 impl HttpOcrResponseItem {
@@ -28,6 +32,7 @@ impl HttpOcrResponseItem {
             bbox: self.bbox,
             confidence: self.confidence,
             polygon: self.polygon,
+            words: self.words,
         }
     }
 }
@@ -39,20 +44,30 @@ impl HttpOcrResponseItem {
 #[derive(Debug, Deserialize)]
 struct ProdOcrItem(Vec<[f32; 2]>, String, f32);
 
+/// One measured word from the prod OCR worker's `words` (`return_word_boxes`).
+#[derive(Debug, Deserialize)]
+struct ProdOcrWord {
+    bbox: Vec<[f32; 2]>,
+    text: String,
+}
+
+/// Axis-aligned `[x1, y1, x2, y2]` from a polygon's min/max extents.
+fn polygon_bounds(poly: &[[f32; 2]]) -> [f32; 4] {
+    poly.iter().fold(
+        [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ],
+        |[x1, y1, x2, y2], [x, y]| [x1.min(*x), y1.min(*y), x2.max(*x), y2.max(*y)],
+    )
+}
+
 impl ProdOcrItem {
-    fn into_ocr_result(self) -> OcrResult {
+    fn into_ocr_result(self, words: Vec<ProdOcrWord>) -> OcrResult {
         let ProdOcrItem(poly, text, confidence) = self;
-        // Axis-aligned bbox from the polygon's min/max extents.
-        let mut min_x = f32::INFINITY;
-        let mut min_y = f32::INFINITY;
-        let mut max_x = f32::NEG_INFINITY;
-        let mut max_y = f32::NEG_INFINITY;
-        for [x, y] in &poly {
-            min_x = min_x.min(*x);
-            min_y = min_y.min(*y);
-            max_x = max_x.max(*x);
-            max_y = max_y.max(*y);
-        }
+        let [min_x, min_y, max_x, max_y] = polygon_bounds(&poly);
         // Forward the raw polygon only when it's exactly 4 points, so the
         // projector can recover rotation for sideways text.
         let polygon = match poly.as_slice() {
@@ -64,6 +79,13 @@ impl ProdOcrItem {
             bbox: [min_x, min_y, max_x, max_y],
             confidence,
             polygon,
+            words: words
+                .into_iter()
+                .map(|w| OcrWord {
+                    bbox: polygon_bounds(&w.bbox),
+                    text: w.text,
+                })
+                .collect(),
         }
     }
 }
@@ -75,8 +97,16 @@ impl ProdOcrItem {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum HttpOcrResponse {
-    Standard { results: Vec<HttpOcrResponseItem> },
-    Prod { result: Vec<ProdOcrItem> },
+    Standard {
+        results: Vec<HttpOcrResponseItem>,
+    },
+    /// `words[i]` holds the measured words of `result[i]` when the request set
+    /// `return_word_boxes`.
+    Prod {
+        result: Vec<ProdOcrItem>,
+        #[serde(default)]
+        words: Vec<Vec<ProdOcrWord>>,
+    },
 }
 
 impl HttpOcrResponse {
@@ -85,8 +115,16 @@ impl HttpOcrResponse {
             HttpOcrResponse::Standard { results } => {
                 results.into_iter().map(|i| i.into_ocr_result()).collect()
             }
-            HttpOcrResponse::Prod { result } => {
-                result.into_iter().map(|i| i.into_ocr_result()).collect()
+            HttpOcrResponse::Prod { result, mut words } => {
+                // Words that do not pair one list per line cannot be attributed.
+                if words.len() != result.len() {
+                    words.clear();
+                }
+                let mut words = words.into_iter();
+                result
+                    .into_iter()
+                    .map(|i| i.into_ocr_result(words.next().unwrap_or_default()))
+                    .collect()
             }
         }
     }
@@ -95,7 +133,8 @@ impl HttpOcrResponse {
 /// HTTP-based OCR engine that conforms to LiteParse OCR API specification.
 /// The server must implement the API defined in OCR_API_SPEC.md:
 ///     - POST /ocr endpoint
-///     - Accepts multipart/form-data with 'file' and 'language' fields
+///     - Accepts multipart/form-data with 'file' and 'language' fields, plus
+///       'return_word_boxes' when the engine is built `with_word_boxes(true)`
 ///     - Returns JSON: { results: [{ text, bbox: [x1,y1,x2,y2], confidence }] }
 /// See ocr/easyocr/ and ocr/paddleocr/ for example server implementations.
 pub struct HttpOcrEngine {
@@ -105,6 +144,8 @@ pub struct HttpOcrEngine {
     headers: Vec<(String, String)>,
     /// Retry/backoff policy. Defaults to worker-parity semantics.
     retry: OcrRetryConfig,
+    /// Ask the server for measured word boxes (`return_word_boxes=true`).
+    word_boxes: bool,
 }
 
 /// Retry/backoff policy for OCR HTTP requests. The default is up to 10
@@ -195,9 +236,10 @@ async fn send_one(
     headers: &[(String, String)],
     png_bytes: &[u8],
     language: &str,
+    word_boxes: bool,
     timeout_ms: u64,
 ) -> Result<String, reqwest::Error> {
-    let form = Form::new()
+    let mut form = Form::new()
         .part(
             "file",
             Part::bytes(png_bytes.to_vec())
@@ -205,6 +247,9 @@ async fn send_one(
                 .mime_str("image/png")?,
         )
         .text("language", language.to_string());
+    if word_boxes {
+        form = form.text("return_word_boxes", "true");
+    }
     let mut request = client
         .post(url)
         .multipart(form)
@@ -245,7 +290,16 @@ impl HttpOcrEngine {
             server_url,
             headers,
             retry: OcrRetryConfig::default(),
+            word_boxes: false,
         }
+    }
+
+    /// Request measured word boxes from the server. Results then carry
+    /// `words`; a server that ignores the field returns none, and merging
+    /// estimates the boxes instead.
+    pub fn with_word_boxes(mut self, word_boxes: bool) -> Self {
+        self.word_boxes = word_boxes;
+        self
     }
 
     /// Override the retry/backoff policy
@@ -280,6 +334,7 @@ impl HttpOcrEngine {
                 &self.headers,
                 png_bytes,
                 language,
+                self.word_boxes,
                 timeout_ms,
             )
             .await;
@@ -299,11 +354,13 @@ impl HttpOcrEngine {
             let headers = self.headers.clone();
             let png = png_bytes.to_vec();
             let lang = language.to_string();
+            let word_boxes = self.word_boxes;
             handles.push(tokio::spawn(async move {
                 if delay > 0 {
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
-                let res = send_one(&client, &url, &headers, &png, &lang, timeout_ms).await;
+                let res =
+                    send_one(&client, &url, &headers, &png, &lang, word_boxes, timeout_ms).await;
                 let _ = tx.send(res).await;
             }));
         }
@@ -467,6 +524,92 @@ mod tests {
         let raw = r#"{"document_angle":null,"result":[]}"#;
         let parsed: HttpOcrResponse = serde_json::from_str(raw).unwrap();
         assert!(parsed.into_results().is_empty());
+    }
+
+    /// `return_word_boxes` adds `words`, one list per `result` line; each word's
+    /// quad becomes an axis-aligned box on its own line.
+    #[test]
+    fn test_prod_response_attaches_measured_words() {
+        let raw = r#"{"document_angle":0,"result":[
+            [[[10,20],[200,20],[200,40],[10,40]],"Invoice total",0.9],
+            [[[10,50],[60,50],[60,70],[10,70]],"42.50",0.8]],
+          "words":[
+            [{"bbox":[[10,20],[90,21],[90,40],[10,39]],"text":"Invoice","confidence":0.9},
+             {"bbox":[[100,20],[200,20],[200,40],[100,40]],"text":"total","confidence":0.9}],
+            [{"bbox":[[12,50],[58,50],[58,70],[12,70]],"text":"42.50","confidence":0.8}]]}"#;
+        let parsed: HttpOcrResponse = serde_json::from_str(raw).unwrap();
+        let results = parsed.into_results();
+        let words: Vec<Vec<(&str, [f32; 4])>> = results
+            .iter()
+            .map(|r| r.words.iter().map(|w| (w.text.as_str(), w.bbox)).collect())
+            .collect();
+        assert_eq!(
+            words,
+            vec![
+                vec![
+                    ("Invoice", [10.0, 20.0, 90.0, 40.0]),
+                    ("total", [100.0, 20.0, 200.0, 40.0])
+                ],
+                vec![("42.50", [12.0, 50.0, 58.0, 70.0])],
+            ]
+        );
+    }
+
+    /// Word lists that do not pair one per line are dropped, not shifted onto
+    /// the wrong lines.
+    #[test]
+    fn test_prod_words_not_paired_per_line_are_dropped() {
+        let raw = r#"{"result":[
+            [[[0,0],[10,0],[10,10],[0,10]],"a",0.9],
+            [[[0,20],[10,20],[10,30],[0,30]],"b",0.9]],
+          "words":[[{"bbox":[[0,20],[10,20],[10,30],[0,30]],"text":"b","confidence":0.9}]]}"#;
+        let parsed: HttpOcrResponse = serde_json::from_str(raw).unwrap();
+        assert!(parsed.into_results().iter().all(|r| r.words.is_empty()));
+    }
+
+    /// Serve one OCR request on a local socket and return the request bytes.
+    async fn capture_request(engine: HttpOcrEngine) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/ocr", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut req = Vec::new();
+            let mut buf = [0u8; 4096];
+            // Read until the multipart closing boundary arrives.
+            while !String::from_utf8_lossy(&req).trim_end().ends_with("--") {
+                let n = sock.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                req.extend_from_slice(&buf[..n]);
+            }
+            let body = r#"{"results":[]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            String::from_utf8_lossy(&req).into_owned()
+        });
+        let engine = HttpOcrEngine {
+            server_url: url,
+            ..engine
+        };
+        let opts = OcrOptions {
+            language: "en".into(),
+            dpi: 150.0,
+        };
+        engine.recognize(&[255u8; 3], 1, 1, &opts).await.unwrap();
+        server.await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_word_boxes_are_requested_only_when_enabled() {
+        let on = capture_request(HttpOcrEngine::new(String::new()).with_word_boxes(true)).await;
+        assert!(on.contains("name=\"return_word_boxes\"\r\n\r\ntrue"));
+        let off = capture_request(HttpOcrEngine::new(String::new())).await;
+        assert!(!off.contains("return_word_boxes"));
     }
 
     #[tokio::test]

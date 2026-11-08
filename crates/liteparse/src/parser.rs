@@ -463,7 +463,8 @@ impl LiteParse {
                     .with_retry(crate::ocr::http_simple::OcrRetryConfig {
                         hedge_delays_ms: self.config.ocr_hedge_delays_ms.clone(),
                         ..Default::default()
-                    }),
+                    })
+                    .with_word_boxes(self.config.effective_emit_word_boxes()),
                 )));
             }
             #[cfg(feature = "tesseract")]

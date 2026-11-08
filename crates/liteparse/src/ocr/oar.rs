@@ -328,6 +328,7 @@ fn region_to_result(region: oar_ocr::oarocr::TextRegion) -> Option<OcrResult> {
         bbox: [min_x, min_y, max_x, max_y],
         confidence: confidence.clamp(0.0, 1.0),
         polygon,
+        words: Vec::new(),
     })
 }
 

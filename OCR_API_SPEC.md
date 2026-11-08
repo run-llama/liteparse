@@ -22,6 +22,7 @@ POST /ocr
 |-------|------|----------|-------------|
 | `file` | binary | Yes | Image file (PNG, JPG, etc.) |
 | `language` | string | No | Language code (default: `en`) |
+| `return_word_boxes` | string | No | `true` asks a line-level server to also measure each word's box (see `results[].words`). LiteParse sends it only when word boxes are wanted (`emit_word_boxes`, Markdown output, or `extract_blocks`). Servers may ignore it. |
 
 ### Language Codes
 
@@ -51,7 +52,8 @@ Your server should map these to whatever format your underlying OCR engine expec
       "text": "recognized text",
       "bbox": [x1, y1, x2, y2],
       "confidence": 0.95,
-      "polygon": [[x1, y1], [x2, y2], [x3, y3], [x4, y4]]
+      "polygon": [[x1, y1], [x2, y2], [x3, y3], [x4, y4]],
+      "words": [{"text": "recognized", "bbox": [x1, y1, x2, y2]}]
     }
   ]
 }
@@ -66,6 +68,9 @@ Your server should map these to whatever format your underlying OCR engine expec
 | `results[].bbox` | [number, number, number, number] | Axis-aligned bounding box `[x1, y1, x2, y2]` where (x1,y1) is top-left and (x2,y2) is bottom-right |
 | `results[].confidence` | number | Confidence score between 0.0 and 1.0 |
 | `results[].polygon` | [[number, number], ×4] | **Optional.** 4-point detection polygon ordered top-left → top-right → bottom-right → bottom-left **in the glyphs' upright reading frame**. Lets LiteParse recover rotation for vertical/sideways text. |
+| `results[].words` | array | **Optional.** Measured word boxes inside this result, in reading order, each `{"text", "bbox": [x1, y1, x2, y2]}` in image pixels. LiteParse uses them as the result's word boxes when the count matches the words in `text` and the line is upright; otherwise it estimates word boxes by splitting the line box by character count. |
+
+A server that returns the `{"result": [[quad, text, score], ...]}` shape may send the measured words as a top-level `words` list parallel to `result`: `words[i]` is a list of `{"bbox": [[x, y] ×4], "text"}` for `result[i]`. LiteParse drops all of them when the two lists differ in length.
 
 ## Example
 

@@ -23,6 +23,19 @@ pub struct OcrResult {
     /// to recover orientation for rotated text. None for axis-aligned-only
     /// engines (e.g. Tesseract word boxes).
     pub polygon: Option<[[f32; 2]; 4]>,
+    /// Measured word boxes inside this result, in its pixel space and reading
+    /// order. Empty when the engine returned none (word-level engines, or a
+    /// line-level server not asked for them); merging then estimates them.
+    #[serde(default)]
+    pub words: Vec<OcrWord>,
+}
+
+/// One word an OCR engine measured inside a line-level result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OcrWord {
+    pub text: String,
+    /// Axis-aligned box in pixel coordinates: [x1, y1, x2, y2].
+    pub bbox: [f32; 4],
 }
 
 pub struct OcrOptions {
@@ -112,6 +125,7 @@ mod tests {
                     bbox: [0.0, 0.0, 10.0, 10.0],
                     confidence: 0.9,
                     polygon: None,
+                    words: Vec::new(),
                 }])
             })
         }

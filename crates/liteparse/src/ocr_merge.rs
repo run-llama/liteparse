@@ -1181,10 +1181,11 @@ pub async fn recognize_rasters(
 ///
 /// Word-level engines (Tesseract's `RIL_WORD`) return one word per result, which
 /// keeps the item's own box. Line-level engines (PaddleOCR-style HTTP servers)
-/// return a whole line: each whitespace-separated word then gets the slice of
-/// the line box at its character offsets, so a line of `n` characters gives
-/// each character `width / n`. Proportional fonts make a slice a few percent
-/// off the ink, which still keeps every word inside its line and in order.
+/// return a whole line. When the server measured its words (`measured`, page
+/// space, one box per whitespace-separated word of `text`), each word takes its
+/// measured box. Otherwise each word gets the slice of the line box at its
+/// character offsets, so a line of `n` characters gives each character
+/// `width / n`; proportional fonts make a slice a few percent off the ink.
 /// Only upright lines are split; a rotated line keeps one box.
 fn ocr_word_boxes(
     text: &str,
@@ -1193,6 +1194,7 @@ fn ocr_word_boxes(
     width: f32,
     height: f32,
     rotation: f32,
+    measured: &[(f32, f32, f32, f32)],
 ) -> Vec<WordBox> {
     let chars: Vec<char> = text.chars().collect();
     let mut spans: Vec<(usize, usize)> = Vec::new();
@@ -1209,6 +1211,21 @@ fn ocr_word_boxes(
     }
     if let Some(s) = start {
         spans.push((s, chars.len()));
+    }
+    // Measured words pair with the text's words only when the counts agree;
+    // table-artifact cleaning can drop a word the server measured.
+    if rotation == 0.0 && !measured.is_empty() && measured.len() == spans.len() {
+        return spans
+            .iter()
+            .zip(measured)
+            .map(|(&(s, e), &(x, y, width, height))| WordBox {
+                text: chars[s..e].iter().collect(),
+                x,
+                y,
+                width,
+                height,
+            })
+            .collect();
     }
     if spans.len() < 2 || rotation != 0.0 {
         return vec![WordBox {
@@ -1369,6 +1386,21 @@ pub fn merge_ocr_results(
                 None => (x, y),
             }
         };
+        // An axis-aligned pixel box in page points. Under a deskew the box moves with its
+        // centre and keeps its size.
+        let to_page = |b: [f32; 4]| -> (f32, f32, f32, f32) {
+            let (w, h) = ((b[2] - b[0]) * scale_factor, (b[3] - b[1]) * scale_factor);
+            match deskew {
+                Some(_) => {
+                    let (mx, my) = upright(
+                        (b[0] + b[2]) / 2.0 * scale_factor,
+                        (b[1] + b[3]) / 2.0 * scale_factor,
+                    );
+                    (mx - w / 2.0, my - h / 2.0, w, h)
+                }
+                None => (b[0] * scale_factor, b[1] * scale_factor, w, h),
+            }
+        };
         if debug_ocr {
             eprintln!(
                 "[ocr-merge] page {} native_items={} ocr_results={} dpi={}",
@@ -1413,27 +1445,8 @@ pub fn merge_ocr_results(
                     )
                 }
                 None => {
-                    let (w, h) = (
-                        (r.bbox[2] - r.bbox[0]) * scale_factor,
-                        (r.bbox[3] - r.bbox[1]) * scale_factor,
-                    );
-                    match deskew {
-                        // the box moves with its centre; its size is kept
-                        Some(_) => {
-                            let (mx, my) = upright(
-                                (r.bbox[0] + r.bbox[2]) / 2.0 * scale_factor,
-                                (r.bbox[1] + r.bbox[3]) / 2.0 * scale_factor,
-                            );
-                            (mx - w / 2.0, my - h / 2.0, w, h, 0.0)
-                        }
-                        None => (
-                            r.bbox[0] * scale_factor,
-                            r.bbox[1] * scale_factor,
-                            w,
-                            h,
-                            0.0,
-                        ),
-                    }
+                    let (x, y, w, h) = to_page(r.bbox);
+                    (x, y, w, h, 0.0)
                 }
             };
 
@@ -1517,7 +1530,8 @@ pub fn merge_ocr_results(
             };
 
             let words = if emit_word_boxes {
-                ocr_word_boxes(&cleaned, ocr_x, ocr_y, ocr_w, ocr_h, rotation)
+                let measured: Vec<_> = r.words.iter().map(|w| to_page(w.bbox)).collect();
+                ocr_word_boxes(&cleaned, ocr_x, ocr_y, ocr_w, ocr_h, rotation, &measured)
             } else {
                 Vec::new()
             };
@@ -2492,6 +2506,7 @@ fn clean_ocr_table_artifacts(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ocr::OcrWord;
     use crate::types::Rect;
 
     #[test]
@@ -3510,12 +3525,14 @@ mod tests {
                     bbox: [10.0, 20.0, 60.0, 30.0],
                     confidence: 0.9,
                     polygon: None,
+                    words: Vec::new(),
                 },
                 OcrResult {
                     text: "world".into(),
                     bbox: [62.0, 20.0, 110.0, 30.0],
                     confidence: 0.9,
                     polygon: None,
+                    words: Vec::new(),
                 },
             ],
             error: None,
@@ -3558,6 +3575,7 @@ mod tests {
             bbox: [10.0, 20.0, 200.0, 30.0],
             confidence: 0.9,
             polygon: None,
+            words: Vec::new(),
         };
         let outcome = PageOcrOutcome {
             page_number: 1,
@@ -3592,7 +3610,78 @@ mod tests {
         );
 
         // A rotated line keeps one box: its reading axis is not the x axis.
-        assert_eq!(ocr_word_boxes("a b", 0.0, 0.0, 30.0, 10.0, 90.0).len(), 1);
+        assert_eq!(
+            ocr_word_boxes("a b", 0.0, 0.0, 30.0, 10.0, 90.0, &[]).len(),
+            1
+        );
+    }
+
+    /// Words the OCR server measured replace the character-count estimate when
+    /// they pair one per word; otherwise the estimate stays.
+    #[test]
+    fn test_measured_ocr_word_boxes_replace_the_estimate() {
+        let line = |words: Vec<OcrWord>| OcrResult {
+            text: "Invoice total 42.50".into(),
+            bbox: [10.0, 20.0, 200.0, 30.0],
+            confidence: 0.9,
+            polygon: None,
+            words,
+        };
+        let measured = vec![
+            OcrWord {
+                text: "Invoice".into(),
+                bbox: [11.0, 21.0, 60.0, 29.0],
+            },
+            OcrWord {
+                text: "total".into(),
+                bbox: [70.0, 21.0, 100.0, 29.0],
+            },
+            OcrWord {
+                text: "42.50".into(),
+                bbox: [160.0, 22.0, 199.0, 29.0],
+            },
+        ];
+        let merged = |result: OcrResult| {
+            let outcome = PageOcrOutcome {
+                page_number: 1,
+                // 144 dpi pixels are half a point each.
+                dpi: 144.0,
+                has_native_text: false,
+                image_rects: Vec::new(),
+                replace_native: false,
+                results: vec![result],
+                error: None,
+            };
+            let mut pages = vec![make_blank_page(1)];
+            merge_ocr_results(&mut pages, vec![outcome], false, true).unwrap();
+            pages[0].text_items[0]
+                .words
+                .iter()
+                .map(|w| (w.text.clone(), w.x, w.y, w.width, w.height))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            merged(line(measured.clone())),
+            vec![
+                ("Invoice".to_string(), 5.5, 10.5, 24.5, 4.0),
+                ("total".to_string(), 35.0, 10.5, 15.0, 4.0),
+                ("42.50".to_string(), 80.0, 11.0, 19.5, 3.5),
+            ]
+        );
+        // Two measured words for three text words: the estimate (19 chars over
+        // 95 points, 5 each) is used instead.
+        let estimated = merged(line(measured[..2].to_vec()));
+        assert_eq!(
+            estimated
+                .iter()
+                .map(|w| (w.0.as_str(), w.1, w.3))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Invoice", 5.0, 35.0),
+                ("total", 45.0, 25.0),
+                ("42.50", 75.0, 25.0)
+            ]
+        );
     }
 
     /// A scanned figure on a page with a typed footer keeps all its OCR text,
@@ -3615,6 +3704,7 @@ mod tests {
             bbox: [x, y, x + 8.0, y + 4.0],
             confidence: 0.9,
             polygon: None,
+            words: Vec::new(),
         };
         let results = vec![
             word("Logement", 10.0, 10.0),

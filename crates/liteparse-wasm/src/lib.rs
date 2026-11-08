@@ -1064,6 +1064,7 @@ impl OcrEngine for JsOcrEngine {
                     bbox: r.bbox,
                     confidence: r.confidence,
                     polygon: r.polygon,
+                    words: Vec::new(),
                 })
                 .collect())
         })
