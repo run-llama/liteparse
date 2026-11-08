@@ -3015,6 +3015,7 @@ fn project_pages(pages: Vec<Page>, style_runs: bool) -> Vec<ParsedPage> {
                 // Filled in after classification, which needs the finished
                 // page (and whole-document signals) to run.
                 blocks: None,
+                ocr_deskew: page.ocr_deskew,
             }
         })
         .collect()
