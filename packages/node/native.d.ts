@@ -15,6 +15,11 @@ export interface JsLiteParseConfig {
    * (e.g. `{ Authorization: "Bearer <token>" }`).
    */
   ocrServerHeaders?: Record<string, string>
+  /**
+   * Ask `ocrServerUrl` to measure each word (`return_word_boxes`,
+   * `dense_ocr_detection`, `return_bbox_angles`). Default false.
+   */
+  ocrWordBoxes?: boolean
   /** Path to tessdata directory for Tesseract. */
   tessdataPath?: string
   /** Maximum number of pages to parse. */

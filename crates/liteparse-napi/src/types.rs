@@ -30,6 +30,9 @@ pub struct JsLiteParseConfig {
     /// Extra HTTP headers sent with every request to `ocrServerUrl`
     /// (e.g. `{ Authorization: "Bearer <token>" }`).
     pub ocr_server_headers: Option<HashMap<String, String>>,
+    /// Ask `ocrServerUrl` to measure each word (`return_word_boxes`,
+    /// `dense_ocr_detection`, `return_bbox_angles`). Default false.
+    pub ocr_word_boxes: Option<bool>,
     /// Path to tessdata directory for Tesseract.
     pub tessdata_path: Option<String>,
     /// Maximum number of pages to parse.
@@ -166,6 +169,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.ocr_server_headers {
             cfg.ocr_server_headers = v.into_iter().collect();
         }
+        if let Some(v) = self.ocr_word_boxes {
+            cfg.ocr_word_boxes = v;
+        }
         if let Some(v) = self.tessdata_path {
             cfg.tessdata_path = Some(v);
         }
@@ -296,6 +302,7 @@ impl JsLiteParseConfig {
             } else {
                 Some(cfg.ocr_server_headers.iter().cloned().collect())
             },
+            ocr_word_boxes: Some(cfg.ocr_word_boxes),
             tessdata_path: cfg.tessdata_path.clone(),
             max_pages: Some(cfg.max_pages as u32),
             target_pages: cfg.target_pages.clone(),

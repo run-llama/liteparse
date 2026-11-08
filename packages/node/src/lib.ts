@@ -46,6 +46,12 @@ export interface LiteParseConfig {
   ocrServerUrl?: string;
   /** Extra HTTP headers sent with every request to `ocrServerUrl`. */
   ocrServerHeaders?: Record<string, string>;
+  /**
+   * Ask `ocrServerUrl` to measure each word, sending `return_word_boxes`,
+   * `dense_ocr_detection` and `return_bbox_angles` like the LlamaParse tiers.
+   * The measured boxes become {@link TextItem.words}. Default false.
+   */
+  ocrWordBoxes?: boolean;
   tessdataPath?: string;
   maxPages: number;
   targetPages?: string;
@@ -662,6 +668,7 @@ export class LiteParse {
       ocrEnabled: userConfig.ocrEnabled,
       ocrServerUrl: userConfig.ocrServerUrl,
       ocrServerHeaders: userConfig.ocrServerHeaders,
+      ocrWordBoxes: userConfig.ocrWordBoxes,
       tessdataPath: userConfig.tessdataPath,
       maxPages: userConfig.maxPages,
       targetPages: userConfig.targetPages,
@@ -723,6 +730,7 @@ export class LiteParse {
       ocrEnabled: resolved.ocrEnabled ?? true,
       ocrServerUrl: resolved.ocrServerUrl ?? undefined,
       ocrServerHeaders: resolved.ocrServerHeaders ?? undefined,
+      ocrWordBoxes: resolved.ocrWordBoxes ?? false,
       tessdataPath: resolved.tessdataPath ?? undefined,
       maxPages: resolved.maxPages ?? 1000,
       targetPages: resolved.targetPages ?? undefined,

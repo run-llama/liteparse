@@ -83,6 +83,10 @@ impl ProdOcrItem {
                 .into_iter()
                 .map(|w| OcrWord {
                     bbox: polygon_bounds(&w.bbox),
+                    polygon: match w.bbox.as_slice() {
+                        [a, b, c, d] => Some([*a, *b, *c, *d]),
+                        _ => None,
+                    },
                     text: w.text,
                 })
                 .collect(),
@@ -134,7 +138,8 @@ impl HttpOcrResponse {
 /// The server must implement the API defined in OCR_API_SPEC.md:
 ///     - POST /ocr endpoint
 ///     - Accepts multipart/form-data with 'file' and 'language' fields, plus
-///       'return_word_boxes' when the engine is built `with_word_boxes(true)`
+///       'return_word_boxes', 'dense_ocr_detection' and 'return_bbox_angles'
+///       when the engine is built `with_word_boxes(true)`
 ///     - Returns JSON: { results: [{ text, bbox: [x1,y1,x2,y2], confidence }] }
 /// See ocr/easyocr/ and ocr/paddleocr/ for example server implementations.
 pub struct HttpOcrEngine {
@@ -144,7 +149,7 @@ pub struct HttpOcrEngine {
     headers: Vec<(String, String)>,
     /// Retry/backoff policy. Defaults to worker-parity semantics.
     retry: OcrRetryConfig,
-    /// Ask the server for measured word boxes (`return_word_boxes=true`).
+    /// Ask the server for measured word boxes (see `with_word_boxes`).
     word_boxes: bool,
 }
 
@@ -247,8 +252,12 @@ async fn send_one(
                 .mime_str("image/png")?,
         )
         .text("language", language.to_string());
+    // The fields every LlamaParse tier sends when it wants word boxes.
     if word_boxes {
-        form = form.text("return_word_boxes", "true");
+        form = form
+            .text("return_word_boxes", "true")
+            .text("dense_ocr_detection", "true")
+            .text("return_bbox_angles", "true");
     }
     let mut request = client
         .post(url)
@@ -294,8 +303,9 @@ impl HttpOcrEngine {
         }
     }
 
-    /// Request measured word boxes from the server. Results then carry
-    /// `words`; a server that ignores the field returns none, and merging
+    /// Request measured word boxes from the server (`return_word_boxes`,
+    /// `dense_ocr_detection`, `return_bbox_angles`). Results then carry
+    /// `words`; a server that ignores the fields returns none, and merging
     /// estimates the boxes instead.
     pub fn with_word_boxes(mut self, word_boxes: bool) -> Self {
         self.word_boxes = word_boxes;
@@ -553,6 +563,11 @@ mod tests {
                 vec![("42.50", [12.0, 50.0, 58.0, 70.0])],
             ]
         );
+        // The quad is kept so merging can take its bounds after a deskew.
+        assert_eq!(
+            results[0].words[0].polygon,
+            Some([[10.0, 20.0], [90.0, 21.0], [90.0, 40.0], [10.0, 39.0]])
+        );
     }
 
     /// Word lists that do not pair one per line are dropped, not shifted onto
@@ -568,7 +583,10 @@ mod tests {
     }
 
     /// Serve one OCR request on a local socket and return the request bytes.
-    async fn capture_request(engine: HttpOcrEngine) -> String {
+    /// `engine` builds the engine under test from the socket's URL.
+    async fn capture_request(
+        engine: impl FnOnce(String) -> std::sync::Arc<dyn OcrEngine>,
+    ) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/ocr", listener.local_addr().unwrap());
@@ -592,10 +610,7 @@ mod tests {
             sock.write_all(resp.as_bytes()).await.unwrap();
             String::from_utf8_lossy(&req).into_owned()
         });
-        let engine = HttpOcrEngine {
-            server_url: url,
-            ..engine
-        };
+        let engine = engine(url);
         let opts = OcrOptions {
             language: "en".into(),
             dpi: 150.0,
@@ -604,12 +619,38 @@ mod tests {
         server.await.unwrap()
     }
 
+    /// `ocr_word_boxes` sends the three fields the LlamaParse tiers send for
+    /// word boxes; off, the request carries none of them.
     #[tokio::test]
-    async fn test_word_boxes_are_requested_only_when_enabled() {
-        let on = capture_request(HttpOcrEngine::new(String::new()).with_word_boxes(true)).await;
-        assert!(on.contains("name=\"return_word_boxes\"\r\n\r\ntrue"));
-        let off = capture_request(HttpOcrEngine::new(String::new())).await;
-        assert!(!off.contains("return_word_boxes"));
+    async fn test_ocr_word_boxes_option_sends_the_word_box_fields() {
+        use crate::{config::LiteParseConfig, parser::LiteParse};
+        let request = |on: bool| {
+            capture_request(move |url| {
+                LiteParse::new(LiteParseConfig {
+                    ocr_enabled: true,
+                    ocr_server_url: Some(url),
+                    ocr_word_boxes: on,
+                    ..Default::default()
+                })
+                .ocr_engine()
+                .unwrap()
+                .unwrap()
+            })
+        };
+        let fields = [
+            "return_word_boxes",
+            "dense_ocr_detection",
+            "return_bbox_angles",
+        ];
+        let on = request(true).await;
+        for f in fields {
+            assert!(
+                on.contains(&format!("name=\"{f}\"\r\n\r\ntrue")),
+                "{f} not sent"
+            );
+        }
+        let off = request(false).await;
+        assert!(fields.iter().all(|f| !off.contains(f)), "{off}");
     }
 
     #[tokio::test]

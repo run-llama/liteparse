@@ -13,6 +13,12 @@ pub struct LiteParseConfig {
     /// `(name, value)` pairs. Use for auth, e.g. `("Authorization", "Bearer …")`.
     /// Ignored when `ocr_server_url` is None.
     pub ocr_server_headers: Vec<(String, String)>,
+    /// Ask `ocr_server_url` to measure each word of a line, sending
+    /// `return_word_boxes`, `dense_ocr_detection` and `return_bbox_angles`.
+    /// The measured boxes become `TextItem.words` when word boxes are on.
+    /// Default `false` leaves the request unchanged.
+    #[serde(default)]
+    pub ocr_word_boxes: bool,
     /// Path to tessdata directory. Falls back to TESSDATA_PREFIX env var if not set.
     pub tessdata_path: Option<String>,
     /// Maximum number of pages to parse.
@@ -291,6 +297,7 @@ impl Default for LiteParseConfig {
             ocr_enabled: cfg!(feature = "tesseract"),
             ocr_server_url: None,
             ocr_server_headers: Vec::new(),
+            ocr_word_boxes: false,
             tessdata_path: None,
             max_pages: 1000,
             target_pages: None,

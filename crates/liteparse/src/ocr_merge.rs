@@ -1186,7 +1186,7 @@ pub async fn recognize_rasters(
 /// measured box. Otherwise each word gets the slice of the line box at its
 /// character offsets, so a line of `n` characters gives each character
 /// `width / n`; proportional fonts make a slice a few percent off the ink.
-/// Only upright lines are split; a rotated line keeps one box.
+/// The estimate splits only upright lines; a rotated line keeps one box.
 fn ocr_word_boxes(
     text: &str,
     x: f32,
@@ -1214,7 +1214,7 @@ fn ocr_word_boxes(
     }
     // Measured words pair with the text's words only when the counts agree;
     // table-artifact cleaning can drop a word the server measured.
-    if rotation == 0.0 && !measured.is_empty() && measured.len() == spans.len() {
+    if !measured.is_empty() && measured.len() == spans.len() {
         return spans
             .iter()
             .zip(measured)
@@ -1401,6 +1401,31 @@ pub fn merge_ocr_results(
                 None => (b[0] * scale_factor, b[1] * scale_factor, w, h),
             }
         };
+        // Page-point bounds of a pixel box, or of its quad when the engine sent one. Without a
+        // deskew the quad's points stay in image pixels until the bounds are taken, so the
+        // boxes match the un-deskewed arithmetic exactly.
+        let page_bounds = |bbox: [f32; 4], poly: Option<[[f32; 2]; 4]>| {
+            let Some(poly) = poly else {
+                return to_page(bbox);
+            };
+            let (s, pts) = match deskew {
+                Some(_) => (
+                    1.0,
+                    poly.map(|[x, y]| upright(x * scale_factor, y * scale_factor)),
+                ),
+                None => (scale_factor, poly.map(|[x, y]| (x, y))),
+            };
+            let x_min = pts.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+            let x_max = pts.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+            let y_min = pts.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+            let y_max = pts.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+            (
+                x_min * s,
+                y_min * s,
+                (x_max - x_min) * s,
+                (y_max - y_min) * s,
+            )
+        };
         if debug_ocr {
             eprintln!(
                 "[ocr-merge] page {} native_items={} ocr_results={} dpi={}",
@@ -1420,35 +1445,8 @@ pub fn merge_ocr_results(
             // The polygon also lets us recover an explicit rotation angle so the
             // projector can route rotated sidebar text through its rotation
             // reading-order handler instead of mistaking it for body text.
-            let (ocr_x, ocr_y, ocr_w, ocr_h, rotation) = match r.polygon {
-                Some(poly) => {
-                    // without a deskew the points stay in image pixels until the bounds are
-                    // taken, so the boxes match the un-deskewed arithmetic exactly
-                    let (s, pts) = match deskew {
-                        Some(_) => (
-                            1.0,
-                            poly.map(|[x, y]| upright(x * scale_factor, y * scale_factor)),
-                        ),
-                        None => (scale_factor, poly.map(|[x, y]| (x, y))),
-                    };
-                    let x_min = pts.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
-                    let x_max = pts.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
-                    let y_min = pts.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
-                    let y_max = pts.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
-                    let rot = polygon_rotation_deg(&poly);
-                    (
-                        x_min * s,
-                        y_min * s,
-                        (x_max - x_min) * s,
-                        (y_max - y_min) * s,
-                        rot,
-                    )
-                }
-                None => {
-                    let (x, y, w, h) = to_page(r.bbox);
-                    (x, y, w, h, 0.0)
-                }
-            };
+            let (ocr_x, ocr_y, ocr_w, ocr_h) = page_bounds(r.bbox, r.polygon);
+            let rotation = r.polygon.map_or(0.0, |p| polygon_rotation_deg(&p));
 
             // On pages that already have native text, OCR only enriches:
             // a bar-shaped single glyph is a table border / rule misread
@@ -1530,7 +1528,11 @@ pub fn merge_ocr_results(
             };
 
             let words = if emit_word_boxes {
-                let measured: Vec<_> = r.words.iter().map(|w| to_page(w.bbox)).collect();
+                let measured: Vec<_> = r
+                    .words
+                    .iter()
+                    .map(|w| page_bounds(w.bbox, w.polygon))
+                    .collect();
                 ocr_word_boxes(&cleaned, ocr_x, ocr_y, ocr_w, ocr_h, rotation, &measured)
             } else {
                 Vec::new()
@@ -3631,14 +3633,17 @@ mod tests {
             OcrWord {
                 text: "Invoice".into(),
                 bbox: [11.0, 21.0, 60.0, 29.0],
+                polygon: None,
             },
             OcrWord {
                 text: "total".into(),
                 bbox: [70.0, 21.0, 100.0, 29.0],
+                polygon: None,
             },
             OcrWord {
                 text: "42.50".into(),
                 bbox: [160.0, 22.0, 199.0, 29.0],
+                polygon: None,
             },
         ];
         let merged = |result: OcrResult| {
@@ -3680,6 +3685,49 @@ mod tests {
                 ("Invoice", 5.0, 35.0),
                 ("total", 45.0, 25.0),
                 ("42.50", 75.0, 25.0)
+            ]
+        );
+    }
+
+    /// A line turned 90° takes each measured word quad's bounds as its box.
+    #[test]
+    fn test_measured_words_on_a_turned_line_keep_their_quads() {
+        let word = |text: &str, top: f32, bottom: f32| OcrWord {
+            text: text.into(),
+            bbox: [10.0, top, 20.0, bottom],
+            polygon: Some([[10.0, bottom], [10.0, top], [20.0, top], [20.0, bottom]]),
+        };
+        let line = OcrResult {
+            text: "Invoice total".into(),
+            bbox: [10.0, 20.0, 20.0, 200.0],
+            confidence: 0.9,
+            // Reads bottom to top: 90° counter-clockwise.
+            polygon: Some([[10.0, 200.0], [10.0, 20.0], [20.0, 20.0], [20.0, 200.0]]),
+            words: vec![word("Invoice", 120.0, 200.0), word("total", 60.0, 110.0)],
+        };
+        let outcome = PageOcrOutcome {
+            page_number: 1,
+            dpi: 144.0,
+            has_native_text: false,
+            image_rects: Vec::new(),
+            replace_native: false,
+            results: vec![line],
+            error: None,
+        };
+        let mut pages = vec![make_blank_page(1)];
+        merge_ocr_results(&mut pages, vec![outcome], false, true).unwrap();
+        let item = &pages[0].text_items[0];
+        assert_eq!(item.rotation, 90.0);
+        let words: Vec<_> = item
+            .words
+            .iter()
+            .map(|w| (w.text.as_str(), w.x, w.y, w.width, w.height))
+            .collect();
+        assert_eq!(
+            words,
+            vec![
+                ("Invoice", 5.0, 60.0, 5.0, 40.0),
+                ("total", 5.0, 30.0, 5.0, 25.0)
             ]
         );
     }

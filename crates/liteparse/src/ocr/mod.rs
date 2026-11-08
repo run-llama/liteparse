@@ -36,6 +36,10 @@ pub struct OcrWord {
     pub text: String,
     /// Axis-aligned box in pixel coordinates: [x1, y1, x2, y2].
     pub bbox: [f32; 4],
+    /// The word's 4-point quad when the engine returned one, as for a skewed
+    /// or turned line. Merging takes its bounds after any page deskew.
+    #[serde(default)]
+    pub polygon: Option<[[f32; 2]; 4]>,
 }
 
 pub struct OcrOptions {

@@ -113,6 +113,10 @@ lit parse document.pdf \
 
 In the libraries this is `ocr_server_headers` / `ocrServerHeaders`, taking a map of header name to value. It has no effect unless an OCR server URL is set.
 
+### Measured word boxes
+
+A line-level OCR server returns one box per line. With `ocr_word_boxes` / `ocrWordBoxes` set, LiteParse also sends `return_word_boxes`, `dense_ocr_detection` and `return_bbox_angles` (the fields LlamaParse sends when it wants word boxes), and a server that measures words returns a box per word. Those boxes become `TextItem.words` when word boxes are on (`emit_word_boxes`). Without them, LiteParse estimates each word's box from its share of the line's characters. The option is off by default and has no CLI flag.
+
 ### Parallel OCR workers
 
 LiteParse OCRs multiple pages in parallel. By default, it uses one fewer worker than your CPU core count. Override this with:
