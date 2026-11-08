@@ -1177,6 +1177,61 @@ pub async fn recognize_rasters(
     pool.finish().await
 }
 
+/// Word boxes for one OCR result, in the same space as its item box.
+///
+/// Word-level engines (Tesseract's `RIL_WORD`) return one word per result, which
+/// keeps the item's own box. Line-level engines (PaddleOCR-style HTTP servers)
+/// return a whole line: each whitespace-separated word then gets the slice of
+/// the line box at its character offsets, so a line of `n` characters gives
+/// each character `width / n`. Proportional fonts make a slice a few percent
+/// off the ink, which still keeps every word inside its line and in order.
+/// Only upright lines are split; a rotated line keeps one box.
+fn ocr_word_boxes(
+    text: &str,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    rotation: f32,
+) -> Vec<WordBox> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut start = None;
+    for (i, c) in chars.iter().enumerate() {
+        match (c.is_whitespace(), start) {
+            (false, None) => start = Some(i),
+            (true, Some(s)) => {
+                spans.push((s, i));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        spans.push((s, chars.len()));
+    }
+    if spans.len() < 2 || rotation != 0.0 {
+        return vec![WordBox {
+            text: text.to_string(),
+            x,
+            y,
+            width,
+            height,
+        }];
+    }
+    let char_width = width / chars.len() as f32;
+    spans
+        .into_iter()
+        .map(|(s, e)| WordBox {
+            text: chars[s..e].iter().collect(),
+            x: x + s as f32 * char_width,
+            y,
+            width: (e - s) as f32 * char_width,
+            height,
+        })
+        .collect()
+}
+
 /// Merge recognition outcomes into `pages`, in place. Pure: needs neither the
 /// document nor the rasters, only the outcomes [`recognize_rasters`] produced
 /// (or an equivalent a caller built from its own OCR engine's output).
@@ -1191,12 +1246,11 @@ pub async fn recognize_rasters(
 /// subset of pages or hand-built outcomes safely.
 ///
 /// `emit_word_boxes` must match what the extraction stage used
-/// (`LiteParseConfig::effective_emit_word_boxes`). An engine reports one
-/// [`OcrResult`] per word, so each surviving result becomes a one-word
-/// [`TextItem`]; the item's own word box is attached here, which is what lets
-/// the projection pass merge neighbouring OCR items into a run that still
-/// carries per-word boxes. When `false`, no box is attached, matching the
-/// zero-allocation promise the config makes for native text.
+/// (`LiteParseConfig::effective_emit_word_boxes`). Each surviving result
+/// becomes one [`TextItem`] carrying its word boxes (see `ocr_word_boxes`),
+/// which is what lets the projection pass merge neighbouring OCR items into a
+/// run that still carries per-word boxes. When `false`, no box is attached,
+/// matching the zero-allocation promise the config makes for native text.
 pub fn merge_ocr_results(
     pages: &mut [Page],
     outcomes: Vec<PageOcrOutcome>,
@@ -1462,17 +1516,8 @@ pub fn merge_ocr_results(
                 poly_h.filter(|h| *h > 0.0).map_or(ocr_h, |h| h.min(ocr_h))
             };
 
-            // The engine already segmented this result as a single word, so
-            // its box is the item's box. The clone only happens when the
-            // caller asked for word boxes.
             let words = if emit_word_boxes {
-                vec![WordBox {
-                    text: cleaned.clone(),
-                    x: ocr_x,
-                    y: ocr_y,
-                    width: ocr_w,
-                    height: ocr_h,
-                }]
+                ocr_word_boxes(&cleaned, ocr_x, ocr_y, ocr_w, ocr_h, rotation)
             } else {
                 Vec::new()
             };
@@ -3501,6 +3546,53 @@ mod tests {
         merge_ocr_results(&mut disabled, vec![outcome(1)], false, false).unwrap();
         assert_eq!(disabled[0].text_items.len(), 2);
         assert!(disabled[0].text_items.iter().all(|i| i.words.is_empty()));
+    }
+
+    /// A line-level engine returns a whole line per result. Each word gets the
+    /// slice of the line box at its character offsets, so callers can ground a
+    /// single word on a scan instead of the whole line.
+    #[test]
+    fn test_ocr_line_results_split_into_word_boxes() {
+        let line = OcrResult {
+            text: "Invoice total 42.50".into(),
+            bbox: [10.0, 20.0, 200.0, 30.0],
+            confidence: 0.9,
+            polygon: None,
+        };
+        let outcome = PageOcrOutcome {
+            page_number: 1,
+            dpi: 72.0,
+            has_native_text: false,
+            image_rects: Vec::new(),
+            replace_native: false,
+            results: vec![line],
+            error: None,
+        };
+        let mut pages = vec![make_blank_page(1)];
+        merge_ocr_results(&mut pages, vec![outcome], false, true).unwrap();
+        let item = &pages[0].text_items[0];
+        let words: Vec<(&str, f32, f32)> = item
+            .words
+            .iter()
+            .map(|w| (w.text.as_str(), w.x, w.width))
+            .collect();
+        // 19 characters over 190 points: 10 points each.
+        assert_eq!(
+            words,
+            vec![
+                ("Invoice", 10.0, 70.0),
+                ("total", 90.0, 50.0),
+                ("42.50", 150.0, 50.0)
+            ]
+        );
+        assert!(
+            item.words
+                .iter()
+                .all(|w| (w.y, w.height) == (item.y, item.height))
+        );
+
+        // A rotated line keeps one box: its reading axis is not the x axis.
+        assert_eq!(ocr_word_boxes("a b", 0.0, 0.0, 30.0, 10.0, 90.0).len(), 1);
     }
 
     /// A scanned figure on a page with a typed footer keeps all its OCR text,
