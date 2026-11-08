@@ -1599,3 +1599,48 @@ async fn test_rotated_map_labels_keep_layout_canvas_bounded() {
         page.page_height
     );
 }
+
+/// `max_long_edge` picks a dpi per page in one render call: pages over the cap
+/// render with their long edge at exactly the cap, smaller pages keep the
+/// configured dpi, and `None` leaves every page at the configured dpi.
+#[test]
+#[serial]
+fn test_render_for_ocr_max_long_edge_fits_each_page() {
+    use liteparse::stages::{self, Library, OcrRenderOptions};
+
+    let lib = Library::init();
+    let input = PdfInput::Bytes(blank_pdf(&[(612, 792), (960, 540), (200, 200)]));
+    let document = stages::open(&lib, &input, None, &[]).unwrap();
+    let parser = LiteParse::new(LiteParseConfig::default());
+    let pages = stages::extract(&document, &parser.extract_request(None, usize::MAX))
+        .unwrap()
+        .pages;
+    let render = |max_long_edge, max_rasters| {
+        let options = OcrRenderOptions {
+            dpi: 300.0,
+            max_long_edge,
+            max_rasters,
+            selection: Some([1, 2, 3].into_iter().collect()),
+            ..OcrRenderOptions::default()
+        };
+        stages::render_for_ocr(&document, &pages, 0, &options).unwrap()
+    };
+
+    let (capped, next) = render(Some(1600), 0);
+    assert_eq!(next, 3);
+    let sizes: Vec<_> = capped.iter().map(|r| (r.width, r.height)).collect();
+    assert_eq!(sizes, [(1236, 1600), (1600, 900), (833, 833)]);
+    assert!((capped[0].dpi - 1600.0 * 72.0 / 792.0).abs() < 1e-3);
+    assert!((capped[1].dpi - 120.0).abs() < 1e-3);
+    assert_eq!(capped[2].dpi, 300.0);
+
+    // Bounded rounds still resume where the cap-fitted round stopped.
+    let (first_round, next) = render(Some(1600), 2);
+    assert_eq!((first_round.len(), next), (2, 2));
+
+    for off in [None, Some(0)] {
+        let (uncapped, _) = render(off, 0);
+        assert!(uncapped.iter().all(|r| r.dpi == 300.0), "{off:?}");
+        assert_eq!((uncapped[0].width, uncapped[0].height), (2550, 3300));
+    }
+}
