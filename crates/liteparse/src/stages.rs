@@ -711,34 +711,21 @@ mod tests {
         assert_eq!(render_document(&[]), "");
     }
 
-    /// Markdown of a one-page scan whose OCR items are `(text, x, y, rotation)`,
-    /// under three horizontal body lines. A sideways item's box stands upright:
-    /// 10pt wide and 5pt tall per character.
+    /// Markdown of a one-page scan: three horizontal body lines, then the OCR
+    /// items `row` as `(text, x, y, rotation)`. A sideways item's box stands
+    /// upright: 10pt wide and 5pt tall per character.
     fn ocr_markdown(row: &[(&str, f32, f32, f32)]) -> String {
         let body = [
-            (
-                "Register of changes for the period ending May",
-                50.0,
-                100.0,
-                0.0,
-            ),
-            (
-                "Prepared by the records office for its review",
-                50.0,
-                120.0,
-                0.0,
-            ),
-            (
-                "All amounts are in dollars before any tax is due",
-                50.0,
-                140.0,
-                0.0,
-            ),
+            "Register of changes for the period ending May",
+            "Prepared by the records office for its review",
+            "All amounts are in dollars before any tax is due",
         ];
         let text_items = body
             .iter()
-            .chain(row)
-            .map(|&(text, x, y, rotation)| {
+            .zip([100.0, 120.0, 140.0])
+            .map(|(&text, y)| (text, 50.0, y, 0.0))
+            .chain(row.iter().copied())
+            .map(|(text, x, y, rotation)| {
                 let length = text.chars().count() as f32 * 5.0;
                 let (width, height) = if rotation == 0.0 {
                     (length, 10.0)
