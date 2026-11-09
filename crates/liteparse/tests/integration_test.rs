@@ -736,6 +736,7 @@ impl liteparse::ocr::OcrEngine for ProbeEngine {
                 bbox: [10.0, 10.0, 200.0, 40.0],
                 confidence: 0.99,
                 polygon: None,
+                rotation: None,
                 words: Vec::new(),
             }])
         })
@@ -1474,6 +1475,7 @@ impl liteparse::ocr::OcrEngine for FailingWidthsEngine {
                 bbox: [4.0, 4.0, 100.0, 24.0],
                 confidence: 0.99,
                 polygon: None,
+                rotation: None,
                 words: Vec::new(),
             }])
         })

@@ -1457,13 +1457,14 @@ pub fn merge_ocr_results(
                 continue;
             }
 
-            // Prefer the screen-space axis-aligned bbox derived from the polygon
-            // (when present) so rotated detections carry a tight upright bbox.
-            // The polygon also lets us recover an explicit rotation angle so the
-            // projector can route rotated sidebar text through its rotation
-            // reading-order handler instead of mistaking it for body text.
+            // The polygon's bounds give a rotated detection a tight upright box. The
+            // rotation, the engine's own angle or else the polygon's point order, sends
+            // rotated sidebar text through the projector's rotation reading-order handler.
             let (ocr_x, ocr_y, ocr_w, ocr_h) = page_bounds(r.bbox, r.polygon);
-            let rotation = r.polygon.map_or(0.0, |p| polygon_rotation_deg(&p));
+            let rotation = match r.rotation {
+                Some(deg) => snap_right_angle(deg),
+                None => r.polygon.map_or(0.0, |p| polygon_rotation_deg(&p)),
+            };
 
             // On pages that already have native text, OCR only enriches:
             // a bar-shaped single glyph is a table border / rule misread
@@ -2379,9 +2380,12 @@ fn polygon_rotation_deg(poly: &[[f32; 2]; 4]) -> f32 {
     }
     let reading = if len0 >= len1 { e0 } else { e1 };
     // atan2 with screen-down y; negate to get the conventional CCW angle.
-    let angle_ccw = -reading[1].atan2(reading[0]).to_degrees();
-    let normalized = angle_ccw.rem_euclid(360.0);
-    ((normalized / 90.0).round() as i32 * 90).rem_euclid(360) as f32
+    snap_right_angle(-reading[1].atan2(reading[0]).to_degrees())
+}
+
+/// Snap a counter-clockwise angle in degrees to the nearest of 0, 90, 180 and 270.
+fn snap_right_angle(deg: f32) -> f32 {
+    ((deg.rem_euclid(360.0) / 90.0).round() as i32 * 90).rem_euclid(360) as f32
 }
 
 /// Check if an OCR bounding box overlaps with any existing text item.
@@ -3580,6 +3584,7 @@ mod tests {
                     bbox: [10.0, 20.0, 60.0, 30.0],
                     confidence: 0.9,
                     polygon: None,
+                    rotation: None,
                     words: Vec::new(),
                 },
                 OcrResult {
@@ -3587,6 +3592,7 @@ mod tests {
                     bbox: [62.0, 20.0, 110.0, 30.0],
                     confidence: 0.9,
                     polygon: None,
+                    rotation: None,
                     words: Vec::new(),
                 },
             ],
@@ -3630,6 +3636,7 @@ mod tests {
             bbox: [10.0, 20.0, 200.0, 30.0],
             confidence: 0.9,
             polygon: None,
+            rotation: None,
             words: Vec::new(),
         };
         let outcome = PageOcrOutcome {
@@ -3681,6 +3688,7 @@ mod tests {
             confidence: 0.9,
             polygon: None,
             words,
+            rotation: None,
         };
         let measured = vec![
             OcrWord {
@@ -3756,6 +3764,7 @@ mod tests {
             confidence: 0.9,
             // Reads bottom to top: 90° counter-clockwise.
             polygon: Some([[10.0, 200.0], [10.0, 20.0], [20.0, 20.0], [20.0, 200.0]]),
+            rotation: None,
             words: vec![word("Invoice", 120.0, 200.0), word("total", 60.0, 110.0)],
         };
         let outcome = PageOcrOutcome {
@@ -3785,6 +3794,64 @@ mod tests {
         );
     }
 
+    /// The engine's angle decides a line's rotation over its quad's point order.
+    /// A line read turned 180° keeps the quad's bounds and its words in reading
+    /// order, right to left on screen. An upright line whose quad starts at the
+    /// bottom right is split into word boxes like any upright line.
+    #[test]
+    fn test_engine_rotation_overrides_polygon_order() {
+        let word = |text: &str, x1: f32, x2: f32| OcrWord {
+            text: text.into(),
+            bbox: [x1, 20.0, x2, 40.0],
+            polygon: None,
+        };
+        let merged = |polygon: [[f32; 2]; 4], words: Vec<OcrWord>, rotation: f32| {
+            let line = OcrResult {
+                text: "Invoice total".into(),
+                bbox: [10.0, 20.0, 210.0, 40.0],
+                confidence: 0.9,
+                polygon: Some(polygon),
+                words,
+                rotation: Some(rotation),
+            };
+            let outcome = PageOcrOutcome {
+                page_number: 1,
+                dpi: 144.0,
+                has_native_text: false,
+                image_rects: Vec::new(),
+                replace_native: false,
+                results: vec![line],
+                error: None,
+            };
+            let mut pages = vec![make_blank_page(1)];
+            merge_ocr_results(&mut pages, vec![outcome], false, true).unwrap();
+            pages.remove(0).text_items.remove(0)
+        };
+        let boxes = |item: &TextItem| -> Vec<(String, f32, f32)> {
+            item.words
+                .iter()
+                .map(|w| (w.text.clone(), w.x, w.width))
+                .collect()
+        };
+        // Alone, screen order reads as upright and the reversed quad as 180°.
+        let screen = [[10.0, 20.0], [210.0, 20.0], [210.0, 40.0], [10.0, 40.0]];
+        let reversed = [[210.0, 40.0], [10.0, 40.0], [10.0, 20.0], [210.0, 20.0]];
+        let measured = vec![word("Invoice", 110.0, 210.0), word("total", 10.0, 100.0)];
+        let turned = merged(screen, measured, 180.0);
+        assert_eq!(turned.rotation, 180.0);
+        assert_eq!(
+            (turned.x, turned.y, turned.width, turned.height),
+            (5.0, 10.0, 100.0, 10.0)
+        );
+        assert_eq!(
+            boxes(&turned),
+            vec![("Invoice".into(), 55.0, 50.0), ("total".into(), 5.0, 45.0)]
+        );
+        let upright = merged(reversed, Vec::new(), 0.0);
+        assert_eq!(upright.rotation, 0.0);
+        assert_eq!(boxes(&upright).len(), 2);
+    }
+
     /// A scanned figure on a page with a typed footer keeps all its OCR text,
     /// even when most recognised words are short ("et", "de", "la") or noise.
     /// A chart filter that dropped such figures wholesale lost the body of
@@ -3805,6 +3872,7 @@ mod tests {
             bbox: [x, y, x + 8.0, y + 4.0],
             confidence: 0.9,
             polygon: None,
+            rotation: None,
             words: Vec::new(),
         };
         let results = vec![

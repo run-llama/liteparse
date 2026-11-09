@@ -74,6 +74,7 @@ impl OcrEngine for MockOcr {
                     bbox: [10.0, 10.0, 260.0, 40.0],
                     confidence: 0.99,
                     polygon: None,
+                    rotation: None,
                     words: Vec::new(),
                 },
                 OcrResult {
@@ -86,6 +87,7 @@ impl OcrEngine for MockOcr {
                         [300.0, 400.0],
                         [300.0, 100.0],
                     ]),
+                    rotation: None,
                     words: Vec::new(),
                 },
             ])
@@ -705,6 +707,7 @@ fn merge_ocr_rejects_outcome_for_unknown_page() {
             bbox: [0.0, 0.0, 10.0, 10.0],
             confidence: 1.0,
             polygon: None,
+            rotation: None,
             words: Vec::new(),
         }],
         error: None,

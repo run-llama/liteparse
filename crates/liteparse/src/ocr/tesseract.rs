@@ -135,6 +135,7 @@ impl OcrEngine for TesseractOcrEngine {
                             bbox: [left as f32, top as f32, right as f32, bottom as f32],
                             confidence: conf,
                             polygon: None,
+                            rotation: None,
                             words: Vec::new(),
                         });
                     }

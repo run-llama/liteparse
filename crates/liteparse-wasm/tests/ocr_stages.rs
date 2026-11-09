@@ -77,6 +77,7 @@ impl OcrEngine for ControlledEngine {
                 bbox: [0.0, 0.0, 1.0, 1.0],
                 confidence: 0.99,
                 polygon: None,
+                rotation: None,
                 words: Vec::new(),
             }]))
         }))

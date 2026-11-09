@@ -77,6 +77,8 @@ Your server should map these to whatever format your underlying OCR engine expec
 
 A server that returns the `{"result": [[quad, text, score], ...]}` shape may send the measured words as a top-level `words` list parallel to `result`: `words[i]` is a list of `{"bbox": [[x, y] ×4], "text"}` for `result[i]`. LiteParse drops all of them when the two lists differ in length. Each word's box is the bounds of its quad, taken after LiteParse deskews the page.
 
+The same shape may also send `result_meta`, a list parallel to `result`: `result_meta[i]` is `{"r": degrees}`, the rotation of `result[i]` clockwise on screen in (-180, 180], or `{}` when the line is upright. LiteParse takes each line's rotation from it, snapped to the nearest right angle, and drops the whole list when its length differs from `result`. Without `result_meta`, LiteParse infers rotation from the order of the quad's points.
+
 ## Example
 
 ### Request

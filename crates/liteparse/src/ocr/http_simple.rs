@@ -33,6 +33,7 @@ impl HttpOcrResponseItem {
             confidence: self.confidence,
             polygon: self.polygon,
             words: self.words,
+            rotation: None,
         }
     }
 }
@@ -51,6 +52,15 @@ struct ProdOcrWord {
     text: String,
 }
 
+/// One entry of the prod OCR worker's `result_meta` (`return_bbox_angles`):
+/// the line's rotation in degrees clockwise on screen, in (-180, 180]. The
+/// server leaves `r` out under 0.5 degrees.
+#[derive(Debug, Deserialize)]
+struct ProdOcrMeta {
+    #[serde(default)]
+    r: Option<f32>,
+}
+
 /// Axis-aligned `[x1, y1, x2, y2]` from a polygon's min/max extents.
 fn polygon_bounds(poly: &[[f32; 2]]) -> [f32; 4] {
     poly.iter().fold(
@@ -65,7 +75,7 @@ fn polygon_bounds(poly: &[[f32; 2]]) -> [f32; 4] {
 }
 
 impl ProdOcrItem {
-    fn into_ocr_result(self, words: Vec<ProdOcrWord>) -> OcrResult {
+    fn into_ocr_result(self, words: Vec<ProdOcrWord>, rotation: Option<f32>) -> OcrResult {
         let ProdOcrItem(poly, text, confidence) = self;
         let [min_x, min_y, max_x, max_y] = polygon_bounds(&poly);
         // Forward the raw polygon only when it's exactly 4 points, so the
@@ -90,6 +100,7 @@ impl ProdOcrItem {
                     text: w.text,
                 })
                 .collect(),
+            rotation,
         }
     }
 }
@@ -105,11 +116,14 @@ enum HttpOcrResponse {
         results: Vec<HttpOcrResponseItem>,
     },
     /// `words[i]` holds the measured words of `result[i]` when the request set
-    /// `return_word_boxes`.
+    /// `return_word_boxes`; `result_meta[i]` its rotation, when the request
+    /// also set `return_bbox_angles` and some line is turned.
     Prod {
         result: Vec<ProdOcrItem>,
         #[serde(default)]
         words: Vec<Vec<ProdOcrWord>>,
+        #[serde(default)]
+        result_meta: Vec<ProdOcrMeta>,
     },
 }
 
@@ -119,15 +133,26 @@ impl HttpOcrResponse {
             HttpOcrResponse::Standard { results } => {
                 results.into_iter().map(|i| i.into_ocr_result()).collect()
             }
-            HttpOcrResponse::Prod { result, mut words } => {
-                // Words that do not pair one list per line cannot be attributed.
+            HttpOcrResponse::Prod {
+                result,
+                mut words,
+                mut result_meta,
+            } => {
+                // Words or angles that do not pair one per line cannot be attributed.
                 if words.len() != result.len() {
                     words.clear();
                 }
+                if result_meta.len() != result.len() {
+                    result_meta.clear();
+                }
                 let mut words = words.into_iter();
+                // Clockwise on screen to counter-clockwise; a missing `r` is upright.
+                let mut angles = result_meta
+                    .into_iter()
+                    .map(|m| (-m.r.unwrap_or(0.0)).rem_euclid(360.0));
                 result
                     .into_iter()
-                    .map(|i| i.into_ocr_result(words.next().unwrap_or_default()))
+                    .map(|i| i.into_ocr_result(words.next().unwrap_or_default(), angles.next()))
                     .collect()
             }
         }
@@ -601,6 +626,27 @@ mod tests {
           "words":[[{"bbox":[[0,20],[10,20],[10,30],[0,30]],"text":"b","confidence":0.9}]]}"#;
         let parsed: HttpOcrResponse = serde_json::from_str(raw).unwrap();
         assert!(parsed.into_results().iter().all(|r| r.words.is_empty()));
+    }
+
+    /// `result_meta[i].r` (clockwise on screen, left out when upright) becomes
+    /// line `i`'s counter-clockwise rotation. A list that does not pair one per
+    /// line, or no list at all, leaves every line to the polygon guess.
+    #[test]
+    fn test_prod_result_meta_sets_line_rotation() {
+        let lines = r#"[[[[0,0],[90,0],[90,10],[0,10]],"a",0.9],
+            [[[0,20],[90,20],[90,30],[0,30]],"b",0.9],
+            [[[0,40],[90,40],[90,50],[0,50]],"c",0.9]]"#;
+        let rotations = |meta: &str| -> Vec<Option<f32>> {
+            let raw = format!(r#"{{"result":{lines}{meta}}}"#);
+            let parsed: HttpOcrResponse = serde_json::from_str(&raw).unwrap();
+            parsed.into_results().iter().map(|r| r.rotation).collect()
+        };
+        assert_eq!(
+            rotations(r#","result_meta":[{"r":180},{},{"r":90}]"#),
+            vec![Some(180.0), Some(0.0), Some(270.0)]
+        );
+        assert_eq!(rotations(r#","result_meta":[{"r":180}]"#), vec![None; 3]);
+        assert_eq!(rotations(""), vec![None; 3]);
     }
 
     /// Serve one OCR request on a local socket and return the request bytes.

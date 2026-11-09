@@ -28,6 +28,11 @@ pub struct OcrResult {
     /// line-level server not asked for them); merging then estimates them.
     #[serde(default)]
     pub words: Vec<OcrWord>,
+    /// The line's rotation as the engine measured it, in degrees
+    /// counter-clockwise in [0, 360). None when the engine sent no angle;
+    /// merging then infers it from the polygon's point order.
+    #[serde(default)]
+    pub rotation: Option<f32>,
 }
 
 /// One word an OCR engine measured inside a line-level result.
@@ -132,6 +137,7 @@ mod tests {
                     bbox: [0.0, 0.0, 10.0, 10.0],
                     confidence: 0.9,
                     polygon: None,
+                    rotation: None,
                     words: Vec::new(),
                 }])
             })
