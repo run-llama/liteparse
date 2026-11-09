@@ -1073,11 +1073,28 @@ pub(crate) fn render_pages_for_ocr_capped(
             let width = bitmap.width() as u32;
             let height = bitmap.height() as u32;
             // Grayscale or RGB per the engine; see `OcrEngine::prefers_grayscale`.
-            let pixels = if grayscale {
+            let mut pixels = if grayscale {
                 bitmap.to_luma()
             } else {
                 bitmap.to_rgb()
             };
+            // A page whose native text the merge keeps as is: blank that text out of the raster.
+            // The merge drops every OCR line overlapping kept native text, so reading those
+            // lines was wasted; OCR now only sees what the text layer doesn't cover (figures,
+            // scanned inserts, outlined text). Pages where OCR replaces native text (garbled
+            // fonts, an invisible OCR layer) keep the whole raster.
+            if has_native_text
+                && !replace_native
+                && matches!(garbled_scope(page), GarbledScope::None)
+            {
+                mask_native_text(
+                    &mut pixels,
+                    width,
+                    height,
+                    page,
+                    if grayscale { 1 } else { 3 },
+                );
+            }
 
             let image_rects = if has_native_text {
                 let pw = page.page_width;
@@ -1677,6 +1694,36 @@ fn native_text_length(page: &Page) -> usize {
 /// Unicode mapping failed outright (Type3 fonts with no ToUnicode — the text
 /// is a char-code fallback and the bbox comes from deceptive declared
 /// metrics), or its content looks substitution-cipher garbled.
+/// Paint the boxes of the native text items the merge keeps (`!is_unusable_native`) white in an
+/// OCR raster of `page` (`channels` 1 or 3, tightly packed), widened by `MASK_MARGIN_PT`.
+fn mask_native_text(pixels: &mut [u8], width: u32, height: u32, page: &Page, channels: usize) {
+    const MASK_MARGIN_PT: f32 = 1.0;
+    if page.page_width <= 0.0 || page.page_height <= 0.0 {
+        return;
+    }
+    let (w, h) = (width as usize, height as usize);
+    let (sx, sy) = (
+        width as f32 / page.page_width,
+        height as f32 / page.page_height,
+    );
+    for item in page
+        .text_items
+        .iter()
+        .filter(|i| !is_unusable_native(i) && !i.text.trim().is_empty())
+    {
+        let x0 = ((item.x - MASK_MARGIN_PT) * sx).floor().max(0.0) as usize;
+        let y0 = ((item.y - MASK_MARGIN_PT) * sy).floor().max(0.0) as usize;
+        let x1 = (((item.x + item.width + MASK_MARGIN_PT) * sx).ceil() as usize).min(w);
+        let y1 = (((item.y + item.height + MASK_MARGIN_PT) * sy).ceil() as usize).min(h);
+        if x0 >= x1 || y0 >= y1 {
+            continue;
+        }
+        for y in y0..y1 {
+            pixels[(y * w + x0) * channels..(y * w + x1) * channels].fill(255);
+        }
+    }
+}
+
 fn is_unusable_native(item: &TextItem) -> bool {
     item.has_unicode_map_error || is_likely_garbled(&item.text)
 }

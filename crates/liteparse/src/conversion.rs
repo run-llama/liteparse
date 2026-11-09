@@ -462,8 +462,14 @@ fn separate_rgb_and_alpha_from_rgba(rgba: &[u8]) -> (Vec<u8>, Vec<u8>) {
 /// photographic data and only ≈3% larger; deflate dominates end-to-end
 /// time for any lossily-compressed input (JPEG-except-passthrough, WebP)
 /// where the pixel stream is high-entropy.
+/// Wrap pixels in a zlib stream for a `/FlateDecode` image. Stored, not compressed: the PDF is a
+/// temporary file rendered right away, and compressing a page-sized raster cost more than the
+/// rest of the conversion (and PDFium then had to inflate it again).
 fn deflate(data: &[u8]) -> io::Result<Vec<u8>> {
-    let mut encoder = ZlibEncoder::new(Vec::with_capacity(data.len() / 4), Compression::new(3));
+    let mut encoder = ZlibEncoder::new(
+        Vec::with_capacity(data.len() + data.len() / 64 + 64),
+        Compression::none(),
+    );
     encoder.write_all(data)?;
     encoder.finish()
 }
@@ -684,8 +690,77 @@ enum ImagePayload {
     /// into a `/DCTDecode` XObject. This is what ImageMagick does for JPEG
     /// input and it avoids a full decode + zlib re-encode round-trip.
     Jpeg { bytes: Vec<u8>, components: u8 },
-    /// Decoded raster, to be zlib-compressed and embedded as `/FlateDecode`.
+    /// PNG passthrough: the PNG's compressed image data, embedded as `/FlateDecode` with the PNG
+    /// predictors (`/Predictor 15`), which decode it exactly as a PNG decoder would.
+    Png(PngStream),
+    /// Decoded raster, embedded as `/FlateDecode`.
     Flate(PixelData),
+}
+
+struct PngStream {
+    idat: Vec<u8>,
+    /// `/DeviceGray` / `/DeviceRGB`, or an `/Indexed` palette colour space
+    color_space: String,
+    colors: u8,
+}
+
+/// The PNG as a passthrough image stream, when PDF decodes it to the same pixels as the
+/// `image` decoder: 8-bit, non-interlaced, grey / RGB / palette, no transparency (`tRNS`
+/// would need a soft mask). `None` for anything else, which is decoded instead.
+fn png_stream(data: &[u8]) -> Option<(u32, u32, PngStream)> {
+    const SIG: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if !data.starts_with(SIG) {
+        return None;
+    }
+    let (mut i, mut ihdr, mut palette, mut idat) = (SIG.len(), None, None, Vec::new());
+    while i + 12 <= data.len() {
+        let len = u32::from_be_bytes(data[i..i + 4].try_into().ok()?) as usize;
+        let kind = &data[i + 4..i + 8];
+        let body = data.get(i + 8..i + 8 + len)?;
+        match kind {
+            b"IHDR" if len == 13 => ihdr = Some(body.to_vec()),
+            b"PLTE" => palette = Some(body.to_vec()),
+            b"tRNS" => return None,
+            b"IDAT" => idat.extend_from_slice(body),
+            b"IEND" => break,
+            _ => {}
+        }
+        i += 12 + len;
+    }
+    let h = ihdr?;
+    let (width, height) = (
+        u32::from_be_bytes(h[0..4].try_into().ok()?),
+        u32::from_be_bytes(h[4..8].try_into().ok()?),
+    );
+    let (bit_depth, color_type, interlace) = (h[8], h[9], h[12]);
+    if bit_depth != 8 || interlace != 0 || idat.is_empty() || width == 0 || height == 0 {
+        return None;
+    }
+    let (color_space, colors) = match color_type {
+        0 => ("/DeviceGray".to_string(), 1),
+        2 => ("/DeviceRGB".to_string(), 3),
+        3 => {
+            let pal = palette?;
+            if pal.is_empty() || pal.len() % 3 != 0 {
+                return None;
+            }
+            let hex: String = pal.iter().map(|b| format!("{b:02x}")).collect();
+            (
+                format!("[/Indexed /DeviceRGB {} <{hex}>]", pal.len() / 3 - 1),
+                1,
+            )
+        }
+        _ => return None,
+    };
+    Some((
+        width,
+        height,
+        PngStream {
+            idat,
+            color_space,
+            colors,
+        },
+    ))
 }
 
 /// Decode / analyse the input file and produce an `EmbeddedImage`.
@@ -738,6 +813,18 @@ fn prepare_image(file_path: &str, data: Vec<u8>) -> Result<EmbeddedImage, LitePa
     // we actually need. Skipping the alpha split when the source has no
     // alpha halves the pixel data we hand to zlib and drops the `/SMask`
     // XObject entirely.
+    if let Some((width, height, png)) = png_stream(&data) {
+        let (dpi_x, dpi_y) =
+            read_image_dpi(&data).unwrap_or((DEFAULT_IMAGE_DPI, DEFAULT_IMAGE_DPI));
+        return Ok(EmbeddedImage {
+            width,
+            height,
+            dpi_x,
+            dpi_y,
+            payload: ImagePayload::Png(png),
+        });
+    }
+
     let img = image::load_from_memory(&data)?;
     let (width, height) = img.dimensions();
     let (dpi_x, dpi_y) = read_image_dpi(&data).unwrap_or((DEFAULT_IMAGE_DPI, DEFAULT_IMAGE_DPI));
@@ -807,6 +894,23 @@ pub async fn convert_image_to_pdf(
             )?;
             writeln!(pdf_data, "stream")?;
             pdf_data.extend(bytes);
+            writeln!(pdf_data, "\nendstream\nendobj")?;
+            None
+        }
+        ImagePayload::Png(png) => {
+            writeln!(
+                pdf_data,
+                "{} 0 obj\n<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace {} /BitsPerComponent 8 /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors {} /BitsPerComponent 8 /Columns {} >> /Length {} >>",
+                image_object_id,
+                width,
+                height,
+                png.color_space,
+                png.colors,
+                width,
+                png.idat.len()
+            )?;
+            writeln!(pdf_data, "stream")?;
+            pdf_data.extend(&png.idat);
             writeln!(pdf_data, "\nendstream\nendobj")?;
             None
         }
@@ -1230,6 +1334,36 @@ mod tests {
         let h: f32 = caps[2].parse().unwrap();
         assert!((w - 144.0).abs() < 0.5, "expected ≈144 pt, got {w}");
         assert!((h - 72.0).abs() < 0.5, "expected ≈72 pt, got {h}");
+    }
+
+    #[test]
+    fn png_stream_passes_through_plain_8bit_png_only() {
+        use image::{ImageBuffer, ImageEncoder, Luma, Rgb, Rgba, codecs::png::PngEncoder};
+        let enc = |buf: &[u8], w: u32, h: u32, t: image::ExtendedColorType| {
+            let mut out = Vec::new();
+            PngEncoder::new(&mut out).write_image(buf, w, h, t).unwrap();
+            out
+        };
+        let rgb: ImageBuffer<Rgb<u8>, _> =
+            ImageBuffer::from_fn(7, 5, |x, y| Rgb([x as u8, y as u8, 9]));
+        let (w, h, s) =
+            png_stream(&enc(rgb.as_raw(), 7, 5, image::ExtendedColorType::Rgb8)).unwrap();
+        assert_eq!(
+            (w, h, s.colors, s.color_space.as_str()),
+            (7, 5, 3, "/DeviceRGB")
+        );
+        let grey: ImageBuffer<Luma<u8>, _> =
+            ImageBuffer::from_fn(3, 3, |x, _| Luma([x as u8 * 80]));
+        let (_, _, s) =
+            png_stream(&enc(grey.as_raw(), 3, 3, image::ExtendedColorType::L8)).unwrap();
+        assert_eq!((s.colors, s.color_space.as_str()), (1, "/DeviceGray"));
+        // alpha needs a soft mask: decoded instead
+        let rgba: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_fn(2, 2, |_, _| Rgba([1, 2, 3, 4]));
+        assert!(png_stream(&enc(rgba.as_raw(), 2, 2, image::ExtendedColorType::Rgba8)).is_none());
+        // 16-bit samples would be rounded differently: decoded instead
+        let wide = vec![0u8; 2 * 2 * 3 * 2];
+        assert!(png_stream(&enc(&wide, 2, 2, image::ExtendedColorType::Rgb16)).is_none());
+        assert!(png_stream(b"not a png").is_none());
     }
 
     #[tokio::test]
