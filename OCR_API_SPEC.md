@@ -27,7 +27,7 @@ POST /ocr
 | `dense_ocr_detection` | string | No | `true` runs denser text detection. |
 | `return_bbox_angles` | string | No | `true` returns each line and word as its rotated quad, with its angle. |
 
-LiteParse sends `correct_rotation` on every request: `false` for pages listed in `ocr_upright_pages` (pages the caller already turned upright) and `true` for every other page. It sends `return_word_boxes`, `dense_ocr_detection` and `return_bbox_angles` together, set to `true`, only when `ocr_word_boxes` is on, and otherwise leaves them out. Servers may ignore any of these fields.
+LiteParse sends `file` and `language`, plus every field in `ocr_request_fields` / `ocrRequestFields` as given, with the page's entry in `ocr_page_request_fields` / `ocrPageRequestFields` merged over them. A `language` entry replaces the default. LiteParse adds no other field, so `correct_rotation`, `return_word_boxes`, `dense_ocr_detection` and `return_bbox_angles` are sent only when the caller sets them. Servers may ignore any of these fields.
 
 ### Language Codes
 
@@ -75,9 +75,9 @@ Your server should map these to whatever format your underlying OCR engine expec
 | `results[].polygon` | [[number, number], ×4] | **Optional.** 4-point detection polygon ordered top-left → top-right → bottom-right → bottom-left **in the glyphs' upright reading frame**. Lets LiteParse recover rotation for vertical/sideways text. |
 | `results[].words` | array | **Optional.** Measured word boxes inside this result, in reading order, each `{"text", "bbox": [x1, y1, x2, y2], "polygon"?: [[x, y], ×4]}` in image pixels. LiteParse uses them as the result's word boxes when their count matches the words in `text`. Otherwise it estimates word boxes by splitting an upright line's box by character count. |
 
-A server that returns the `{"result": [[quad, text, score], ...]}` shape may send the measured words as a top-level `words` list parallel to `result`: `words[i]` is a list of `{"bbox": [[x, y] ×4], "text"}` for `result[i]`. LiteParse drops all of them when the two lists differ in length. Each word's box is the bounds of its quad, taken after LiteParse deskews the page.
+A server that returns the `{"result": [[quad, text, score], ...]}` shape may send the measured words as a top-level `words` list parallel to `result`: `words[i]` is a list of `{"bbox": [[x, y] ×4], "text", "r"?}` for `result[i]`, where `r` is the word's rotation in the same convention as `result_meta` below. LiteParse drops all of them when the two lists differ in length. Each word's box is the bounds of its quad, taken after LiteParse deskews the page.
 
-The same shape may also send `result_meta`, a list parallel to `result`: `result_meta[i]` is `{"r": degrees}`, the rotation of `result[i]` clockwise on screen in (-180, 180], or `{}` when the line is upright. LiteParse takes each line's rotation from it, snapped to the nearest right angle, and drops the whole list when its length differs from `result`. Without `result_meta`, LiteParse infers rotation from the order of the quad's points.
+The same shape may also send `result_meta`, a list parallel to `result`: `result_meta[i]` is `{"r": degrees}`, the rotation of `result[i]` clockwise on screen in (-180, 180], or `{}` when the line is upright. LiteParse takes each line's rotation from it, snapped to the nearest right angle, and drops the whole list when its length differs from `result`. A line with no `result_meta` angle takes the angle of its first measured word that has one. With neither, LiteParse infers rotation from the order of the quad's points.
 
 ## Example
 

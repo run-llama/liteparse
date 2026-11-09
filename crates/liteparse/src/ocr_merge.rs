@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::error::LiteParseError;
@@ -77,15 +77,11 @@ pub struct OcrRaster {
     /// ([`ComplexityReason::InvisibleTextLayer`]).
     #[serde(default)]
     pub replace_native: bool,
-    /// Ask the engine to detect and undo page rotation
-    /// (`OcrOptions::correct_rotation`). `false` for a page in
-    /// [`OcrRenderOptions::upright_pages`].
-    #[serde(default = "default_correct_rotation")]
-    pub correct_rotation: bool,
-}
-
-fn default_correct_rotation() -> bool {
-    true
+    /// Form fields for this page's OCR request: the base
+    /// [`OcrRenderOptions::request_fields`] with the page's own
+    /// [`OcrRenderOptions::page_request_fields`] merged over them.
+    #[serde(default)]
+    pub request_fields: BTreeMap<String, String>,
 }
 
 /// How [`render_pages_for_ocr`] picks and rasterizes pages.
@@ -115,10 +111,12 @@ pub struct OcrRenderOptions {
     /// `Some` renders exactly these pages, whatever the scoring says, so a
     /// caller with its own routing can override it.
     pub selection: Option<HashSet<u32>>,
-    /// Pages the caller already turned upright
-    /// (`LiteParseConfig::ocr_upright_pages`): their rasters ask the engine
-    /// not to correct rotation.
-    pub upright_pages: HashSet<u32>,
+    /// Form fields every raster's OCR request carries
+    /// (`LiteParseConfig::ocr_request_fields`).
+    pub request_fields: HashMap<String, String>,
+    /// Per-page form fields merged over `request_fields`, keyed by 1-based
+    /// page number (`LiteParseConfig::ocr_page_request_fields`).
+    pub page_request_fields: HashMap<u32, HashMap<String, String>>,
 }
 
 impl Default for OcrRenderOptions {
@@ -131,7 +129,8 @@ impl Default for OcrRenderOptions {
             continue_on_page_error: false,
             reflatten_pages: HashSet::new(),
             selection: None,
-            upright_pages: HashSet::new(),
+            request_fields: HashMap::new(),
+            page_request_fields: HashMap::new(),
         }
     }
 }
@@ -247,7 +246,7 @@ impl OcrTaskPool {
         let options = OcrOptions {
             language: self.language.clone(),
             dpi: raster.dpi,
-            correct_rotation: raster.correct_rotation,
+            request_fields: raster.request_fields.clone(),
         };
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1000,7 +999,8 @@ pub(crate) fn render_pages_for_ocr_capped(
         continue_on_page_error,
         reflatten_pages: flatten_page_numbers,
         selection,
-        upright_pages,
+        request_fields,
+        page_request_fields,
     } = options;
     let (dpi, grayscale, render_form_fields, continue_on_page_error) = (
         *dpi,
@@ -1125,7 +1125,17 @@ pub(crate) fn render_pages_for_ocr_capped(
                 has_native_text,
                 image_rects,
                 replace_native,
-                correct_rotation: !upright_pages.contains(&(page.page_number as u32)),
+                // Later entries win, so the page's own fields override the base.
+                request_fields: request_fields
+                    .iter()
+                    .chain(
+                        page_request_fields
+                            .get(&(page.page_number as u32))
+                            .into_iter()
+                            .flatten(),
+                    )
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
             }))
         })();
         match page_render {
@@ -1458,10 +1468,13 @@ pub fn merge_ocr_results(
             }
 
             // The polygon's bounds give a rotated detection a tight upright box. The
-            // rotation, the engine's own angle or else the polygon's point order, sends
-            // rotated sidebar text through the projector's rotation reading-order handler.
+            // rotation (the line's angle, a measured word's, or the polygon's point order)
+            // sends rotated sidebar text through the projector's rotation reading-order handler.
             let (ocr_x, ocr_y, ocr_w, ocr_h) = page_bounds(r.bbox, r.polygon);
-            let rotation = match r.rotation {
+            let rotation = match r
+                .rotation
+                .or_else(|| r.words.iter().find_map(|w| w.rotation))
+            {
                 Some(deg) => snap_right_angle(deg),
                 None => r.polygon.map_or(0.0, |p| polygon_rotation_deg(&p)),
             };
@@ -3270,7 +3283,7 @@ mod tests {
             has_native_text: false,
             image_rects: Vec::new(),
             replace_native: false,
-            correct_rotation: true,
+            request_fields: Default::default(),
             page_number: idx + 1,
             // 1x1 grayscale pixel; the engine never inspects it.
             pixels: vec![0u8],
@@ -3429,12 +3442,12 @@ mod tests {
         assert_eq!(got, want);
     }
 
-    /// Fails with the `correct_rotation` it was asked for as the message.
-    struct RotationEchoEngine;
+    /// Fails with the `correct_rotation` field it was given as the message.
+    struct FieldEchoEngine;
 
-    impl OcrEngine for RotationEchoEngine {
+    impl OcrEngine for FieldEchoEngine {
         fn name(&self) -> &str {
-            "rotation-echo"
+            "field-echo"
         }
 
         fn recognize<'a, 'b: 'a, 'c: 'a>(
@@ -3445,21 +3458,21 @@ mod tests {
             options: &'b OcrOptions,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = OcrTaskResult> + Send + 'a>>
         {
-            let rotate = options.correct_rotation;
-            Box::pin(async move { Err(format!("{rotate}").into()) })
+            let rotate = options.request_fields.get("correct_rotation").cloned();
+            Box::pin(async move { Err(rotate.unwrap_or_default().into()) })
         }
     }
 
-    // Each raster's `correct_rotation` reaches the engine call for that page.
+    // Each raster's request fields reach the engine call for that page.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_raster_correct_rotation_reaches_the_engine() {
+    async fn test_raster_request_fields_reach_the_engine() {
         let rendered = (0..2)
             .map(|i| OcrRaster {
-                correct_rotation: i == 0,
+                request_fields: BTreeMap::from([("correct_rotation".into(), (i == 0).to_string())]),
                 ..make_rendered(i)
             })
             .collect();
-        let outcomes = recognize_rasters(rendered, Arc::new(RotationEchoEngine), "eng", 2).await;
+        let outcomes = recognize_rasters(rendered, Arc::new(FieldEchoEngine), "eng", 2).await;
         let got: Vec<String> = outcomes.iter().map(|o| o.error.clone().unwrap()).collect();
         assert_eq!(got, ["true", "false"]);
     }
@@ -3695,16 +3708,19 @@ mod tests {
                 text: "Invoice".into(),
                 bbox: [11.0, 21.0, 60.0, 29.0],
                 polygon: None,
+                rotation: None,
             },
             OcrWord {
                 text: "total".into(),
                 bbox: [70.0, 21.0, 100.0, 29.0],
                 polygon: None,
+                rotation: None,
             },
             OcrWord {
                 text: "42.50".into(),
                 bbox: [160.0, 22.0, 199.0, 29.0],
                 polygon: None,
+                rotation: None,
             },
         ];
         let merged = |result: OcrResult| {
@@ -3757,6 +3773,7 @@ mod tests {
             text: text.into(),
             bbox: [10.0, top, 20.0, bottom],
             polygon: Some([[10.0, bottom], [10.0, top], [20.0, top], [20.0, bottom]]),
+            rotation: None,
         };
         let line = OcrResult {
             text: "Invoice total".into(),
@@ -3794,25 +3811,30 @@ mod tests {
         );
     }
 
-    /// The engine's angle decides a line's rotation over its quad's point order.
-    /// A line read turned 180° keeps the quad's bounds and its words in reading
-    /// order, right to left on screen. An upright line whose quad starts at the
-    /// bottom right is split into word boxes like any upright line.
+    /// The engine's angle decides a line's rotation over its quad's point order,
+    /// including the 90/270 choice on a vertical line. A line read at 180° keeps
+    /// its quad's bounds and its words in reading order, right to left on
+    /// screen. With no line angle, a measured word's angle stands in.
     #[test]
     fn test_engine_rotation_overrides_polygon_order() {
-        let word = |text: &str, x1: f32, x2: f32| OcrWord {
+        let word = |text: &str, x1: f32, x2: f32, rotation: Option<f32>| OcrWord {
             text: text.into(),
             bbox: [x1, 20.0, x2, 40.0],
             polygon: None,
+            rotation,
         };
-        let merged = |polygon: [[f32; 2]; 4], words: Vec<OcrWord>, rotation: f32| {
+        let merged = |polygon: [[f32; 2]; 4], words: Vec<OcrWord>, rotation: Option<f32>| {
+            let xs = polygon.map(|p| p[0]);
+            let ys = polygon.map(|p| p[1]);
+            let min = |v: [f32; 4]| v.into_iter().fold(f32::INFINITY, f32::min);
+            let max = |v: [f32; 4]| v.into_iter().fold(f32::NEG_INFINITY, f32::max);
             let line = OcrResult {
                 text: "Invoice total".into(),
-                bbox: [10.0, 20.0, 210.0, 40.0],
+                bbox: [min(xs), min(ys), max(xs), max(ys)],
                 confidence: 0.9,
                 polygon: Some(polygon),
                 words,
-                rotation: Some(rotation),
+                rotation,
             };
             let outcome = PageOcrOutcome {
                 page_number: 1,
@@ -3833,11 +3855,20 @@ mod tests {
                 .map(|w| (w.text.clone(), w.x, w.width))
                 .collect()
         };
-        // Alone, screen order reads as upright and the reversed quad as 180°.
-        let screen = [[10.0, 20.0], [210.0, 20.0], [210.0, 40.0], [10.0, 40.0]];
-        let reversed = [[210.0, 40.0], [10.0, 40.0], [10.0, 20.0], [210.0, 20.0]];
-        let measured = vec![word("Invoice", 110.0, 210.0), word("total", 10.0, 100.0)];
-        let turned = merged(screen, measured, 180.0);
+        // Alone, each quad's point order reads as the angle in its name.
+        let flat_0 = [[10.0, 20.0], [210.0, 20.0], [210.0, 40.0], [10.0, 40.0]];
+        let flat_180 = [[210.0, 40.0], [10.0, 40.0], [10.0, 20.0], [210.0, 20.0]];
+        let up_90 = [[10.0, 200.0], [10.0, 20.0], [20.0, 20.0], [20.0, 200.0]];
+        let down_270 = [[20.0, 20.0], [20.0, 200.0], [10.0, 200.0], [10.0, 20.0]];
+
+        let read_turned = |rotation| {
+            let words = vec![
+                word("Invoice", 110.0, 210.0, rotation),
+                word("total", 10.0, 100.0, rotation),
+            ];
+            words
+        };
+        let turned = merged(flat_0, read_turned(None), Some(180.0));
         assert_eq!(turned.rotation, 180.0);
         assert_eq!(
             (turned.x, turned.y, turned.width, turned.height),
@@ -3847,9 +3878,18 @@ mod tests {
             boxes(&turned),
             vec![("Invoice".into(), 55.0, 50.0), ("total".into(), 5.0, 45.0)]
         );
-        let upright = merged(reversed, Vec::new(), 0.0);
+        assert_eq!(
+            merged(flat_0, read_turned(Some(180.0)), None).rotation,
+            180.0
+        );
+
+        let upright = merged(flat_180, Vec::new(), Some(0.0));
         assert_eq!(upright.rotation, 0.0);
         assert_eq!(boxes(&upright).len(), 2);
+
+        assert_eq!(merged(up_90, Vec::new(), Some(270.0)).rotation, 270.0);
+        assert_eq!(merged(down_270, Vec::new(), Some(90.0)).rotation, 90.0);
+        assert_eq!(merged(up_90, Vec::new(), None).rotation, 90.0);
     }
 
     /// A scanned figure on a page with a typed footer keeps all its OCR text,

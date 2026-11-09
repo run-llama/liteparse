@@ -16,15 +16,16 @@ export interface JsLiteParseConfig {
    */
   ocrServerHeaders?: Record<string, string>
   /**
-   * Ask `ocrServerUrl` to measure each word (`return_word_boxes`,
-   * `dense_ocr_detection`, `return_bbox_angles`). Default false.
+   * Form fields sent as-is with every request to `ocrServerUrl`, next to
+   * `file` and `language` (a `language` entry replaces it). LiteParse adds
+   * no other field.
    */
-  ocrWordBoxes?: boolean
+  ocrRequestFields?: Record<string, string>
   /**
-   * 1-based pages already turned upright by the caller. Their OCR requests
-   * send `correct_rotation=false`; every other page sends `true`.
+   * Per-page form fields, keyed by 1-based page number, merged over
+   * `ocrRequestFields` for that page's request.
    */
-  ocrUprightPages?: Array<number>
+  ocrPageRequestFields?: Record<string, Record<string, string>>
   /** Path to tessdata directory for Tesseract. */
   tessdataPath?: string
   /** Maximum number of pages to parse. */

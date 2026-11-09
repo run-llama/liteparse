@@ -622,11 +622,11 @@ async fn parse_equals_composed_stages_with_form_fields_and_rendered_screenshots(
     );
 }
 
-/// `ocr_upright_pages` reaches the rasters: a listed page asks the OCR engine
-/// not to correct rotation, and every other page asks it to.
+/// The configured OCR request fields reach every raster, with a page's own
+/// fields merged over the base for that page only.
 #[tokio::test]
 #[serial]
-async fn ocr_upright_pages_turn_off_rotation_correction() {
+async fn ocr_page_request_fields_merge_over_the_base() {
     let lib = Library::init();
     let document =
         stages::open(&lib, &PdfInput::Path(fixture("page_labels.pdf")), None, &[]).unwrap();
@@ -638,8 +638,15 @@ async fn ocr_upright_pages_turn_off_rotation_correction() {
         .map(|p| p.page_number as u32)
         .collect();
     assert!(numbers.len() >= 2, "fixture needs two pages");
+    let fields = |pairs: &[(&str, &str)]| -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    };
     let parser = LiteParse::new(LiteParseConfig {
-        ocr_upright_pages: vec![numbers[0]],
+        ocr_request_fields: fields(&[("correct_rotation", "true"), ("return_word_boxes", "true")]),
+        ocr_page_request_fields: [(numbers[0], fields(&[("correct_rotation", "false")]))].into(),
         ..everything_config()
     });
     let options = stages::OcrRenderOptions {
@@ -648,11 +655,28 @@ async fn ocr_upright_pages_turn_off_rotation_correction() {
         ..parser.ocr_render_options(false, &extracted)
     };
     let (rasters, _) = stages::render_for_ocr(&document, &extracted.pages, 0, &options).unwrap();
-    let got: Vec<(u32, bool)> = rasters
+    let got: Vec<(u32, Vec<(String, String)>)> = rasters
         .iter()
-        .map(|r| (r.page_number as u32, r.correct_rotation))
+        .map(|r| {
+            (
+                r.page_number as u32,
+                r.request_fields.clone().into_iter().collect(),
+            )
+        })
         .collect();
-    let want: Vec<(u32, bool)> = numbers.iter().map(|&n| (n, n != numbers[0])).collect();
+    let want: Vec<(u32, Vec<(String, String)>)> = numbers
+        .iter()
+        .map(|&n| {
+            let rotate = if n == numbers[0] { "false" } else { "true" };
+            (
+                n,
+                vec![
+                    ("correct_rotation".to_string(), rotate.to_string()),
+                    ("return_word_boxes".to_string(), "true".to_string()),
+                ],
+            )
+        })
+        .collect();
     assert_eq!(got, want);
 }
 

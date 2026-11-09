@@ -113,13 +113,26 @@ lit parse document.pdf \
 
 In the libraries this is `ocr_server_headers` / `ocrServerHeaders`, taking a map of header name to value. It has no effect unless an OCR server URL is set.
 
-### Measured word boxes
+### Request fields
 
-A line-level OCR server returns one box per line. With `ocr_word_boxes` / `ocrWordBoxes` set, LiteParse also sends `return_word_boxes`, `dense_ocr_detection` and `return_bbox_angles` (the fields LlamaParse sends when it wants word boxes), and a server that measures words returns a box per word. Those boxes become `TextItem.words` when word boxes are on (`emit_word_boxes`). Without them, LiteParse estimates each word's box from its share of the line's characters. The option is off by default and has no CLI flag.
+Each OCR request sends the page image as `file` and the language as `language`. Add any other form field your server understands with `ocr_request_fields` / `ocrRequestFields`, a map of field name to value sent as-is on every request. `ocr_page_request_fields` / `ocrPageRequestFields` maps a 1-based page number to more fields, merged over the base map for that page only. LiteParse adds no field of its own, and a `language` entry replaces the default. Neither option has a CLI flag.
 
-### Pages that are already upright
+```typescript
+const parser = new LiteParse({
+  ocrServerUrl: "https://ocr.internal/ocr",
+  // Ask for measured word boxes and their angles on every page.
+  ocrRequestFields: {
+    correct_rotation: "true",
+    return_word_boxes: "true",
+    dense_ocr_detection: "true",
+    return_bbox_angles: "true",
+  },
+  // Page 3 is already upright: read it as sent.
+  ocrPageRequestFields: { 3: { correct_rotation: "false" } },
+});
+```
 
-Every OCR request carries `correct_rotation`. With `true` the server detects and undoes the page's rotation before reading it, the same as when the field is missing. If you have already turned some pages upright, for example with `page_orientation_corrections` / `pageOrientationCorrections`, list them in `ocr_upright_pages` / `ocrUprightPages` (1-based page numbers). Their requests send `correct_rotation=false`, so the server reads them as sent and does not rotate them a second time. The option is empty by default and has no CLI flag.
+When the response carries measured words, they become `TextItem.words` when word boxes are on (`emit_word_boxes`). Without them, LiteParse estimates each word's box from its share of the line's characters. A line's rotation comes from the server's angle when the response has one, and otherwise from the order of its quad's points.
 
 ### Parallel OCR workers
 

@@ -411,7 +411,8 @@ impl LiteParse {
             continue_on_page_error: self.config.continue_on_page_error,
             reflatten_pages,
             selection: None,
-            upright_pages: self.config.ocr_upright_pages.iter().copied().collect(),
+            request_fields: self.config.ocr_request_fields.clone(),
+            page_request_fields: self.config.ocr_page_request_fields.clone(),
         }
     }
 
@@ -464,8 +465,7 @@ impl LiteParse {
                     .with_retry(crate::ocr::http_simple::OcrRetryConfig {
                         hedge_delays_ms: self.config.ocr_hedge_delays_ms.clone(),
                         ..Default::default()
-                    })
-                    .with_word_boxes(self.config.ocr_word_boxes),
+                    }),
                 )));
             }
             #[cfg(feature = "tesseract")]

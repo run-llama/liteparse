@@ -1240,9 +1240,9 @@ struct PyLiteParseConfig {
     #[pyo3(get)]
     ocr_server_headers: Option<HashMap<String, String>>,
     #[pyo3(get)]
-    ocr_word_boxes: bool,
+    ocr_request_fields: HashMap<String, String>,
     #[pyo3(get)]
-    ocr_upright_pages: Vec<u32>,
+    ocr_page_request_fields: HashMap<u32, HashMap<String, String>>,
     #[pyo3(get)]
     tessdata_path: Option<String>,
     #[pyo3(get)]
@@ -1334,8 +1334,8 @@ impl PyLiteParseConfig {
             } else {
                 Some(cfg.ocr_server_headers.iter().cloned().collect())
             },
-            ocr_word_boxes: cfg.ocr_word_boxes,
-            ocr_upright_pages: cfg.ocr_upright_pages.clone(),
+            ocr_request_fields: cfg.ocr_request_fields.clone(),
+            ocr_page_request_fields: cfg.ocr_page_request_fields.clone(),
             tessdata_path: cfg.tessdata_path.clone(),
             max_pages: cfg.max_pages,
             target_pages: cfg.target_pages.clone(),
@@ -1484,8 +1484,8 @@ impl LiteParse {
         ocr_enabled = None,
         ocr_server_url = None,
         ocr_server_headers = None,
-        ocr_word_boxes = None,
-        ocr_upright_pages = None,
+        ocr_request_fields = None,
+        ocr_page_request_fields = None,
         tessdata_path = None,
         max_pages = None,
         target_pages = None,
@@ -1526,8 +1526,8 @@ impl LiteParse {
         ocr_enabled: Option<bool>,
         ocr_server_url: Option<String>,
         ocr_server_headers: Option<HashMap<String, String>>,
-        ocr_word_boxes: Option<bool>,
-        ocr_upright_pages: Option<Vec<u32>>,
+        ocr_request_fields: Option<HashMap<String, String>>,
+        ocr_page_request_fields: Option<HashMap<u32, HashMap<String, String>>>,
         tessdata_path: Option<String>,
         max_pages: Option<usize>,
         target_pages: Option<String>,
@@ -1576,11 +1576,11 @@ impl LiteParse {
         if let Some(v) = ocr_server_headers {
             cfg.ocr_server_headers = v.into_iter().collect();
         }
-        if let Some(v) = ocr_word_boxes {
-            cfg.ocr_word_boxes = v;
+        if let Some(v) = ocr_request_fields {
+            cfg.ocr_request_fields = v;
         }
-        if let Some(v) = ocr_upright_pages {
-            cfg.ocr_upright_pages = v;
+        if let Some(v) = ocr_page_request_fields {
+            cfg.ocr_page_request_fields = v;
         }
         if let Some(v) = tessdata_path {
             cfg.tessdata_path = Some(v);

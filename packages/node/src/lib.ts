@@ -47,18 +47,19 @@ export interface LiteParseConfig {
   /** Extra HTTP headers sent with every request to `ocrServerUrl`. */
   ocrServerHeaders?: Record<string, string>;
   /**
-   * Ask `ocrServerUrl` to measure each word, sending `return_word_boxes`,
-   * `dense_ocr_detection` and `return_bbox_angles` like the LlamaParse tiers.
-   * The measured boxes become {@link TextItem.words}. Default false.
+   * Form fields sent as-is with every request to `ocrServerUrl`, next to
+   * `file` and `language` (a `language` entry replaces it). LiteParse adds no
+   * other field, so you own flags such as `correct_rotation` or
+   * `return_word_boxes`. Measured `words` and angles in the response are read
+   * whenever the server returns them. Default empty.
    */
-  ocrWordBoxes?: boolean;
+  ocrRequestFields?: Record<string, string>;
   /**
-   * 1-based pages you have already turned upright (including pages in
-   * {@link LiteParseConfig.pageOrientationCorrections}). Their OCR requests send
-   * `correct_rotation=false` so the server reads them as sent; every other
-   * page sends `correct_rotation=true`. Default empty.
+   * Per-page form fields, keyed by 1-based page number, merged over
+   * {@link LiteParseConfig.ocrRequestFields} for that page's request, e.g.
+   * `{ 3: { correct_rotation: "false" } }`. Default empty.
    */
-  ocrUprightPages?: number[];
+  ocrPageRequestFields?: Record<number, Record<string, string>>;
   tessdataPath?: string;
   maxPages: number;
   targetPages?: string;
@@ -675,8 +676,8 @@ export class LiteParse {
       ocrEnabled: userConfig.ocrEnabled,
       ocrServerUrl: userConfig.ocrServerUrl,
       ocrServerHeaders: userConfig.ocrServerHeaders,
-      ocrWordBoxes: userConfig.ocrWordBoxes,
-      ocrUprightPages: userConfig.ocrUprightPages,
+      ocrRequestFields: userConfig.ocrRequestFields,
+      ocrPageRequestFields: userConfig.ocrPageRequestFields,
       tessdataPath: userConfig.tessdataPath,
       maxPages: userConfig.maxPages,
       targetPages: userConfig.targetPages,
@@ -738,8 +739,8 @@ export class LiteParse {
       ocrEnabled: resolved.ocrEnabled ?? true,
       ocrServerUrl: resolved.ocrServerUrl ?? undefined,
       ocrServerHeaders: resolved.ocrServerHeaders ?? undefined,
-      ocrWordBoxes: resolved.ocrWordBoxes ?? false,
-      ocrUprightPages: resolved.ocrUprightPages ?? [],
+      ocrRequestFields: resolved.ocrRequestFields ?? {},
+      ocrPageRequestFields: resolved.ocrPageRequestFields ?? {},
       tessdataPath: resolved.tessdataPath ?? undefined,
       maxPages: resolved.maxPages ?? 1000,
       targetPages: resolved.targetPages ?? undefined,

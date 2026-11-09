@@ -468,8 +468,8 @@ class LiteParse:
         ocr_enabled: Optional[bool] = None,
         ocr_server_url: Optional[str] = None,
         ocr_server_headers: Optional[Dict[str, str]] = None,
-        ocr_word_boxes: Optional[bool] = None,
-        ocr_upright_pages: Optional[List[int]] = None,
+        ocr_request_fields: Optional[Dict[str, str]] = None,
+        ocr_page_request_fields: Optional[Dict[int, Dict[str, str]]] = None,
         ocr_language: Optional[str] = None,
         tessdata_path: Optional[str] = None,
         max_pages: Optional[int] = None,
@@ -516,12 +516,13 @@ class LiteParse:
             ocr_server_url: URL of HTTP OCR server (uses Tesseract if not provided)
             ocr_server_headers: Extra HTTP headers sent with every request to
                 ``ocr_server_url`` (e.g. ``{"Authorization": "Bearer <token>"}``)
-            ocr_word_boxes: Ask ``ocr_server_url`` to measure each word, sending
-                ``return_word_boxes``, ``dense_ocr_detection`` and
-                ``return_bbox_angles`` (default: False)
-            ocr_upright_pages: 1-based pages already turned upright by the
-                caller. Their OCR requests send ``correct_rotation=false``;
-                every other page sends ``true`` (default: none)
+            ocr_request_fields: Form fields sent as-is with every request to
+                ``ocr_server_url``, next to ``file`` and ``language`` (a
+                ``language`` entry replaces it). LiteParse adds no other field
+                (default: none)
+            ocr_page_request_fields: Per-page form fields, keyed by 1-based
+                page number, merged over ``ocr_request_fields`` for that page
+                (default: none)
             ocr_language: Language code for OCR (e.g., "eng", "fra")
             tessdata_path: Path to tessdata directory for Tesseract
             max_pages: Maximum number of pages to parse
@@ -614,10 +615,13 @@ class LiteParse:
             kwargs["ocr_server_url"] = ocr_server_url
         if ocr_server_headers is not None:
             kwargs["ocr_server_headers"] = ocr_server_headers
-        if ocr_word_boxes is not None:
-            kwargs["ocr_word_boxes"] = ocr_word_boxes
-        if ocr_upright_pages is not None:
-            kwargs["ocr_upright_pages"] = [int(page) for page in ocr_upright_pages]
+        if ocr_request_fields is not None:
+            kwargs["ocr_request_fields"] = {str(k): str(v) for k, v in ocr_request_fields.items()}
+        if ocr_page_request_fields is not None:
+            kwargs["ocr_page_request_fields"] = {
+                int(page): {str(k): str(v) for k, v in fields.items()}
+                for page, fields in ocr_page_request_fields.items()
+            }
         if ocr_language is not None:
             kwargs["ocr_language"] = ocr_language
         if tessdata_path is not None:
@@ -976,8 +980,10 @@ class LiteParse:
             ocr_enabled=cfg.ocr_enabled,
             ocr_server_url=cfg.ocr_server_url,
             ocr_server_headers=cfg.ocr_server_headers,
-            ocr_word_boxes=cfg.ocr_word_boxes,
-            ocr_upright_pages=list(cfg.ocr_upright_pages),
+            ocr_request_fields=dict(cfg.ocr_request_fields),
+            ocr_page_request_fields={
+                page: dict(fields) for page, fields in cfg.ocr_page_request_fields.items()
+            },
             tessdata_path=cfg.tessdata_path,
             max_pages=cfg.max_pages,
             target_pages=cfg.target_pages,

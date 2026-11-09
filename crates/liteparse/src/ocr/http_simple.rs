@@ -1,4 +1,4 @@
-use std::{io::Cursor, pin::Pin, time::Duration};
+use std::{collections::BTreeMap, io::Cursor, pin::Pin, time::Duration};
 
 use image::ImageFormat;
 use reqwest::{
@@ -46,10 +46,19 @@ impl HttpOcrResponseItem {
 struct ProdOcrItem(Vec<[f32; 2]>, String, f32);
 
 /// One measured word from the prod OCR worker's `words` (`return_word_boxes`).
+/// `r` is its rotation like [`ProdOcrMeta::r`].
 #[derive(Debug, Deserialize)]
 struct ProdOcrWord {
     bbox: Vec<[f32; 2]>,
     text: String,
+    #[serde(default)]
+    r: Option<f32>,
+}
+
+/// The server's clockwise-on-screen angle as counter-clockwise degrees in
+/// [0, 360); a missing angle is upright.
+fn ccw_degrees(r: Option<f32>) -> f32 {
+    (-r.unwrap_or(0.0)).rem_euclid(360.0)
 }
 
 /// One entry of the prod OCR worker's `result_meta` (`return_bbox_angles`):
@@ -97,6 +106,7 @@ impl ProdOcrItem {
                         [a, b, c, d] => Some([*a, *b, *c, *d]),
                         _ => None,
                     },
+                    rotation: w.r.map(|r| ccw_degrees(Some(r))),
                     text: w.text,
                 })
                 .collect(),
@@ -146,10 +156,7 @@ impl HttpOcrResponse {
                     result_meta.clear();
                 }
                 let mut words = words.into_iter();
-                // Clockwise on screen to counter-clockwise; a missing `r` is upright.
-                let mut angles = result_meta
-                    .into_iter()
-                    .map(|m| (-m.r.unwrap_or(0.0)).rem_euclid(360.0));
+                let mut angles = result_meta.into_iter().map(|m| ccw_degrees(m.r));
                 result
                     .into_iter()
                     .map(|i| i.into_ocr_result(words.next().unwrap_or_default(), angles.next()))
@@ -162,10 +169,8 @@ impl HttpOcrResponse {
 /// HTTP-based OCR engine that conforms to LiteParse OCR API specification.
 /// The server must implement the API defined in OCR_API_SPEC.md:
 ///     - POST /ocr endpoint
-///     - Accepts multipart/form-data with 'file', 'language' and
-///       'correct_rotation' (from `OcrOptions::correct_rotation`) fields, plus
-///       'return_word_boxes', 'dense_ocr_detection' and 'return_bbox_angles'
-///       when the engine is built `with_word_boxes(true)`
+///     - Accepts multipart/form-data with 'file' and 'language', plus every
+///       field in `OcrOptions::request_fields` as given
 ///     - Returns JSON: { results: [{ text, bbox: [x1,y1,x2,y2], confidence }] }
 /// See ocr/easyocr/ and ocr/paddleocr/ for example server implementations.
 pub struct HttpOcrEngine {
@@ -175,8 +180,6 @@ pub struct HttpOcrEngine {
     headers: Vec<(String, String)>,
     /// Retry/backoff policy. Defaults to worker-parity semantics.
     retry: OcrRetryConfig,
-    /// Ask the server for measured word boxes (see `with_word_boxes`).
-    word_boxes: bool,
 }
 
 /// Retry/backoff policy for OCR HTTP requests. The default is up to 10
@@ -259,27 +262,12 @@ fn is_connection_drop(err: &reqwest::Error) -> bool {
     false
 }
 
-/// The text fields of one OCR request: `language`, `correct_rotation`, and
-/// the fields every LlamaParse tier sends when it wants word boxes.
-fn request_fields(
-    language: &str,
-    correct_rotation: bool,
-    word_boxes: bool,
-) -> Vec<(&'static str, String)> {
-    let mut fields = vec![
-        ("language", language.to_string()),
-        ("correct_rotation", correct_rotation.to_string()),
-    ];
-    if word_boxes {
-        for name in [
-            "return_word_boxes",
-            "dense_ocr_detection",
-            "return_bbox_angles",
-        ] {
-            fields.push((name, "true".to_string()));
-        }
-    }
-    fields
+/// The text fields of one OCR request: `language`, then the caller's
+/// fields as given (a `language` entry replaces the default).
+fn request_fields(language: &str, fields: &BTreeMap<String, String>) -> Vec<(String, String)> {
+    let mut all = BTreeMap::from([("language".to_string(), language.to_string())]);
+    all.extend(fields.clone());
+    all.into_iter().collect()
 }
 
 /// Send a single OCR request and return the raw response body. Encodes the
@@ -289,7 +277,7 @@ async fn send_one(
     url: &str,
     headers: &[(String, String)],
     png_bytes: &[u8],
-    fields: &[(&'static str, String)],
+    fields: &[(String, String)],
     timeout_ms: u64,
 ) -> Result<String, reqwest::Error> {
     let mut form = Form::new().part(
@@ -299,7 +287,7 @@ async fn send_one(
             .mime_str("image/png")?,
     );
     for (name, value) in fields {
-        form = form.text(*name, value.clone());
+        form = form.text(name.clone(), value.clone());
     }
     let mut request = client
         .post(url)
@@ -341,17 +329,7 @@ impl HttpOcrEngine {
             server_url,
             headers,
             retry: OcrRetryConfig::default(),
-            word_boxes: false,
         }
-    }
-
-    /// Request measured word boxes from the server (`return_word_boxes`,
-    /// `dense_ocr_detection`, `return_bbox_angles`). Results then carry
-    /// `words`; a server that ignores the fields returns none, and merging
-    /// estimates the boxes instead.
-    pub fn with_word_boxes(mut self, word_boxes: bool) -> Self {
-        self.word_boxes = word_boxes;
-        self
     }
 
     /// Override the retry/backoff policy
@@ -370,11 +348,11 @@ impl HttpOcrEngine {
         client: &Client,
         png_bytes: &[u8],
         language: &str,
-        correct_rotation: bool,
+        extra_fields: &BTreeMap<String, String>,
     ) -> Result<String, reqwest::Error> {
         let delays = &self.retry.hedge_delays_ms;
         let timeout_ms = self.retry.request_timeout_ms;
-        let fields = request_fields(language, correct_rotation, self.word_boxes);
+        let fields = request_fields(language, extra_fields);
 
         // Single-request fast path: no hedging, or a single (possibly delayed)
         // request. Borrows directly — no task spawn / cloning.
@@ -476,7 +454,7 @@ impl OcrEngine for HttpOcrEngine {
                         &client,
                         &png_bytes,
                         &options.language,
-                        options.correct_rotation,
+                        &options.request_fields,
                     )
                     .await
                 {
@@ -642,17 +620,37 @@ mod tests {
             parsed.into_results().iter().map(|r| r.rotation).collect()
         };
         assert_eq!(
-            rotations(r#","result_meta":[{"r":180},{},{"r":90}]"#),
-            vec![Some(180.0), Some(0.0), Some(270.0)]
+            rotations(r#","result_meta":[{"r":180},{"r":90},{"r":-90}]"#),
+            vec![Some(180.0), Some(270.0), Some(90.0)]
+        );
+        assert_eq!(
+            rotations(r#","result_meta":[{},{"r":180},{}]"#),
+            vec![Some(0.0), Some(180.0), Some(0.0)]
         );
         assert_eq!(rotations(r#","result_meta":[{"r":180}]"#), vec![None; 3]);
         assert_eq!(rotations(""), vec![None; 3]);
     }
 
+    /// Each word's `r` becomes its counter-clockwise rotation, as for lines.
+    #[test]
+    fn test_prod_word_angles_set_word_rotation() {
+        let raw = r#"{"result":[[[[0,0],[90,0],[90,10],[0,10]],"a b c",0.9]],
+          "words":[[{"bbox":[[0,0],[10,0],[10,10],[0,10]],"text":"a","r":180},
+                    {"bbox":[[20,0],[30,0],[30,10],[20,10]],"text":"b","r":-90},
+                    {"bbox":[[40,0],[50,0],[50,10],[40,10]],"text":"c"}]]}"#;
+        let parsed: HttpOcrResponse = serde_json::from_str(raw).unwrap();
+        let got: Vec<Option<f32>> = parsed.into_results()[0]
+            .words
+            .iter()
+            .map(|w| w.rotation)
+            .collect();
+        assert_eq!(got, vec![Some(180.0), Some(90.0), None]);
+    }
+
     /// Serve one OCR request on a local socket and return the request bytes.
     /// `engine` builds the engine under test from the socket's URL.
     async fn capture_request(
-        correct_rotation: bool,
+        request_fields: BTreeMap<String, String>,
         engine: impl FnOnce(String) -> std::sync::Arc<dyn OcrEngine>,
     ) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -682,60 +680,40 @@ mod tests {
         let opts = OcrOptions {
             language: "en".into(),
             dpi: 150.0,
-            correct_rotation,
+            request_fields,
         };
         engine.recognize(&[255u8; 3], 1, 1, &opts).await.unwrap();
         server.await.unwrap()
     }
 
-    /// `ocr_word_boxes` sends the three fields the LlamaParse tiers send for
-    /// word boxes; off, the request carries none of them.
+    /// The request carries `file`, `language` and exactly the caller's fields:
+    /// a field is sent as given, a `language` field replaces the default, and
+    /// with no fields LiteParse adds no flag of its own.
     #[tokio::test]
-    async fn test_ocr_word_boxes_option_sends_the_word_box_fields() {
-        use crate::{config::LiteParseConfig, parser::LiteParse};
-        let request = |on: bool| {
-            capture_request(true, move |url| {
-                LiteParse::new(LiteParseConfig {
-                    ocr_enabled: true,
-                    ocr_server_url: Some(url),
-                    ocr_word_boxes: on,
-                    ..Default::default()
-                })
-                .ocr_engine()
-                .unwrap()
-                .unwrap()
-            })
+    async fn test_request_fields_are_sent_as_given() {
+        let engine =
+            |url| -> std::sync::Arc<dyn OcrEngine> { std::sync::Arc::new(HttpOcrEngine::new(url)) };
+        let sent = |req: &str, name: &str, value: &str| {
+            req.contains(&format!("name=\"{name}\"\r\n\r\n{value}\r\n"))
         };
-        let fields = [
-            "return_word_boxes",
-            "dense_ocr_detection",
-            "return_bbox_angles",
-        ];
-        let on = request(true).await;
-        for f in fields {
-            assert!(
-                on.contains(&format!("name=\"{f}\"\r\n\r\ntrue")),
-                "{f} not sent"
-            );
-        }
-        let off = request(false).await;
-        assert!(fields.iter().all(|f| !off.contains(f)), "{off}");
-    }
+        let fields = BTreeMap::from([
+            ("correct_rotation".to_string(), "false".to_string()),
+            ("return_word_boxes".to_string(), "true".to_string()),
+            ("language".to_string(), "fr".to_string()),
+        ]);
+        let req = capture_request(fields, engine).await;
+        assert!(sent(&req, "correct_rotation", "false"), "{req}");
+        assert!(sent(&req, "return_word_boxes", "true"), "{req}");
+        assert!(sent(&req, "language", "fr"), "{req}");
+        assert_eq!(req.matches("name=\"language\"").count(), 1, "{req}");
 
-    /// Every request states `correct_rotation`, with or without word boxes,
-    /// so the server never falls back to its own default.
-    #[tokio::test]
-    async fn test_every_request_sends_correct_rotation() {
-        for (value, word_boxes) in [(true, false), (false, false), (false, true)] {
-            let req = capture_request(value, move |url| -> std::sync::Arc<dyn OcrEngine> {
-                std::sync::Arc::new(HttpOcrEngine::new(url).with_word_boxes(word_boxes))
-            })
-            .await;
-            assert!(
-                req.contains(&format!("name=\"correct_rotation\"\r\n\r\n{value}\r\n")),
-                "correct_rotation={value} not sent: {req}"
-            );
-        }
+        let bare = capture_request(BTreeMap::new(), engine).await;
+        assert!(sent(&bare, "language", "en"), "{bare}");
+        assert_eq!(
+            bare.matches("Content-Disposition: form-data").count(),
+            2,
+            "{bare}"
+        );
     }
 
     #[tokio::test]
@@ -749,7 +727,7 @@ mod tests {
         let opts = OcrOptions {
             language: "eng".into(),
             dpi: 150.0,
-            correct_rotation: true,
+            request_fields: BTreeMap::new(),
         };
         let r = e.recognize(&[0u8; 4], 1, 1, &opts).await;
         assert!(r.is_err());
@@ -789,7 +767,7 @@ mod tests {
         let opts = OcrOptions {
             language: "eng".into(),
             dpi: 150.0,
-            correct_rotation: true,
+            request_fields: BTreeMap::new(),
         };
         let r = e.recognize(&[0u8; 4], 1, 1, &opts).await;
         assert!(r.is_err());

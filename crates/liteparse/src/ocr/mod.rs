@@ -45,6 +45,10 @@ pub struct OcrWord {
     /// or turned line. Merging takes its bounds after any page deskew.
     #[serde(default)]
     pub polygon: Option<[[f32; 2]; 4]>,
+    /// The word's rotation as the engine measured it, in degrees
+    /// counter-clockwise in [0, 360). None when the engine sent no angle.
+    #[serde(default)]
+    pub rotation: Option<f32>,
 }
 
 pub struct OcrOptions {
@@ -53,9 +57,10 @@ pub struct OcrOptions {
     /// that can't infer DPI from raw pixel buffers (e.g. Tesseract fed RGB bytes)
     /// use this so their internal point-size estimates are correct.
     pub dpi: f32,
-    /// Let the engine detect and undo page rotation before reading. The HTTP
-    /// engine sends it as `correct_rotation`; the other engines ignore it.
-    pub correct_rotation: bool,
+    /// Form fields for this page's request (see
+    /// `LiteParseConfig::ocr_request_fields`). The HTTP engine sends them
+    /// as-is; the other engines ignore them.
+    pub request_fields: std::collections::BTreeMap<String, String>,
 }
 
 /// On native targets, `OcrEngine` and its returned futures must be `Send` so
@@ -151,7 +156,7 @@ mod tests {
         let opts = OcrOptions {
             language: "eng".into(),
             dpi: 150.0,
-            correct_rotation: true,
+            request_fields: Default::default(),
         };
         let r = engine.recognize(&[], 1, 1, &opts).await.unwrap();
         assert_eq!(r.len(), 1);
