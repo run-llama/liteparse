@@ -195,3 +195,43 @@ These days, its common to apply the term "OCR" to both traditional approaches an
 The LiteParse OCR API is designed specifically for approaches that return text with bounding boxes.
 
 If you are trying to integrate a method that doesn't return bounding boxes, you will have to generate dummy bounding boxes.
+
+## Reusing page images
+
+If your application already has full-page screenshots, supply them as OCR
+inputs to avoid rendering those pages again. LiteParse still reads the PDF for
+native text and decides which pages need OCR. Pages without a supplied image
+use the normal renderer.
+
+```typescript
+const parser = new LiteParse({
+  ocrEnabled: true,
+  ocrPageImages: {
+    1: { path: "/path/to/page-1.png", dpi: 200 },
+    3: { path: "/path/to/page-3.jpg", dpi: 150 },
+  },
+});
+const result = await parser.parse("document.pdf");
+```
+
+Python accepts `ocr_page_images={1: ("/path/to/page-1.png", 200.0)}`.
+Rust callers set `LiteParseConfig::ocr_page_images` to a map of page numbers to
+`config::OcrPageImage { path, dpi }`. Composed Rust pipelines use the same map
+in `stages::OcrRenderOptions::page_images`.
+
+Keys always refer to **1-based source document pages**, including selected-page
+and batch parses. `dpi` is the supplied image's actual resolution; it can differ
+from the parser's requested rendering DPI. Each image must cover the entire
+page in the orientation produced by the PDF's `/Rotate` and any configured
+`pageOrientationCorrections`. Its content, including form appearances, must
+match the PDF. Cropped, deskewed and stretched images are unsupported.
+
+LiteParse checks image dimensions against the page and DPI, allowing one pixel
+of raster rounding. An unreadable or incompatible supplied image is a page
+error; it is not silently replaced with a render. `continueOnPageError` applies
+as it does to rendering failures. Keep image files available until parsing
+finishes, including when using worker pools or batch iterators. The parser
+continues to apply its native-text masking and crop filters. Supplying OCR
+images does not replace screenshots requested through `extractScreenshots`.
+
+This file-path option is available in the Rust, Node.js and Python APIs.

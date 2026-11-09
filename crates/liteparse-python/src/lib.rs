@@ -1236,6 +1236,8 @@ struct PyLiteParseConfig {
     #[pyo3(get)]
     ocr_enabled: bool,
     #[pyo3(get)]
+    ocr_page_images: HashMap<u32, (String, f32)>,
+    #[pyo3(get)]
     ocr_server_url: Option<String>,
     #[pyo3(get)]
     ocr_server_headers: Option<HashMap<String, String>>,
@@ -1324,6 +1326,11 @@ impl PyLiteParseConfig {
         Self {
             ocr_language: cfg.ocr_language.clone(),
             ocr_enabled: cfg.ocr_enabled,
+            ocr_page_images: cfg
+                .ocr_page_images
+                .iter()
+                .map(|(page, image)| (*page, (image.path.clone(), image.dpi)))
+                .collect(),
             ocr_server_url: cfg.ocr_server_url.clone(),
             ocr_server_headers: if cfg.ocr_server_headers.is_empty() {
                 None
@@ -1510,6 +1517,7 @@ impl LiteParse {
         crop_box = None,
         skip_diagonal_text = None,
         page_orientation_corrections = None,
+        ocr_page_images = None,
         include_complexity = None,
         extract_vector_graphics = None,
     ))]
@@ -1550,12 +1558,24 @@ impl LiteParse {
         crop_box: Option<(f32, f32, f32, f32)>,
         skip_diagonal_text: Option<bool>,
         page_orientation_corrections: Option<Vec<(u32, u16)>>,
+        ocr_page_images: Option<HashMap<u32, (String, f32)>>,
         include_complexity: Option<bool>,
         extract_vector_graphics: Option<bool>,
     ) -> PyResult<Self> {
         let mut cfg = LiteParseConfig::default();
         if let Some(v) = ocr_language {
             cfg.ocr_language = v;
+        }
+        if let Some(images) = ocr_page_images {
+            if images.contains_key(&0) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "ocr_page_images keys must be positive document page numbers",
+                ));
+            }
+            cfg.ocr_page_images = images
+                .into_iter()
+                .map(|(page, (path, dpi))| (page, liteparse::config::OcrPageImage { path, dpi }))
+                .collect();
         }
         if let Some(v) = ocr_enabled {
             cfg.ocr_enabled = v;

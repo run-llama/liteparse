@@ -91,6 +91,9 @@ pub struct OcrRenderOptions {
     pub max_rasters: usize,
     /// Requested render resolution; clamped per page by the long-edge cap.
     pub dpi: f32,
+    /// Full-page images supplied by the caller, keyed by 1-based source page.
+    /// A supplied image replaces rendering only after the normal OCR gate.
+    pub page_images: HashMap<u32, crate::config::OcrPageImage>,
     /// Emit 1 byte/px luma instead of RGB (see `OcrEngine::prefers_grayscale`).
     pub grayscale: bool,
     /// Paint form-field appearances into the raster (runs document actions).
@@ -113,6 +116,7 @@ impl Default for OcrRenderOptions {
         Self {
             max_rasters: 0,
             dpi: crate::config::DEFAULT_DPI,
+            page_images: HashMap::new(),
             grayscale: false,
             render_form_fields: false,
             continue_on_page_error: false,
@@ -967,6 +971,56 @@ pub fn render_pages_for_ocr(
     render_pages_for_ocr_capped(document, pages, start, options, options.max_rasters)
 }
 
+/// Decode only images selected for OCR. One pixel of tolerance accounts for
+/// integer raster rounding; larger mismatches would misplace OCR boxes.
+fn load_ocr_page_image(
+    source: &crate::config::OcrPageImage,
+    page: &Page,
+    grayscale: bool,
+) -> Result<(Vec<u8>, u32, u32, f32), LiteParseError> {
+    if !source.dpi.is_finite() || source.dpi <= 0.0 {
+        return Err(LiteParseError::Config(format!(
+            "OCR image for page {} needs a finite, positive DPI",
+            page.page_number
+        )));
+    }
+    let image = image::ImageReader::open(&source.path)?
+        .with_guessed_format()?
+        .decode()?;
+    let (width, height) = (image.width(), image.height());
+    let expected_width = page.page_width * source.dpi / 72.0;
+    let expected_height = page.page_height * source.dpi / 72.0;
+    if width == 0
+        || height == 0
+        || !expected_width.is_finite()
+        || !expected_height.is_finite()
+        || (width as f32 - expected_width).abs() > 1.0
+        || (height as f32 - expected_height).abs() > 1.0
+    {
+        return Err(LiteParseError::Config(format!(
+            "OCR image for page {} is {}x{} at {} DPI; expected a full-page image of {:.1}x{:.1} pixels in corrected viewport orientation",
+            page.page_number, width, height, source.dpi, expected_width, expected_height
+        )));
+    }
+    // Composite transparency onto white, as with a rendered PDF page. Dropping
+    // alpha would turn transparent backgrounds black and change OCR content.
+    let rgba = image.to_rgba8();
+    let channels = if grayscale { 1 } else { 3 };
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * channels);
+    for pixel in rgba.pixels() {
+        let alpha = u32::from(pixel[3]);
+        let rgb = [pixel[0], pixel[1], pixel[2]]
+            .map(|c| ((u32::from(c) * alpha + 255 * (255 - alpha) + 127) / 255) as u8);
+        if grayscale {
+            let [r, g, b] = rgb.map(u32::from);
+            pixels.push(((77 * r + 150 * g + 29 * b) >> 8) as u8);
+        } else {
+            pixels.extend_from_slice(&rgb);
+        }
+    }
+    Ok((pixels, width, height, source.dpi))
+}
+
 /// [`render_pages_for_ocr`] with `max_rasters` overriding the one in
 /// `options`, so a caller sizing each round to its free OCR slots need not
 /// clone the options.
@@ -980,6 +1034,7 @@ pub(crate) fn render_pages_for_ocr_capped(
     let OcrRenderOptions {
         max_rasters: _,
         dpi,
+        page_images,
         grayscale,
         render_form_fields,
         continue_on_page_error,
@@ -1059,25 +1114,33 @@ pub(crate) fn render_pages_for_ocr_capped(
                 }
             };
 
-            // Clamp the render DPI so the long edge stays within the raster budget.
-            let long_edge_pt = page.page_width.max(page.page_height);
-            let mut eff_dpi = dpi;
-            if long_edge_pt > 0.0 {
-                let max_dpi = MAX_OCR_RENDER_LONG_EDGE_PX * 72.0 / long_edge_pt;
-                if eff_dpi > max_dpi {
-                    eff_dpi = max_dpi;
-                }
-            }
-
-            let bitmap = page_obj.render_with_form(eff_dpi, form.as_ref())?;
-            let width = bitmap.width() as u32;
-            let height = bitmap.height() as u32;
-            // Grayscale or RGB per the engine; see `OcrEngine::prefers_grayscale`.
-            let mut pixels = if grayscale {
-                bitmap.to_luma()
-            } else {
-                bitmap.to_rgb()
-            };
+            // Supplied images bypass PDFium rendering. Their own DPI controls
+            // OCR coordinate recovery; the requested render DPI does not.
+            let (mut pixels, width, height, eff_dpi) =
+                if let Some(source) = page_images.get(&(page.page_number as u32)) {
+                    load_ocr_page_image(source, page, grayscale)?
+                } else {
+                    let long_edge_pt = page.page_width.max(page.page_height);
+                    let mut eff_dpi = dpi;
+                    if long_edge_pt > 0.0 {
+                        let max_dpi = MAX_OCR_RENDER_LONG_EDGE_PX * 72.0 / long_edge_pt;
+                        if eff_dpi > max_dpi {
+                            eff_dpi = max_dpi;
+                        }
+                    }
+                    let bitmap = page_obj.render_with_form(eff_dpi, form.as_ref())?;
+                    let pixels = if grayscale {
+                        bitmap.to_luma()
+                    } else {
+                        bitmap.to_rgb()
+                    };
+                    (
+                        pixels,
+                        bitmap.width() as u32,
+                        bitmap.height() as u32,
+                        eff_dpi,
+                    )
+                };
             // A page whose native text the merge keeps as is: blank that text out of the raster.
             // The merge drops every OCR line overlapping kept native text, so reading those
             // lines was wasted; OCR now only sees what the text layer doesn't cover (figures,

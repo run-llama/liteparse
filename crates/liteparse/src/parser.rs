@@ -406,6 +406,7 @@ impl LiteParse {
             // by free slots and ignores this field.
             max_rasters: self.config.num_workers.max(1),
             dpi: self.config.dpi,
+            page_images: self.config.ocr_page_images.clone(),
             grayscale,
             render_form_fields: self.config.render_form_fields,
             continue_on_page_error: self.config.continue_on_page_error,

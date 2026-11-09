@@ -43,6 +43,12 @@ export interface PoolOptions {
 export interface LiteParseConfig {
   ocrLanguage: string;
   ocrEnabled: boolean;
+  /**
+   * Existing full-page images for OCR, keyed by 1-based document page number.
+   * Missing entries render normally; supplying an image does not force OCR.
+   * Files must remain available until parsing finishes, including pool/batch use.
+   */
+  ocrPageImages?: Record<number, OcrPageImage>;
   ocrServerUrl?: string;
   /** Extra HTTP headers sent with every request to `ocrServerUrl`. */
   ocrServerHeaders?: Record<string, string>;
@@ -150,6 +156,14 @@ export interface LiteParseConfig {
   includeComplexity: boolean;
   /** Expose page-scoped vector shapes and merged H/V line segments. Default false. */
   extractVectorGraphics: boolean;
+}
+
+/** A full-page OCR image, matching the PDF after orientation corrections. */
+export interface OcrPageImage {
+  /** Local image path. Cropped, stretched or deskewed images are unsupported. */
+  path: string;
+  /** Actual resolution, independent of the parser's requested render DPI. */
+  dpi: number;
 }
 
 /**
@@ -660,6 +674,7 @@ export class LiteParse {
     const nativeConfig: LiteParseNativeConfig = {
       ocrLanguage: userConfig.ocrLanguage,
       ocrEnabled: userConfig.ocrEnabled,
+      ocrPageImages: userConfig.ocrPageImages,
       ocrServerUrl: userConfig.ocrServerUrl,
       ocrServerHeaders: userConfig.ocrServerHeaders,
       tessdataPath: userConfig.tessdataPath,
@@ -721,6 +736,7 @@ export class LiteParse {
     this._config = {
       ocrLanguage: resolved.ocrLanguage ?? "eng",
       ocrEnabled: resolved.ocrEnabled ?? true,
+      ocrPageImages: resolved.ocrPageImages ?? {},
       ocrServerUrl: resolved.ocrServerUrl ?? undefined,
       ocrServerHeaders: resolved.ocrServerHeaders ?? undefined,
       tessdataPath: resolved.tessdataPath ?? undefined,

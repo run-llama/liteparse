@@ -4,7 +4,7 @@ use napi::bindgen_prelude::{Error, Result};
 use napi_derive::napi;
 
 use liteparse::config::{
-    CropBox, ImageMode, LiteParseConfig, OutputFormat, PageOrientationCorrection,
+    CropBox, ImageMode, LiteParseConfig, OcrPageImage, OutputFormat, PageOrientationCorrection,
 };
 use liteparse::layout::{LayoutBlock, LayoutCell};
 use liteparse::parser::ParseResult;
@@ -25,6 +25,8 @@ pub struct JsLiteParseConfig {
     pub ocr_language: Option<String>,
     /// Whether OCR is enabled.
     pub ocr_enabled: Option<bool>,
+    /// Existing full-page OCR images, keyed by 1-based document page number.
+    pub ocr_page_images: Option<HashMap<String, JsOcrPageImage>>,
     /// HTTP OCR server URL. If set, uses HTTP OCR instead of Tesseract.
     pub ocr_server_url: Option<String>,
     /// Extra HTTP headers sent with every request to `ocrServerUrl`
@@ -131,6 +133,14 @@ pub struct JsLiteParseConfig {
     pub extract_vector_graphics: Option<bool>,
 }
 
+/// Local full-page image in corrected viewport orientation, at its actual DPI.
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsOcrPageImage {
+    pub path: String,
+    pub dpi: f64,
+}
+
 /// One page's orientation correction: `page` is 1-based, `angle` is the
 /// clockwise degrees (0/90/180/270) the content appears rotated.
 #[napi(object)]
@@ -156,6 +166,29 @@ impl JsLiteParseConfig {
         let mut cfg = LiteParseConfig::default();
         if let Some(v) = self.ocr_language {
             cfg.ocr_language = v;
+        }
+        if let Some(images) = self.ocr_page_images {
+            cfg.ocr_page_images = images
+                .into_iter()
+                .map(|(page, image)| {
+                    let page = page
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|number| *number > 0 && number.to_string() == page)
+                        .ok_or_else(|| {
+                            Error::from_reason(
+                                "ocrPageImages keys must be positive document page numbers",
+                            )
+                        })?;
+                    Ok((
+                        page,
+                        OcrPageImage {
+                            path: image.path,
+                            dpi: image.dpi as f32,
+                        },
+                    ))
+                })
+                .collect::<Result<_>>()?;
         }
         if let Some(v) = self.ocr_enabled {
             cfg.ocr_enabled = v;
@@ -290,6 +323,20 @@ impl JsLiteParseConfig {
         Self {
             ocr_language: Some(cfg.ocr_language.clone()),
             ocr_enabled: Some(cfg.ocr_enabled),
+            ocr_page_images: Some(
+                cfg.ocr_page_images
+                    .iter()
+                    .map(|(page, image)| {
+                        (
+                            page.to_string(),
+                            JsOcrPageImage {
+                                path: image.path.clone(),
+                                dpi: image.dpi as f64,
+                            },
+                        )
+                    })
+                    .collect(),
+            ),
             ocr_server_url: cfg.ocr_server_url.clone(),
             ocr_server_headers: if cfg.ocr_server_headers.is_empty() {
                 None
