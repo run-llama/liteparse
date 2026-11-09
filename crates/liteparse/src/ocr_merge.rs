@@ -106,6 +106,9 @@ pub struct OcrRenderOptions {
     /// `Some` renders exactly these pages, whatever the scoring says, so a
     /// caller with its own routing can override it.
     pub selection: Option<HashSet<u32>>,
+    /// Blur rasters of 1-bit full-page scans (see
+    /// `LiteParseConfig::ocr_blur_bilevel_scans`).
+    pub blur_bilevel_scans: bool,
 }
 
 impl Default for OcrRenderOptions {
@@ -118,6 +121,7 @@ impl Default for OcrRenderOptions {
             continue_on_page_error: false,
             reflatten_pages: HashSet::new(),
             selection: None,
+            blur_bilevel_scans: false,
         }
     }
 }
@@ -951,6 +955,85 @@ fn count_columns(region: &Region, total_items: usize) -> usize {
 /// to avoid excessive memory usage.
 pub(crate) const MAX_OCR_RENDER_LONG_EDGE_PX: f32 = 4096.0;
 
+/// Gaussian sigma (raster pixels) for [`OcrRenderOptions::blur_bilevel_scans`].
+/// Tuned on 300 dpi renders: dotted pages read the same from 0.6 to 0.9; around
+/// 0.5 many stay unread.
+const BILEVEL_SCAN_BLUR_SIGMA: f32 = 0.75;
+
+/// Whether the page is a 1-bit scan: a top-level image covering the page
+/// (either orientation, so `/Rotate` pages count) with 1 bit per pixel.
+fn is_bilevel_scan(page_obj: &pdfium::Page) -> bool {
+    let (pw, ph) = (page_obj.width(), page_obj.height());
+    let covers = |w: f32, h: f32| {
+        (w > pw * MAX_IMAGE_PAGE_COVERAGE && h > ph * MAX_IMAGE_PAGE_COVERAGE)
+            || (w > ph * MAX_IMAGE_PAGE_COVERAGE && h > pw * MAX_IMAGE_PAGE_COVERAGE)
+    };
+    (0..page_obj.object_count()).any(|i| {
+        let Some(obj) = page_obj.object(i) else {
+            return false;
+        };
+        if !matches!(obj.kind(), pdfium::PageObjectKind::Image) {
+            return false;
+        }
+        let Some(b) = obj.bounds() else {
+            return false;
+        };
+        covers(b.right - b.left, (b.top - b.bottom).abs())
+            && obj.image_metadata().is_some_and(|m| m.bits_per_pixel == 1)
+    })
+}
+
+/// In-place separable Gaussian blur of an interleaved 8-bit raster, edges clamped.
+fn gaussian_blur(pixels: &mut [u8], width: usize, height: usize, channels: usize, sigma: f32) {
+    let radius = (3.0 * sigma).ceil() as usize;
+    let weights: Vec<f32> = (0..=2 * radius)
+        .map(|i| {
+            let d = i as f32 - radius as f32;
+            (-d * d / (2.0 * sigma * sigma)).exp()
+        })
+        .collect();
+    let total: f32 = weights.iter().sum();
+    // 16.16 fixed point: the taps sum to 65536, so a full-white run stays 255.
+    let mut kernel: Vec<u32> = weights
+        .iter()
+        .map(|w| (w / total * 65536.0).round() as u32)
+        .collect();
+    let drift = 65536i64 - kernel.iter().map(|&k| k as i64).sum::<i64>();
+    kernel[radius] = (kernel[radius] as i64 + drift) as u32;
+
+    let row = width * channels;
+    let mut tmp = vec![0u8; pixels.len()];
+    // Horizontal pass: pixels -> tmp.
+    for y in 0..height {
+        let src = &pixels[y * row..(y + 1) * row];
+        let dst = &mut tmp[y * row..(y + 1) * row];
+        for x in 0..width {
+            for c in 0..channels {
+                let mut acc = 1u32 << 15;
+                for (k, &w) in kernel.iter().enumerate() {
+                    let sx = (x + k).saturating_sub(radius).min(width - 1);
+                    acc += w * src[sx * channels + c] as u32;
+                }
+                dst[x * channels + c] = (acc >> 16) as u8;
+            }
+        }
+    }
+    // Vertical pass: tmp -> pixels, a whole row at a time.
+    let mut acc = vec![0u32; row];
+    for y in 0..height {
+        acc.fill(1 << 15);
+        for (k, &w) in kernel.iter().enumerate() {
+            let sy = (y + k).saturating_sub(radius).min(height - 1);
+            for (a, &s) in acc.iter_mut().zip(&tmp[sy * row..(sy + 1) * row]) {
+                *a += w * s as u32;
+            }
+        }
+        for (d, &a) in pixels[y * row..(y + 1) * row].iter_mut().zip(&acc) {
+            *d = (a >> 16) as u8;
+        }
+    }
+}
+
 /// Render the pages in `pages[start..]` that need OCR from an already-open
 /// document, stopping once `options.max_rasters` of them have been rendered.
 /// Returns the rasters plus the index to resume scanning from, so a caller
@@ -985,6 +1068,7 @@ pub(crate) fn render_pages_for_ocr_capped(
         continue_on_page_error,
         reflatten_pages: flatten_page_numbers,
         selection,
+        blur_bilevel_scans,
     } = options;
     let (dpi, grayscale, render_form_fields, continue_on_page_error) = (
         *dpi,
@@ -1078,6 +1162,16 @@ pub(crate) fn render_pages_for_ocr_capped(
             } else {
                 bitmap.to_rgb()
             };
+            let channels = if grayscale { 1 } else { 3 };
+            if *blur_bilevel_scans && is_bilevel_scan(&page_obj) {
+                gaussian_blur(
+                    &mut pixels,
+                    width as usize,
+                    height as usize,
+                    channels,
+                    BILEVEL_SCAN_BLUR_SIGMA,
+                );
+            }
             // A page whose native text the merge keeps as is: blank that text out of the raster.
             // The merge drops every OCR line overlapping kept native text, so reading those
             // lines was wasted; OCR now only sees what the text layer doesn't cover (figures,
@@ -1087,13 +1181,7 @@ pub(crate) fn render_pages_for_ocr_capped(
                 && !replace_native
                 && matches!(garbled_scope(page), GarbledScope::None)
             {
-                mask_native_text(
-                    &mut pixels,
-                    width,
-                    height,
-                    page,
-                    if grayscale { 1 } else { 3 },
-                );
+                mask_native_text(&mut pixels, width, height, page, channels);
             }
 
             let image_rects = if has_native_text {
@@ -2495,6 +2583,21 @@ fn clean_ocr_table_artifacts(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::types::Rect;
+
+    #[test]
+    fn gaussian_blur_keeps_flat_areas_and_spreads_a_dot() {
+        for v in [0u8, 255] {
+            let mut flat = vec![v; 9 * 7 * 3];
+            gaussian_blur(&mut flat, 9, 7, 3, BILEVEL_SCAN_BLUR_SIGMA);
+            assert!(flat.iter().all(|&p| p == v));
+        }
+        let mut dot = vec![255u8; 9 * 9];
+        dot[4 * 9 + 4] = 0;
+        gaussian_blur(&mut dot, 9, 9, 1, BILEVEL_SCAN_BLUR_SIGMA);
+        assert!(dot[4 * 9 + 4] > 0 && dot[4 * 9 + 4] < 255);
+        assert!(dot[4 * 9 + 3] < 255 && dot[4 * 9 + 3] == dot[4 * 9 + 5]);
+        assert_eq!(dot[0], 255);
+    }
 
     #[test]
     fn malformed_tokens_flag_cipher_and_legacy_fonts() {

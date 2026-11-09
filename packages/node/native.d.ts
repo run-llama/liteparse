@@ -111,6 +111,11 @@ export interface JsLiteParseConfig {
    */
   ocrFailureFatal?: boolean
   /**
+   * Lightly blur OCR rasters of 1-bit full-page scans so dot patterns don't
+   * alias in the OCR server's detector downscale. Default false.
+   */
+  ocrBlurBilevelScans?: boolean
+  /**
    * OCR request-hedging schedule (ms). Empty/unset = no hedging. Multiple
    * delays (e.g. `[0, 5000, 10000]`) fire duplicate requests per attempt and
    * take the first success — lower tail latency at the cost of extra load.

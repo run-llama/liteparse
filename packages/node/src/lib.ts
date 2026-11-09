@@ -102,6 +102,12 @@ export interface LiteParseConfig {
    */
   ocrFailureFatal: boolean;
   /**
+   * Lightly blur OCR rasters of 1-bit full-page scans (default: false). Dense
+   * dot patterns (security paper, dithering) alias when the OCR server shrinks
+   * the page for text detection, and the page comes back nearly empty.
+   */
+  ocrBlurBilevelScans: boolean;
+  /**
    * OCR request-hedging schedule (ms). Empty (default) = no hedging. Multiple
    * delays (e.g. `[0, 5000, 10000, 15000, 20000]`) fire duplicate requests per
    * OCR attempt and take the first success — lower tail latency on a slow/stuck
@@ -688,6 +694,7 @@ export class LiteParse {
       quiet: userConfig.quiet,
       numWorkers: userConfig.numWorkers,
       ocrFailureFatal: userConfig.ocrFailureFatal,
+      ocrBlurBilevelScans: userConfig.ocrBlurBilevelScans,
       ocrHedgeDelaysMs: userConfig.ocrHedgeDelaysMs,
       emitWordBoxes: userConfig.emitWordBoxes,
       extractTextMetadata: userConfig.extractTextMetadata,
@@ -749,6 +756,7 @@ export class LiteParse {
       quiet: resolved.quiet ?? false,
       numWorkers: resolved.numWorkers ?? 1,
       ocrFailureFatal: resolved.ocrFailureFatal ?? true,
+      ocrBlurBilevelScans: resolved.ocrBlurBilevelScans ?? false,
       ocrHedgeDelaysMs: resolved.ocrHedgeDelaysMs ?? [],
       emitWordBoxes: resolved.emitWordBoxes ?? false,
       extractTextMetadata: resolved.extractTextMetadata ?? false,

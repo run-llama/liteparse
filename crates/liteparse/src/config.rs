@@ -121,6 +121,12 @@ pub struct LiteParseConfig {
     /// that prefer a degraded document over a hard failure (e.g. when the host
     /// has its own OCR fallback or treats OCR as best-effort enrichment).
     pub ocr_failure_fatal: bool,
+    /// Lightly blur (Gaussian, sigma 0.75 px) the OCR raster of pages that are a
+    /// 1-bit full-page scan. Dense dot patterns on bilevel scans (security paper,
+    /// dithering) alias when an OCR server shrinks the page for text detection,
+    /// and the detector then finds almost no lines. Default `false`.
+    #[serde(default)]
+    pub ocr_blur_bilevel_scans: bool,
     /// OCR request-hedging schedule (milliseconds) for the HTTP OCR engine.
     /// Empty (default) = no hedging. With multiple delays (e.g.
     /// `[0, 5000, 10000, 15000, 20000]`), each OCR attempt fires a duplicate
@@ -317,6 +323,7 @@ impl Default for LiteParseConfig {
             detect_screenshot_rects: false,
             render_form_fields: false,
             ocr_failure_fatal: true,
+            ocr_blur_bilevel_scans: false,
             ocr_hedge_delays_ms: Vec::new(),
             emit_word_boxes: false,
             extract_text_metadata: false,

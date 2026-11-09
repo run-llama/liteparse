@@ -411,6 +411,7 @@ impl LiteParse {
             continue_on_page_error: self.config.continue_on_page_error,
             reflatten_pages,
             selection: None,
+            blur_bilevel_scans: self.config.ocr_blur_bilevel_scans,
         }
     }
 
