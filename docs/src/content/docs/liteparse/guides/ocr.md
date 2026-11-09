@@ -120,7 +120,7 @@ Each OCR request sends the page image as `file` and the language as `language`. 
 ```typescript
 const parser = new LiteParse({
   ocrServerUrl: "https://ocr.internal/ocr",
-  // Ask for measured word boxes and their angles on every page.
+  // Ask for measured word boxes and line angles on every page.
   ocrRequestFields: {
     correct_rotation: "true",
     return_word_boxes: "true",

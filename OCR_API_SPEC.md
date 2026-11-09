@@ -25,7 +25,7 @@ POST /ocr
 | `correct_rotation` | string | No | `true` lets the server detect and undo the page's rotation before reading it; `false` reads the page as sent. |
 | `return_word_boxes` | string | No | `true` asks a line-level server to also measure each word's box (see `results[].words`). |
 | `dense_ocr_detection` | string | No | `true` runs denser text detection. |
-| `return_bbox_angles` | string | No | `true` returns each line and word as its rotated quad, with its angle. |
+| `return_bbox_angles` | string | No | `true` returns each line's angle in `result_meta`. |
 
 LiteParse sends `file` and `language`, plus every field in `ocr_request_fields` / `ocrRequestFields` as given, with the page's entry in `ocr_page_request_fields` / `ocrPageRequestFields` merged over them. A `language` entry replaces the default. LiteParse adds no other field, so `correct_rotation`, `return_word_boxes`, `dense_ocr_detection` and `return_bbox_angles` are sent only when the caller sets them. Servers may ignore any of these fields.
 
