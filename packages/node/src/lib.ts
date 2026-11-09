@@ -52,6 +52,13 @@ export interface LiteParseConfig {
    * The measured boxes become {@link TextItem.words}. Default false.
    */
   ocrWordBoxes?: boolean;
+  /**
+   * 1-based pages you have already turned upright (including pages in
+   * {@link LiteParseConfig.pageOrientationCorrections}). Their OCR requests send
+   * `correct_rotation=false` so the server reads them as sent; every other
+   * page sends `correct_rotation=true`. Default empty.
+   */
+  ocrUprightPages?: number[];
   tessdataPath?: string;
   maxPages: number;
   targetPages?: string;
@@ -669,6 +676,7 @@ export class LiteParse {
       ocrServerUrl: userConfig.ocrServerUrl,
       ocrServerHeaders: userConfig.ocrServerHeaders,
       ocrWordBoxes: userConfig.ocrWordBoxes,
+      ocrUprightPages: userConfig.ocrUprightPages,
       tessdataPath: userConfig.tessdataPath,
       maxPages: userConfig.maxPages,
       targetPages: userConfig.targetPages,
@@ -731,6 +739,7 @@ export class LiteParse {
       ocrServerUrl: resolved.ocrServerUrl ?? undefined,
       ocrServerHeaders: resolved.ocrServerHeaders ?? undefined,
       ocrWordBoxes: resolved.ocrWordBoxes ?? false,
+      ocrUprightPages: resolved.ocrUprightPages ?? [],
       tessdataPath: resolved.tessdataPath ?? undefined,
       maxPages: resolved.maxPages ?? 1000,
       targetPages: resolved.targetPages ?? undefined,

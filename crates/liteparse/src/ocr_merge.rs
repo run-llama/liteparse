@@ -77,6 +77,15 @@ pub struct OcrRaster {
     /// ([`ComplexityReason::InvisibleTextLayer`]).
     #[serde(default)]
     pub replace_native: bool,
+    /// Ask the engine to detect and undo page rotation
+    /// (`OcrOptions::correct_rotation`). `false` for a page in
+    /// [`OcrRenderOptions::upright_pages`].
+    #[serde(default = "default_correct_rotation")]
+    pub correct_rotation: bool,
+}
+
+fn default_correct_rotation() -> bool {
+    true
 }
 
 /// How [`render_pages_for_ocr`] picks and rasterizes pages.
@@ -106,6 +115,10 @@ pub struct OcrRenderOptions {
     /// `Some` renders exactly these pages, whatever the scoring says, so a
     /// caller with its own routing can override it.
     pub selection: Option<HashSet<u32>>,
+    /// Pages the caller already turned upright
+    /// (`LiteParseConfig::ocr_upright_pages`): their rasters ask the engine
+    /// not to correct rotation.
+    pub upright_pages: HashSet<u32>,
 }
 
 impl Default for OcrRenderOptions {
@@ -118,6 +131,7 @@ impl Default for OcrRenderOptions {
             continue_on_page_error: false,
             reflatten_pages: HashSet::new(),
             selection: None,
+            upright_pages: HashSet::new(),
         }
     }
 }
@@ -233,6 +247,7 @@ impl OcrTaskPool {
         let options = OcrOptions {
             language: self.language.clone(),
             dpi: raster.dpi,
+            correct_rotation: raster.correct_rotation,
         };
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -985,6 +1000,7 @@ pub(crate) fn render_pages_for_ocr_capped(
         continue_on_page_error,
         reflatten_pages: flatten_page_numbers,
         selection,
+        upright_pages,
     } = options;
     let (dpi, grayscale, render_form_fields, continue_on_page_error) = (
         *dpi,
@@ -1109,6 +1125,7 @@ pub(crate) fn render_pages_for_ocr_capped(
                 has_native_text,
                 image_rects,
                 replace_native,
+                correct_rotation: !upright_pages.contains(&(page.page_number as u32)),
             }))
         })();
         match page_render {
@@ -3249,6 +3266,7 @@ mod tests {
             has_native_text: false,
             image_rects: Vec::new(),
             replace_native: false,
+            correct_rotation: true,
             page_number: idx + 1,
             // 1x1 grayscale pixel; the engine never inspects it.
             pixels: vec![0u8],
@@ -3405,6 +3423,41 @@ mod tests {
             .map(|i| (i + 1, format!("dpi {}", 72.0 + i as f32 * 4.0)))
             .collect();
         assert_eq!(got, want);
+    }
+
+    /// Fails with the `correct_rotation` it was asked for as the message.
+    struct RotationEchoEngine;
+
+    impl OcrEngine for RotationEchoEngine {
+        fn name(&self) -> &str {
+            "rotation-echo"
+        }
+
+        fn recognize<'a, 'b: 'a, 'c: 'a>(
+            &'a self,
+            _image_data: &'c [u8],
+            _width: u32,
+            _height: u32,
+            options: &'b OcrOptions,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = OcrTaskResult> + Send + 'a>>
+        {
+            let rotate = options.correct_rotation;
+            Box::pin(async move { Err(format!("{rotate}").into()) })
+        }
+    }
+
+    // Each raster's `correct_rotation` reaches the engine call for that page.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_raster_correct_rotation_reaches_the_engine() {
+        let rendered = (0..2)
+            .map(|i| OcrRaster {
+                correct_rotation: i == 0,
+                ..make_rendered(i)
+            })
+            .collect();
+        let outcomes = recognize_rasters(rendered, Arc::new(RotationEchoEngine), "eng", 2).await;
+        let got: Vec<String> = outcomes.iter().map(|o| o.error.clone().unwrap()).collect();
+        assert_eq!(got, ["true", "false"]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

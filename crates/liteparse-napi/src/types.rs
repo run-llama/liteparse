@@ -33,6 +33,9 @@ pub struct JsLiteParseConfig {
     /// Ask `ocrServerUrl` to measure each word (`return_word_boxes`,
     /// `dense_ocr_detection`, `return_bbox_angles`). Default false.
     pub ocr_word_boxes: Option<bool>,
+    /// 1-based pages already turned upright by the caller. Their OCR requests
+    /// send `correct_rotation=false`; every other page sends `true`.
+    pub ocr_upright_pages: Option<Vec<u32>>,
     /// Path to tessdata directory for Tesseract.
     pub tessdata_path: Option<String>,
     /// Maximum number of pages to parse.
@@ -172,6 +175,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.ocr_word_boxes {
             cfg.ocr_word_boxes = v;
         }
+        if let Some(v) = self.ocr_upright_pages {
+            cfg.ocr_upright_pages = v;
+        }
         if let Some(v) = self.tessdata_path {
             cfg.tessdata_path = Some(v);
         }
@@ -303,6 +309,7 @@ impl JsLiteParseConfig {
                 Some(cfg.ocr_server_headers.iter().cloned().collect())
             },
             ocr_word_boxes: Some(cfg.ocr_word_boxes),
+            ocr_upright_pages: Some(cfg.ocr_upright_pages.clone()),
             tessdata_path: cfg.tessdata_path.clone(),
             max_pages: Some(cfg.max_pages as u32),
             target_pages: cfg.target_pages.clone(),

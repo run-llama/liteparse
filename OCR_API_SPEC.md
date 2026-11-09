@@ -22,11 +22,12 @@ POST /ocr
 |-------|------|----------|-------------|
 | `file` | binary | Yes | Image file (PNG, JPG, etc.) |
 | `language` | string | No | Language code (default: `en`) |
+| `correct_rotation` | string | No | `true` lets the server detect and undo the page's rotation before reading it; `false` reads the page as sent. |
 | `return_word_boxes` | string | No | `true` asks a line-level server to also measure each word's box (see `results[].words`). |
 | `dense_ocr_detection` | string | No | `true` runs denser text detection. |
 | `return_bbox_angles` | string | No | `true` returns each line and word as its rotated quad, with its angle. |
 
-LiteParse sends the last three fields together, set to `true`, only when `ocr_word_boxes` is on, and otherwise leaves them out. Servers may ignore them.
+LiteParse sends `correct_rotation` on every request: `false` for pages listed in `ocr_upright_pages` (pages the caller already turned upright) and `true` for every other page. It sends `return_word_boxes`, `dense_ocr_detection` and `return_bbox_angles` together, set to `true`, only when `ocr_word_boxes` is on, and otherwise leaves them out. Servers may ignore any of these fields.
 
 ### Language Codes
 

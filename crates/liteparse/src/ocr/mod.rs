@@ -48,6 +48,9 @@ pub struct OcrOptions {
     /// that can't infer DPI from raw pixel buffers (e.g. Tesseract fed RGB bytes)
     /// use this so their internal point-size estimates are correct.
     pub dpi: f32,
+    /// Let the engine detect and undo page rotation before reading. The HTTP
+    /// engine sends it as `correct_rotation`; the other engines ignore it.
+    pub correct_rotation: bool,
 }
 
 /// On native targets, `OcrEngine` and its returned futures must be `Send` so
@@ -142,6 +145,7 @@ mod tests {
         let opts = OcrOptions {
             language: "eng".into(),
             dpi: 150.0,
+            correct_rotation: true,
         };
         let r = engine.recognize(&[], 1, 1, &opts).await.unwrap();
         assert_eq!(r.len(), 1);

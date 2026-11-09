@@ -458,6 +458,7 @@ class LiteParseConfig:
     ocr_server_url: Optional[str]
     ocr_server_headers: Optional[Dict[str, str]]
     ocr_word_boxes: bool
+    ocr_upright_pages: List[int]
     tessdata_path: Optional[str]
     max_pages: int
     target_pages: Optional[str]

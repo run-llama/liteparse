@@ -137,7 +137,8 @@ impl HttpOcrResponse {
 /// HTTP-based OCR engine that conforms to LiteParse OCR API specification.
 /// The server must implement the API defined in OCR_API_SPEC.md:
 ///     - POST /ocr endpoint
-///     - Accepts multipart/form-data with 'file' and 'language' fields, plus
+///     - Accepts multipart/form-data with 'file', 'language' and
+///       'correct_rotation' (from `OcrOptions::correct_rotation`) fields, plus
 ///       'return_word_boxes', 'dense_ocr_detection' and 'return_bbox_angles'
 ///       when the engine is built `with_word_boxes(true)`
 ///     - Returns JSON: { results: [{ text, bbox: [x1,y1,x2,y2], confidence }] }
@@ -233,6 +234,29 @@ fn is_connection_drop(err: &reqwest::Error) -> bool {
     false
 }
 
+/// The text fields of one OCR request: `language`, `correct_rotation`, and
+/// the fields every LlamaParse tier sends when it wants word boxes.
+fn request_fields(
+    language: &str,
+    correct_rotation: bool,
+    word_boxes: bool,
+) -> Vec<(&'static str, String)> {
+    let mut fields = vec![
+        ("language", language.to_string()),
+        ("correct_rotation", correct_rotation.to_string()),
+    ];
+    if word_boxes {
+        for name in [
+            "return_word_boxes",
+            "dense_ocr_detection",
+            "return_bbox_angles",
+        ] {
+            fields.push((name, "true".to_string()));
+        }
+    }
+    fields
+}
+
 /// Send a single OCR request and return the raw response body. Encodes the
 /// multipart form fresh each call (a `Form` is consumed by `send`).
 async fn send_one(
@@ -240,24 +264,17 @@ async fn send_one(
     url: &str,
     headers: &[(String, String)],
     png_bytes: &[u8],
-    language: &str,
-    word_boxes: bool,
+    fields: &[(&'static str, String)],
     timeout_ms: u64,
 ) -> Result<String, reqwest::Error> {
-    let mut form = Form::new()
-        .part(
-            "file",
-            Part::bytes(png_bytes.to_vec())
-                .file_name("image.png")
-                .mime_str("image/png")?,
-        )
-        .text("language", language.to_string());
-    // The fields every LlamaParse tier sends when it wants word boxes.
-    if word_boxes {
-        form = form
-            .text("return_word_boxes", "true")
-            .text("dense_ocr_detection", "true")
-            .text("return_bbox_angles", "true");
+    let mut form = Form::new().part(
+        "file",
+        Part::bytes(png_bytes.to_vec())
+            .file_name("image.png")
+            .mime_str("image/png")?,
+    );
+    for (name, value) in fields {
+        form = form.text(*name, value.clone());
     }
     let mut request = client
         .post(url)
@@ -328,9 +345,11 @@ impl HttpOcrEngine {
         client: &Client,
         png_bytes: &[u8],
         language: &str,
+        correct_rotation: bool,
     ) -> Result<String, reqwest::Error> {
         let delays = &self.retry.hedge_delays_ms;
         let timeout_ms = self.retry.request_timeout_ms;
+        let fields = request_fields(language, correct_rotation, self.word_boxes);
 
         // Single-request fast path: no hedging, or a single (possibly delayed)
         // request. Borrows directly — no task spawn / cloning.
@@ -343,8 +362,7 @@ impl HttpOcrEngine {
                 &self.server_url,
                 &self.headers,
                 png_bytes,
-                language,
-                self.word_boxes,
+                &fields,
                 timeout_ms,
             )
             .await;
@@ -363,14 +381,12 @@ impl HttpOcrEngine {
             let url = self.server_url.clone();
             let headers = self.headers.clone();
             let png = png_bytes.to_vec();
-            let lang = language.to_string();
-            let word_boxes = self.word_boxes;
+            let fields = fields.clone();
             handles.push(tokio::spawn(async move {
                 if delay > 0 {
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
-                let res =
-                    send_one(&client, &url, &headers, &png, &lang, word_boxes, timeout_ms).await;
+                let res = send_one(&client, &url, &headers, &png, &fields, timeout_ms).await;
                 let _ = tx.send(res).await;
             }));
         }
@@ -431,7 +447,12 @@ impl OcrEngine for HttpOcrEngine {
             let raw = loop {
                 attempt += 1;
                 match self
-                    .send_hedged(&client, &png_bytes, &options.language)
+                    .send_hedged(
+                        &client,
+                        &png_bytes,
+                        &options.language,
+                        options.correct_rotation,
+                    )
                     .await
                 {
                     Ok(body) => break body,
@@ -585,6 +606,7 @@ mod tests {
     /// Serve one OCR request on a local socket and return the request bytes.
     /// `engine` builds the engine under test from the socket's URL.
     async fn capture_request(
+        correct_rotation: bool,
         engine: impl FnOnce(String) -> std::sync::Arc<dyn OcrEngine>,
     ) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -614,6 +636,7 @@ mod tests {
         let opts = OcrOptions {
             language: "en".into(),
             dpi: 150.0,
+            correct_rotation,
         };
         engine.recognize(&[255u8; 3], 1, 1, &opts).await.unwrap();
         server.await.unwrap()
@@ -625,7 +648,7 @@ mod tests {
     async fn test_ocr_word_boxes_option_sends_the_word_box_fields() {
         use crate::{config::LiteParseConfig, parser::LiteParse};
         let request = |on: bool| {
-            capture_request(move |url| {
+            capture_request(true, move |url| {
                 LiteParse::new(LiteParseConfig {
                     ocr_enabled: true,
                     ocr_server_url: Some(url),
@@ -653,6 +676,22 @@ mod tests {
         assert!(fields.iter().all(|f| !off.contains(f)), "{off}");
     }
 
+    /// Every request states `correct_rotation`, with or without word boxes,
+    /// so the server never falls back to its own default.
+    #[tokio::test]
+    async fn test_every_request_sends_correct_rotation() {
+        for (value, word_boxes) in [(true, false), (false, false), (false, true)] {
+            let req = capture_request(value, move |url| -> std::sync::Arc<dyn OcrEngine> {
+                std::sync::Arc::new(HttpOcrEngine::new(url).with_word_boxes(word_boxes))
+            })
+            .await;
+            assert!(
+                req.contains(&format!("name=\"correct_rotation\"\r\n\r\n{value}\r\n")),
+                "correct_rotation={value} not sent: {req}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_recognize_network_error() {
         // Single attempt so the connection-refused failure surfaces fast
@@ -664,6 +703,7 @@ mod tests {
         let opts = OcrOptions {
             language: "eng".into(),
             dpi: 150.0,
+            correct_rotation: true,
         };
         let r = e.recognize(&[0u8; 4], 1, 1, &opts).await;
         assert!(r.is_err());
@@ -703,6 +743,7 @@ mod tests {
         let opts = OcrOptions {
             language: "eng".into(),
             dpi: 150.0,
+            correct_rotation: true,
         };
         let r = e.recognize(&[0u8; 4], 1, 1, &opts).await;
         assert!(r.is_err());

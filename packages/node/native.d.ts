@@ -20,6 +20,11 @@ export interface JsLiteParseConfig {
    * `dense_ocr_detection`, `return_bbox_angles`). Default false.
    */
   ocrWordBoxes?: boolean
+  /**
+   * 1-based pages already turned upright by the caller. Their OCR requests
+   * send `correct_rotation=false`; every other page sends `true`.
+   */
+  ocrUprightPages?: Array<number>
   /** Path to tessdata directory for Tesseract. */
   tessdataPath?: string
   /** Maximum number of pages to parse. */

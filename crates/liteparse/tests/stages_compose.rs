@@ -620,6 +620,40 @@ async fn parse_equals_composed_stages_with_form_fields_and_rendered_screenshots(
     );
 }
 
+/// `ocr_upright_pages` reaches the rasters: a listed page asks the OCR engine
+/// not to correct rotation, and every other page asks it to.
+#[tokio::test]
+#[serial]
+async fn ocr_upright_pages_turn_off_rotation_correction() {
+    let lib = Library::init();
+    let document =
+        stages::open(&lib, &PdfInput::Path(fixture("page_labels.pdf")), None, &[]).unwrap();
+    let probe = LiteParse::new(everything_config());
+    let extracted = stages::extract(&document, &probe.extract_request(None, usize::MAX)).unwrap();
+    let numbers: Vec<u32> = extracted
+        .pages
+        .iter()
+        .map(|p| p.page_number as u32)
+        .collect();
+    assert!(numbers.len() >= 2, "fixture needs two pages");
+    let parser = LiteParse::new(LiteParseConfig {
+        ocr_upright_pages: vec![numbers[0]],
+        ..everything_config()
+    });
+    let options = stages::OcrRenderOptions {
+        max_rasters: 0,
+        selection: Some(numbers.iter().copied().collect()),
+        ..parser.ocr_render_options(false, &extracted)
+    };
+    let (rasters, _) = stages::render_for_ocr(&document, &extracted.pages, 0, &options).unwrap();
+    let got: Vec<(u32, bool)> = rasters
+        .iter()
+        .map(|r| (r.page_number as u32, r.correct_rotation))
+        .collect();
+    let want: Vec<(u32, bool)> = numbers.iter().map(|&n| (n, n != numbers[0])).collect();
+    assert_eq!(got, want);
+}
+
 /// An explicit OCR page selection bypasses the complexity gate: a text-dense
 /// page that scoring would never send to OCR is rastered anyway, and pages
 /// outside the selection are skipped.

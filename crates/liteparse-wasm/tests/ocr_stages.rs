@@ -97,6 +97,7 @@ fn check_recognition(num_workers: usize) {
             has_native_text: false,
             image_rects: vec![],
             replace_native: false,
+            correct_rotation: true,
         })
         .collect();
     let engine = Arc::new(ControlledEngine::default());
@@ -194,6 +195,7 @@ fn window_collects_ready_results_and_reuses_all_slots() {
             has_native_text: false,
             image_rects: vec![],
             replace_native: false,
+            correct_rotation: true,
         };
         assert!(
             pin!(window.submit(raster))
@@ -224,6 +226,7 @@ fn window_collects_ready_results_and_reuses_all_slots() {
         has_native_text: false,
         image_rects: vec![],
         replace_native: false,
+        correct_rotation: true,
     };
     assert!(
         pin!(window.submit(raster))

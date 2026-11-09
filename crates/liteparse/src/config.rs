@@ -19,6 +19,12 @@ pub struct LiteParseConfig {
     /// Default `false` leaves the request unchanged.
     #[serde(default)]
     pub ocr_word_boxes: bool,
+    /// 1-based pages the caller has already turned upright, including pages
+    /// it corrects through `page_orientation_corrections`. OCR requests for
+    /// these pages send `correct_rotation=false`, so the server reads the page
+    /// as sent; every other page sends `correct_rotation=true`. Default empty.
+    #[serde(default)]
+    pub ocr_upright_pages: Vec<u32>,
     /// Path to tessdata directory. Falls back to TESSDATA_PREFIX env var if not set.
     pub tessdata_path: Option<String>,
     /// Maximum number of pages to parse.
@@ -298,6 +304,7 @@ impl Default for LiteParseConfig {
             ocr_server_url: None,
             ocr_server_headers: Vec::new(),
             ocr_word_boxes: false,
+            ocr_upright_pages: Vec::new(),
             tessdata_path: None,
             max_pages: 1000,
             target_pages: None,

@@ -411,6 +411,7 @@ impl LiteParse {
             continue_on_page_error: self.config.continue_on_page_error,
             reflatten_pages,
             selection: None,
+            upright_pages: self.config.ocr_upright_pages.iter().copied().collect(),
         }
     }
 

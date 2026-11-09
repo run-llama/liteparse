@@ -117,6 +117,10 @@ In the libraries this is `ocr_server_headers` / `ocrServerHeaders`, taking a map
 
 A line-level OCR server returns one box per line. With `ocr_word_boxes` / `ocrWordBoxes` set, LiteParse also sends `return_word_boxes`, `dense_ocr_detection` and `return_bbox_angles` (the fields LlamaParse sends when it wants word boxes), and a server that measures words returns a box per word. Those boxes become `TextItem.words` when word boxes are on (`emit_word_boxes`). Without them, LiteParse estimates each word's box from its share of the line's characters. The option is off by default and has no CLI flag.
 
+### Pages that are already upright
+
+Every OCR request carries `correct_rotation`. With `true` the server detects and undoes the page's rotation before reading it, the same as when the field is missing. If you have already turned some pages upright, for example with `page_orientation_corrections` / `pageOrientationCorrections`, list them in `ocr_upright_pages` / `ocrUprightPages` (1-based page numbers). Their requests send `correct_rotation=false`, so the server reads them as sent and does not rotate them a second time. The option is empty by default and has no CLI flag.
+
 ### Parallel OCR workers
 
 LiteParse OCRs multiple pages in parallel. By default, it uses one fewer worker than your CPU core count. Override this with:
