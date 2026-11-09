@@ -105,7 +105,10 @@ pub(super) fn verified_words(span: &TextItem) -> Option<Vec<&crate::types::WordB
     let words: Vec<&crate::types::WordBox> = span
         .words
         .iter()
-        .filter(|w| !w.text.trim().is_empty() && w.x >= span.x - 1.0 && w.x <= x1 + 1.0)
+        .filter(|w| {
+            let centre = w.x + w.width.max(0.0) / 2.0;
+            !w.text.trim().is_empty() && centre >= span.x - 1.0 && centre <= x1 + 1.0
+        })
         .collect();
     if words.is_empty() {
         return None;
@@ -5876,6 +5879,126 @@ pub(super) fn escape_table_cell(s: &str) -> String {
 mod tests {
     use super::super::test_helpers::{line, line_with_spans, page, rect_borders, stroke};
     use super::*;
+
+    #[test]
+    fn deskewed_measured_words_keep_three_table_columns() {
+        use crate::ocr::{OcrResult, OcrWord};
+        use crate::ocr_merge::{PageOcrOutcome, merge_ocr_results};
+        use crate::{stages, types::Page};
+
+        let bounds = |quad: [[f32; 2]; 4]| {
+            quad.iter().fold(
+                [
+                    f32::INFINITY,
+                    f32::INFINITY,
+                    f32::NEG_INFINITY,
+                    f32::NEG_INFINITY,
+                ],
+                |b, p| {
+                    [
+                        b[0].min(p[0]),
+                        b[1].min(p[1]),
+                        b[2].max(p[0]),
+                        b[3].max(p[1]),
+                    ]
+                },
+            )
+        };
+        for skew in [0.0_f32, 5.0, 10.0] {
+            let (sin, cos) = skew.to_radians().sin_cos();
+            let quad = |x: f32, y: f32, width: f32| {
+                [(x, y), (x + width, y), (x + width, y + 30.0), (x, y + 30.0)].map(|(x, y)| {
+                    [
+                        306.0 + (x - 306.0) * cos - (y - 396.0) * sin,
+                        396.0 + (x - 306.0) * sin + (y - 396.0) * cos,
+                    ]
+                })
+            };
+            let results = (0..4)
+                .map(|row| {
+                    let y = 260.0 + row as f32 * 45.0;
+                    let polygon = quad(100.0, y, 400.0);
+                    let texts = if row == 0 {
+                        ["Item", "name", "Qty", "Price"]
+                    } else {
+                        ["Widget", "large", "2", "$40"]
+                    };
+                    let words = texts
+                        .iter()
+                        .zip([(100.0, 40.0), (145.0, 60.0), (340.0, 40.0), (430.0, 70.0)])
+                        .map(|(text, (x, width))| OcrWord {
+                            text: (*text).into(),
+                            bbox: bounds(quad(x, y, width)),
+                        })
+                        .collect();
+                    OcrResult {
+                        text: texts.join(" "),
+                        bbox: bounds(polygon),
+                        polygon: Some(polygon),
+                        confidence: 0.99,
+                        rotation: Some(0.0),
+                        words,
+                    }
+                })
+                .collect();
+            let mut pages = vec![Page {
+                page_number: 1,
+                page_width: 612.0,
+                page_height: 792.0,
+                ocr_deskew: None,
+                page_label: None,
+                content_bounds: None,
+                text_items: Vec::new(),
+                graphics: Vec::new(),
+                vector_graphics: None,
+                struct_nodes: Vec::new(),
+                image_refs: Vec::new(),
+                annotations: None,
+                form_fields: None,
+                structure_tree: None,
+            }];
+            merge_ocr_results(
+                &mut pages,
+                vec![PageOcrOutcome {
+                    page_number: 1,
+                    dpi: 72.0,
+                    has_native_text: false,
+                    image_rects: Vec::new(),
+                    replace_native: false,
+                    results,
+                    error: None,
+                }],
+                false,
+                true,
+            )
+            .unwrap();
+            let projected = stages::project_for_markdown(pages);
+            let signals = stages::document_signals(&projected, true);
+            let blocks = stages::extract_blocks(
+                &projected[0],
+                &signals,
+                &stages::BlockOptions {
+                    outline: &[],
+                    image_mode: crate::config::ImageMode::Off,
+                    keep_headers_footers: true,
+                },
+            );
+            let markdown = stages::render_page_markdown(&projected[0], blocks.as_deref());
+            assert!(
+                markdown.contains("|---|---|---|"),
+                "skew={skew}: {markdown}"
+            );
+            assert!(
+                markdown.contains("| Item name | Qty | Price |"),
+                "skew={skew}: {markdown}"
+            );
+            assert_eq!(
+                markdown.matches("| Widget large | 2 | $40 |").count(),
+                3,
+                "skew={skew}: {markdown}"
+            );
+        }
+    }
 
     fn prose_test_words<'a>(
         words: &'a [&'a str],
