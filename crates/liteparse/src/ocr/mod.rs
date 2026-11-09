@@ -9,7 +9,7 @@ pub mod oar;
 #[cfg(all(feature = "tesseract", not(target_arch = "wasm32")))]
 pub mod tesseract;
 
-/// A single word-level OCR result with bounding box and confidence.
+/// One OCR detection, a word or a line, with its box and confidence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OcrResult {
     pub text: String,
@@ -23,11 +23,9 @@ pub struct OcrResult {
     /// to recover orientation for rotated text. None for axis-aligned-only
     /// engines (e.g. Tesseract word boxes).
     pub polygon: Option<[[f32; 2]; 4]>,
-    /// Measured word boxes inside this result, in its pixel space and reading
-    /// order. Empty when the engine returned none (word-level engines, or a
-    /// line-level server not asked for them). Merging uses them only when
-    /// their count matches the words of `text`; otherwise the result keeps
-    /// one box for the whole line.
+    /// Measured word boxes in reading order, in the result's pixel space.
+    /// Used when their count equals the cleaned text's whitespace-separated words.
+    /// Output word text comes from that text. Otherwise the result keeps one box.
     #[serde(default)]
     pub words: Vec<OcrWord>,
     /// The line's rotation as the engine measured it, in degrees
