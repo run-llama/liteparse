@@ -2,6 +2,7 @@ use std::path::Path;
 
 use liteparse::config::{CropBox, OutputFormat};
 use liteparse::conversion::convert_data_to_pdf;
+use liteparse::ocr::{OcrEngine, OcrOptions, OcrResult};
 use liteparse::ocr_merge::ComplexityReason;
 use liteparse::types::PdfInput;
 use liteparse::{LiteParse, LiteParseConfig};
@@ -181,6 +182,135 @@ async fn test_batch_parse_matches_whole_document() {
     for batch in &batches {
         assert_eq!(batch.result.total_pages, whole.total_pages);
     }
+}
+
+/// Markdown heading levels are ranked against the whole document, not the
+/// batch: `sectioned_headings.pdf` puts its 24pt title on page 1, 18pt
+/// sections on pages 2/4/6 and 14pt subsections on pages 3/5, so a batch that
+/// ranked only its own pages would promote a section to `#` or a subsection
+/// to `##`. Running headers/footers are likewise detected document-wide.
+#[tokio::test]
+#[serial]
+async fn test_batch_markdown_uses_document_wide_heading_levels() {
+    let config = || LiteParseConfig {
+        ocr_enabled: false,
+        quiet: true,
+        output_format: OutputFormat::Markdown,
+        ..LiteParseConfig::default()
+    };
+    let path = "../../integration_tests_data/sectioned_headings.pdf";
+
+    let whole = LiteParse::new(config())
+        .parse(path)
+        .await
+        .expect("whole-document parse should succeed");
+    assert!(whole.text.contains("# Annual Report on Widgets"));
+    assert!(whole.text.contains("\n## Section One Overview"));
+    assert!(whole.text.contains("\n### Subsection Details Here"));
+    assert!(!whole.text.contains("ACME Widget Corporation"));
+
+    for batch_size in [1, 2, 4] {
+        let mut session = LiteParse::new(config())
+            .open_batch_session(PdfInput::Path(path.to_string()), batch_size)
+            .await
+            .expect("should open a session");
+        let mut pages = Vec::new();
+        while let Some(batch) = session.next_batch().await.expect("batch should parse") {
+            pages.extend(batch.result.pages);
+        }
+        assert_eq!(pages.len(), whole.pages.len(), "batch size {batch_size}");
+        for (got, want) in pages.iter().zip(&whole.pages) {
+            assert_eq!(
+                got.markdown, want.markdown,
+                "page {} differs at batch size {batch_size}",
+                want.page_number
+            );
+        }
+    }
+}
+
+/// Recognition calls made through a [`CountingOcr`].
+static OCR_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Mock OCR that counts its calls and recognizes one fixed line.
+struct CountingOcr;
+
+impl OcrEngine for CountingOcr {
+    fn name(&self) -> &str {
+        "counting"
+    }
+    fn recognize<'a, 'b: 'a, 'c: 'a>(
+        &'a self,
+        _image_data: &'c [u8],
+        _width: u32,
+        _height: u32,
+        _options: &'b OcrOptions,
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
+                + Send
+                + '_,
+        >,
+    > {
+        OCR_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move {
+            Ok(vec![OcrResult {
+                text: "Recognized scanned text line".into(),
+                bbox: [10.0, 10.0, 400.0, 40.0],
+                confidence: 0.99,
+                polygon: None,
+            }])
+        })
+    }
+}
+
+/// The batch session's signals prepass reuses its OCR outcomes for the real
+/// batches, so a batched Markdown parse recognizes each page once — exactly
+/// as often as a whole-document parse — and merges the same text.
+#[tokio::test]
+#[serial]
+async fn test_batch_markdown_recognizes_each_page_once() {
+    use std::sync::atomic::Ordering;
+    let parser = || {
+        LiteParse::new(LiteParseConfig {
+            ocr_enabled: true,
+            quiet: true,
+            output_format: OutputFormat::Markdown,
+            ..LiteParseConfig::default()
+        })
+        .with_ocr_engine(std::sync::Arc::new(CountingOcr))
+    };
+
+    let mut ocr_pages = 0;
+    for entry in std::fs::read_dir("../../integration_tests_data").expect("fixture directory") {
+        let path = entry.expect("fixture entry").path();
+        if path.extension().is_none_or(|ext| ext != "pdf") {
+            continue;
+        }
+        let path = path.to_string_lossy().into_owned();
+
+        OCR_CALLS.store(0, Ordering::SeqCst);
+        let whole = parser().parse(&path).await.expect("whole parse");
+        let whole_calls = OCR_CALLS.swap(0, Ordering::SeqCst);
+
+        let mut session = parser()
+            .open_batch_session(PdfInput::Path(path.clone()), 1)
+            .await
+            .expect("should open a session");
+        let mut pages = Vec::new();
+        while let Some(batch) = session.next_batch().await.expect("batch should parse") {
+            pages.extend(batch.result.pages);
+        }
+        let batched_calls = OCR_CALLS.load(Ordering::SeqCst);
+
+        assert_eq!(batched_calls, whole_calls, "{path}: OCR calls");
+        assert_eq!(pages.len(), whole.pages.len(), "{path}: page count");
+        for (got, want) in pages.iter().zip(&whole.pages) {
+            assert_eq!(got.text, want.text, "{path}: page {}", want.page_number);
+        }
+        ocr_pages += whole_calls;
+    }
+    assert!(ocr_pages > 0, "no fixture exercised OCR");
 }
 
 /// `max_pages` bounds the session the same way it bounds a whole parse, and a
