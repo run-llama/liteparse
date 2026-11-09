@@ -985,6 +985,9 @@ fn is_bilevel_scan(page_obj: &pdfium::Page) -> bool {
 
 /// In-place separable Gaussian blur of an interleaved 8-bit raster, edges clamped.
 fn gaussian_blur(pixels: &mut [u8], width: usize, height: usize, channels: usize, sigma: f32) {
+    if width == 0 || height == 0 {
+        return;
+    }
     let radius = (3.0 * sigma).ceil() as usize;
     let weights: Vec<f32> = (0..=2 * radius)
         .map(|i| {
