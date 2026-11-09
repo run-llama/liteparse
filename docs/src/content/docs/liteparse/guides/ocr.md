@@ -132,7 +132,7 @@ const parser = new LiteParse({
 });
 ```
 
-When the response carries measured words, they become `TextItem.words` when word boxes are on (`emit_word_boxes`). Without them, LiteParse estimates each word's box from its share of the line's characters. A line's rotation comes from the server's angle when the response has one, and otherwise from the order of its quad's points.
+When the response carries measured words, they become `TextItem.words` when word boxes are on (`emit_word_boxes`). When the server measured a line but returned a different number of words than its text has, LiteParse estimates each word's box from its share of the line's characters. A line with no measured words keeps one box, so output without the word-box fields is unchanged. A line's rotation comes from the server's angle when the response has one, and otherwise from the order of its quad's points.
 
 ### Parallel OCR workers
 

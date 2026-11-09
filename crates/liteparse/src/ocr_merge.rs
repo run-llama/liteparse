@@ -3743,20 +3743,29 @@ mod tests {
                 ("42.50".to_string(), 80.0, 11.0, 19.5, 3.5),
             ]
         );
-        // Two measured words for three text words: the estimate (19 chars over
-        // 95 points, 5 each) is used instead.
-        let estimated = merged(line(measured[..2].to_vec()));
-        assert_eq!(
-            estimated
-                .iter()
-                .map(|w| (w.0.as_str(), w.1, w.3))
-                .collect::<Vec<_>>(),
-            vec![
-                ("Invoice", 5.0, 35.0),
-                ("total", 45.0, 25.0),
-                ("42.50", 75.0, 25.0)
-            ]
-        );
+        // Fewer measured words than text words: the estimate (19 chars over 95
+        // points, 5 each) is used instead. One word spanning the whole line is
+        // what the server returns for a line it could not measure.
+        let whole_line = OcrWord {
+            text: "Invoice total 42.50".into(),
+            bbox: [10.0, 20.0, 200.0, 30.0],
+            polygon: None,
+            rotation: None,
+        };
+        for words in [measured[..2].to_vec(), vec![whole_line]] {
+            let estimated = merged(line(words));
+            assert_eq!(
+                estimated
+                    .iter()
+                    .map(|w| (w.0.as_str(), w.1, w.3))
+                    .collect::<Vec<_>>(),
+                vec![
+                    ("Invoice", 5.0, 35.0),
+                    ("total", 45.0, 25.0),
+                    ("42.50", 75.0, 25.0)
+                ]
+            );
+        }
     }
 
     /// A line turned 90° takes each measured word quad's bounds as its box.
@@ -3876,7 +3885,9 @@ mod tests {
             180.0
         );
 
-        let upright = merged(flat_180, Vec::new(), Some(0.0));
+        // One fallback word: only an upright line is split by the estimate.
+        let fallback = vec![word("Invoice total", 10.0, 210.0, None)];
+        let upright = merged(flat_180, fallback, Some(0.0));
         assert_eq!(upright.rotation, 0.0);
         assert_eq!(boxes(&upright).len(), 2);
 
