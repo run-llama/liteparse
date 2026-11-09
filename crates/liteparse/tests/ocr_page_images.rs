@@ -42,9 +42,15 @@ fn image(
     dpi: f32,
 ) -> OcrPageImage {
     let path = dir.join(name);
-    image::RgbaImage::from_pixel(width, height, image::Rgba(rgba))
-        .save(&path)
-        .unwrap();
+    if rgba[3] == 255 {
+        image::RgbImage::from_pixel(width, height, image::Rgb([rgba[0], rgba[1], rgba[2]]))
+            .save(&path)
+            .unwrap();
+    } else {
+        image::RgbaImage::from_pixel(width, height, image::Rgba(rgba))
+            .save(&path)
+            .unwrap();
+    }
     OcrPageImage {
         path: path.to_string_lossy().into_owned(),
         dpi,
@@ -236,6 +242,23 @@ fn image_validation_rejects_bad_scale_and_unreadable_sources_without_rendering()
     let (rasters, next) = stages::render_for_ocr(&document, &pages, 0, &options).unwrap();
     assert_eq!(next, 1);
     assert_eq!(rasters[0].pixels, vec![255; 72 * 144]);
+    options.grayscale = false;
+    let (rasters, _) = stages::render_for_ocr(&document, &pages, 0, &options).unwrap();
+    assert_eq!(rasters[0].pixels, vec![255; 72 * 144 * 3]);
+    options.grayscale = true;
+    let gray = dir.path().join("gray.png");
+    image::GrayImage::from_pixel(72, 144, image::Luma([37]))
+        .save(&gray)
+        .unwrap();
+    options.page_images.insert(
+        1,
+        OcrPageImage {
+            path: gray.to_string_lossy().into_owned(),
+            dpi: 72.0,
+        },
+    );
+    let (rasters, _) = stages::render_for_ocr(&document, &pages, 0, &options).unwrap();
+    assert_eq!(rasters[0].pixels, vec![37; 72 * 144]);
     // The PNM decoder accepts a zero-width raster. At low DPI this also
     // fits the one-pixel rounding tolerance, but it cannot be sent to OCR.
     let empty = dir.path().join("empty.ppm");

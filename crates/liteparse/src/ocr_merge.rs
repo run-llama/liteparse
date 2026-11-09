@@ -1004,22 +1004,31 @@ fn load_ocr_page_image(
             page.page_number, width, height, source.dpi, expected_width, expected_height
         )));
     }
-    // Composite transparency onto white, as with a rendered PDF page. Dropping
-    // alpha would turn transparent backgrounds black and change OCR content.
-    let rgba = image.to_rgba8();
-    let channels = if grayscale { 1 } else { 3 };
-    let mut pixels = Vec::with_capacity(width as usize * height as usize * channels);
-    for pixel in rgba.pixels() {
-        let alpha = u32::from(pixel[3]);
-        let rgb = [pixel[0], pixel[1], pixel[2]]
-            .map(|c| ((u32::from(c) * alpha + 255 * (255 - alpha) + 127) / 255) as u8);
-        if grayscale {
-            let [r, g, b] = rgb.map(u32::from);
-            pixels.push(((77 * r + 150 * g + 29 * b) >> 8) as u8);
-        } else {
-            pixels.extend_from_slice(&rgb);
+    let pixels = match (image, grayscale) {
+        // JPEG and RGB PNG decoders already own the buffer the OCR engine
+        // needs. Move it directly instead of copying through RGBA pixels.
+        (image, false) if !image.color().has_alpha() => image.into_rgb8().into_raw(),
+        (image::DynamicImage::ImageLuma8(image), true) => image.into_raw(),
+        (image, grayscale) => {
+            // Composite transparency onto white, as with a rendered PDF page.
+            // Dropping alpha would turn transparent backgrounds black.
+            let rgba = image.into_rgba8();
+            let channels = if grayscale { 1 } else { 3 };
+            let mut pixels = Vec::with_capacity(width as usize * height as usize * channels);
+            for pixel in rgba.pixels() {
+                let alpha = u32::from(pixel[3]);
+                let rgb = [pixel[0], pixel[1], pixel[2]]
+                    .map(|c| ((u32::from(c) * alpha + 255 * (255 - alpha) + 127) / 255) as u8);
+                if grayscale {
+                    let [r, g, b] = rgb.map(u32::from);
+                    pixels.push(((77 * r + 150 * g + 29 * b) >> 8) as u8);
+                } else {
+                    pixels.extend_from_slice(&rgb);
+                }
+            }
+            pixels
         }
-    }
+    };
     Ok((pixels, width, height, source.dpi))
 }
 
