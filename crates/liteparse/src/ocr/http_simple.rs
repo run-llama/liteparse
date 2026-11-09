@@ -46,19 +46,10 @@ impl HttpOcrResponseItem {
 struct ProdOcrItem(Vec<[f32; 2]>, String, f32);
 
 /// One measured word from the prod OCR worker's `words` (`return_word_boxes`).
-/// `r` is its rotation like [`ProdOcrMeta::r`].
 #[derive(Debug, Deserialize)]
 struct ProdOcrWord {
     bbox: Vec<[f32; 2]>,
     text: String,
-    #[serde(default)]
-    r: Option<f32>,
-}
-
-/// The server's clockwise-on-screen angle as counter-clockwise degrees in
-/// [0, 360).
-fn ccw_degrees(r: f32) -> f32 {
-    (-r).rem_euclid(360.0)
 }
 
 /// One entry of the prod OCR worker's `result_meta` (`return_bbox_angles`):
@@ -84,8 +75,7 @@ fn polygon_bounds(poly: &[[f32; 2]]) -> [f32; 4] {
 }
 
 impl ProdOcrItem {
-    /// `rotation` is the line's `result_meta` angle; without one, the line
-    /// takes the angle of its first measured word that has one.
+    /// `rotation` is the line's `result_meta` angle, counter-clockwise.
     fn into_ocr_result(self, words: Vec<ProdOcrWord>, rotation: Option<f32>) -> OcrResult {
         let ProdOcrItem(poly, text, confidence) = self;
         let [min_x, min_y, max_x, max_y] = polygon_bounds(&poly);
@@ -100,7 +90,7 @@ impl ProdOcrItem {
             bbox: [min_x, min_y, max_x, max_y],
             confidence,
             polygon,
-            rotation: rotation.or_else(|| words.iter().find_map(|w| w.r).map(ccw_degrees)),
+            rotation,
             words: words
                 .into_iter()
                 .map(|w| OcrWord {
@@ -155,7 +145,7 @@ impl HttpOcrResponse {
                 let mut words = words.into_iter();
                 let mut angles = result_meta
                     .into_iter()
-                    .map(|m| ccw_degrees(m.r.unwrap_or(0.0)));
+                    .map(|m| (-m.r.unwrap_or(0.0)).rem_euclid(360.0));
                 result
                     .into_iter()
                     .map(|i| i.into_ocr_result(words.next().unwrap_or_default(), angles.next()))
@@ -611,23 +601,6 @@ mod tests {
         );
         assert_eq!(rotations(r#","result_meta":[{"r":180}]"#), vec![None; 3]);
         assert_eq!(rotations(""), vec![None; 3]);
-    }
-
-    /// With no `result_meta` angle, a line takes the counter-clockwise angle
-    /// of its first measured word that has an `r`; `result_meta` wins over it.
-    #[test]
-    fn test_prod_line_without_meta_takes_first_word_angle() {
-        let line = r#"[[[[0,0],[90,0],[90,10],[0,10]],"a b c",0.9]]"#;
-        let words = r#"[[{"bbox":[[0,0],[10,0],[10,10],[0,10]],"text":"a"},
-                    {"bbox":[[20,0],[30,0],[30,10],[20,10]],"text":"b","r":-90},
-                    {"bbox":[[40,0],[50,0],[50,10],[40,10]],"text":"c","r":180}]]"#;
-        let rotation = |meta: &str| {
-            let raw = format!(r#"{{"result":{line},"words":{words}{meta}}}"#);
-            let parsed: HttpOcrResponse = serde_json::from_str(&raw).unwrap();
-            parsed.into_results()[0].rotation
-        };
-        assert_eq!(rotation(""), Some(90.0));
-        assert_eq!(rotation(r#","result_meta":[{"r":180}]"#), Some(180.0));
     }
 
     /// Serve one `HttpOcrEngine` request on a local socket and return the

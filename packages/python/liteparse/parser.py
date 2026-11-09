@@ -977,10 +977,8 @@ class LiteParse:
             ocr_enabled=cfg.ocr_enabled,
             ocr_server_url=cfg.ocr_server_url,
             ocr_server_headers=cfg.ocr_server_headers,
-            ocr_request_fields=dict(cfg.ocr_request_fields),
-            ocr_page_request_fields={
-                page: dict(fields) for page, fields in cfg.ocr_page_request_fields.items()
-            },
+            ocr_request_fields=cfg.ocr_request_fields,
+            ocr_page_request_fields=cfg.ocr_page_request_fields,
             tessdata_path=cfg.tessdata_path,
             max_pages=cfg.max_pages,
             target_pages=cfg.target_pages,

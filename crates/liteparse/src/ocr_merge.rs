@@ -3385,41 +3385,6 @@ mod tests {
         assert_eq!(got, want);
     }
 
-    /// Fails with the `correct_rotation` field it was given as the message.
-    struct FieldEchoEngine;
-
-    impl OcrEngine for FieldEchoEngine {
-        fn name(&self) -> &str {
-            "field-echo"
-        }
-
-        fn recognize<'a, 'b: 'a, 'c: 'a>(
-            &'a self,
-            _image_data: &'c [u8],
-            _width: u32,
-            _height: u32,
-            options: &'b OcrOptions,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = OcrTaskResult> + Send + 'a>>
-        {
-            let rotate = options.request_fields.get("correct_rotation").cloned();
-            Box::pin(async move { Err(rotate.unwrap_or_default().into()) })
-        }
-    }
-
-    // Each raster's request fields reach the engine call for that page.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_raster_request_fields_reach_the_engine() {
-        let rendered = (0..2)
-            .map(|i| OcrRaster {
-                request_fields: BTreeMap::from([("correct_rotation".into(), (i == 0).to_string())]),
-                ..make_rendered(i)
-            })
-            .collect();
-        let outcomes = recognize_rasters(rendered, Arc::new(FieldEchoEngine), "eng", 2).await;
-        let got: Vec<String> = outcomes.iter().map(|o| o.error.clone().unwrap()).collect();
-        assert_eq!(got, ["true", "false"]);
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_empty_pool_complete_one_does_not_wait() {
         let mut pool = OcrTaskPool::new(Arc::new(FailingEngine), "eng", 2);
@@ -3612,31 +3577,10 @@ mod tests {
         }
     }
 
-    /// A line-level engine returns a whole line per result. A line the server
-    /// did not measure keeps one box, so table layout sees the same OCR
-    /// geometry with and without measured word boxes.
-    #[test]
-    fn test_unmeasured_ocr_line_keeps_one_word_box() {
-        let line = OcrResult {
-            text: "Invoice total 42.50".into(),
-            bbox: [10.0, 20.0, 200.0, 30.0],
-            confidence: 0.9,
-            polygon: None,
-            rotation: None,
-            words: Vec::new(),
-        };
-        let page = merge_ocr_page(vec![line], 72.0);
-        let item = &page.text_items[0];
-        assert_eq!(
-            word_rects(item),
-            vec![(item.text.as_str(), item.x, item.y, item.width, item.height)]
-        );
-    }
-
     /// Measured words become the word boxes when they pair one per word of the
-    /// cleaned text. Any other count keeps one box for the line: fewer words,
-    /// one fallback word for the whole line, or a measured `|` border that
-    /// table-artifact cleaning dropped from the text.
+    /// cleaned text. Any other count keeps one box for the line: no words,
+    /// fewer words, one fallback word for the whole line, or a measured `|`
+    /// border that table-artifact cleaning dropped from the text.
     #[test]
     fn test_measured_ocr_word_boxes_pair_one_per_word() {
         let line = |text: &str, words: Vec<OcrWord>| OcrResult {
@@ -3669,7 +3613,7 @@ mod tests {
             ]
         );
         let whole_line = ocr_word("Invoice total 42.50", [10.0, 20.0, 200.0, 30.0]);
-        for words in [measured[..2].to_vec(), vec![whole_line]] {
+        for words in [Vec::new(), measured[..2].to_vec(), vec![whole_line]] {
             assert_eq!(
                 merged(line("Invoice total 42.50", words)),
                 vec![("Invoice total 42.50".to_string(), 5.0, 10.0, 95.0, 5.0)]

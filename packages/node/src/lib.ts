@@ -50,8 +50,7 @@ export interface LiteParseConfig {
    * Form fields sent as-is with every request to `ocrServerUrl`, next to
    * `file` and `language` (a `language` entry replaces it). LiteParse adds no
    * other field, so you own flags such as `correct_rotation` or
-   * `return_word_boxes`. Measured `words` and angles in the response are read
-   * whenever the server returns them. Default empty.
+   * `return_word_boxes`. Default empty.
    */
   ocrRequestFields?: Record<string, string>;
   /**
