@@ -1210,10 +1210,13 @@ pub async fn recognize_rasters(
 /// keeps the item's own box. Line-level engines (PaddleOCR-style HTTP servers)
 /// return a whole line. When the server measured its words (`measured`, page
 /// space, one box per whitespace-separated word of `text`), each word takes its
-/// measured box. Otherwise each word gets the slice of the line box at its
-/// character offsets, so a line of `n` characters gives each character
-/// `width / n`; proportional fonts make a slice a few percent off the ink.
-/// The estimate splits only upright lines; a rotated line keeps one box.
+/// measured box. When the measured count differs from the text's words, each
+/// word gets the slice of the line box at its character offsets, so a line of
+/// `n` characters gives each character `width / n`; proportional fonts make a
+/// slice a few percent off the ink. The estimate splits only upright lines; a
+/// rotated line keeps one box. A line the server did not measure keeps one box
+/// too, so markdown layout and blocks read OCR lines the same way whether or
+/// not word boxes were requested.
 fn ocr_word_boxes(
     text: &str,
     x: f32,
@@ -1254,7 +1257,7 @@ fn ocr_word_boxes(
             })
             .collect();
     }
-    if spans.len() < 2 || rotation != 0.0 {
+    if measured.is_empty() || spans.len() < 2 || rotation != 0.0 {
         return vec![WordBox {
             text: text.to_string(),
             x,
@@ -3639,11 +3642,11 @@ mod tests {
         assert!(disabled[0].text_items.iter().all(|i| i.words.is_empty()));
     }
 
-    /// A line-level engine returns a whole line per result. Each word gets the
-    /// slice of the line box at its character offsets, so callers can ground a
-    /// single word on a scan instead of the whole line.
+    /// A line-level engine returns a whole line per result. A line the server
+    /// did not measure keeps one box, so table layout sees the same OCR
+    /// geometry with and without measured word boxes.
     #[test]
-    fn test_ocr_line_results_split_into_word_boxes() {
+    fn test_unmeasured_ocr_line_keeps_one_word_box() {
         let line = OcrResult {
             text: "Invoice total 42.50".into(),
             bbox: [10.0, 20.0, 200.0, 30.0],
@@ -3664,24 +3667,14 @@ mod tests {
         let mut pages = vec![make_blank_page(1)];
         merge_ocr_results(&mut pages, vec![outcome], false, true).unwrap();
         let item = &pages[0].text_items[0];
-        let words: Vec<(&str, f32, f32)> = item
+        let words: Vec<(&str, f32, f32, f32, f32)> = item
             .words
             .iter()
-            .map(|w| (w.text.as_str(), w.x, w.width))
+            .map(|w| (w.text.as_str(), w.x, w.y, w.width, w.height))
             .collect();
-        // 19 characters over 190 points: 10 points each.
         assert_eq!(
             words,
-            vec![
-                ("Invoice", 10.0, 70.0),
-                ("total", 90.0, 50.0),
-                ("42.50", 150.0, 50.0)
-            ]
-        );
-        assert!(
-            item.words
-                .iter()
-                .all(|w| (w.y, w.height) == (item.y, item.height))
+            vec![(item.text.as_str(), item.x, item.y, item.width, item.height)]
         );
 
         // A rotated line keeps one box: its reading axis is not the x axis.
