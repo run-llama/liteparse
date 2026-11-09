@@ -236,6 +236,21 @@ fn image_validation_rejects_bad_scale_and_unreadable_sources_without_rendering()
     let (rasters, next) = stages::render_for_ocr(&document, &pages, 0, &options).unwrap();
     assert_eq!(next, 1);
     assert_eq!(rasters[0].pixels, vec![255; 72 * 144]);
+    // The PNM decoder accepts a zero-width raster. At low DPI this also
+    // fits the one-pixel rounding tolerance, but it cannot be sent to OCR.
+    let empty = dir.path().join("empty.ppm");
+    std::fs::write(&empty, b"P6\n0 1\n255\n").unwrap();
+    let decoded = image::open(&empty).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (0, 1));
+    options.page_images.insert(
+        1,
+        OcrPageImage {
+            path: empty.to_string_lossy().into_owned(),
+            dpi: 0.5,
+        },
+    );
+    assert!(stages::render_for_ocr(&document, &pages, 0, &options).is_err());
+    options.page_images.insert(1, source);
     for dpi in [0.0, -1.0, f32::NAN, f32::INFINITY, 144.0] {
         options.page_images.get_mut(&1).unwrap().dpi = dpi;
         assert!(

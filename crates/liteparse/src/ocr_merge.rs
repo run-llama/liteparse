@@ -990,6 +990,8 @@ fn load_ocr_page_image(
     let (width, height) = (image.width(), image.height());
     let expected_width = page.page_width * source.dpi / 72.0;
     let expected_height = page.page_height * source.dpi / 72.0;
+    // Some decoders accept empty rasters. OCR needs pixels even when a tiny
+    // expected image would put zero dimensions within the rounding tolerance.
     if width == 0
         || height == 0
         || !expected_width.is_finite()
