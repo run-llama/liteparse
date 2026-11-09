@@ -1204,31 +1204,6 @@ pub async fn recognize_rasters(
     pool.finish().await
 }
 
-/// Word boxes for one OCR result, in the same space as its item box `line`.
-/// Each whitespace-separated word of `text` takes its measured box (`measured`,
-/// reading order) when the counts match; otherwise the result keeps one box.
-fn ocr_word_boxes(
-    text: &str,
-    line: (f32, f32, f32, f32),
-    measured: &[(f32, f32, f32, f32)],
-) -> Vec<WordBox> {
-    let word = |text: &str, (x, y, width, height): (f32, f32, f32, f32)| WordBox {
-        text: text.to_string(),
-        x,
-        y,
-        width,
-        height,
-    };
-    // Table-artifact cleaning can drop a word the server measured.
-    if text.split_whitespace().count() != measured.len() {
-        return vec![word(text, line)];
-    }
-    text.split_whitespace()
-        .zip(measured)
-        .map(|(t, &b)| word(t, b))
-        .collect()
-}
-
 /// Merge recognition outcomes into `pages`, in place. Pure: needs neither the
 /// document nor the rasters, only the outcomes [`recognize_rasters`] produced
 /// (or an equivalent a caller built from its own OCR engine's output).
@@ -1242,12 +1217,10 @@ fn ocr_word_boxes(
 /// in `pages` is an error rather than a panic, so a caller can merge a
 /// subset of pages or hand-built outcomes safely.
 ///
-/// `emit_word_boxes` must match what the extraction stage used
-/// (`LiteParseConfig::effective_emit_word_boxes`). Each surviving result
-/// becomes one [`TextItem`] carrying its word boxes (see `ocr_word_boxes`),
-/// which is what lets the projection pass merge neighbouring OCR items into a
-/// run that still carries per-word boxes. When `false`, no box is attached,
-/// matching the zero-allocation promise the config makes for native text.
+/// `emit_word_boxes` must match `LiteParseConfig::effective_emit_word_boxes`
+/// from extraction. Each surviving result becomes one [`TextItem`] whose word
+/// boxes the projection preserves when merging neighbours. When `false`, no
+/// word boxes are allocated.
 pub fn merge_ocr_results(
     pages: &mut [Page],
     outcomes: Vec<PageOcrOutcome>,
@@ -1509,10 +1482,24 @@ pub fn merge_ocr_results(
             };
 
             let words = if emit_word_boxes {
-                // Engine boxes moved by their centre (`to_page`), so the rotate-back after
-                // layout restores each one; an unmeasured line keeps its own box.
-                let measured: Vec<_> = r.words.iter().map(|w| to_page(w.bbox)).collect();
-                ocr_word_boxes(&cleaned, to_page(r.bbox), &measured)
+                let word = |text: &str, (x, y, width, height): (f32, f32, f32, f32)| WordBox {
+                    text: text.to_string(),
+                    x,
+                    y,
+                    width,
+                    height,
+                };
+                // Engine boxes move by their centres so the rotate-back after layout restores
+                // each one. A count mismatch after cleaning keeps the line's own box.
+                if cleaned.split_whitespace().count() == r.words.len() {
+                    cleaned
+                        .split_whitespace()
+                        .zip(&r.words)
+                        .map(|(text, measured)| word(text, to_page(measured.bbox)))
+                        .collect()
+                } else {
+                    vec![word(&cleaned, to_page(r.bbox))]
+                }
             } else {
                 Vec::new()
             };
