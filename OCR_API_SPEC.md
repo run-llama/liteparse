@@ -54,7 +54,7 @@ Your server should map these to whatever format your underlying OCR engine expec
 {
   "results": [
     {
-      "text": "recognized text",
+      "text": "recognized",
       "bbox": [x1, y1, x2, y2],
       "confidence": 0.95,
       "polygon": [[x1, y1], [x2, y2], [x3, y3], [x4, y4]],
