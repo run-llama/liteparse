@@ -616,12 +616,9 @@ class LiteParse:
         if ocr_server_headers is not None:
             kwargs["ocr_server_headers"] = ocr_server_headers
         if ocr_request_fields is not None:
-            kwargs["ocr_request_fields"] = {str(k): str(v) for k, v in ocr_request_fields.items()}
+            kwargs["ocr_request_fields"] = ocr_request_fields
         if ocr_page_request_fields is not None:
-            kwargs["ocr_page_request_fields"] = {
-                int(page): {str(k): str(v) for k, v in fields.items()}
-                for page, fields in ocr_page_request_fields.items()
-            }
+            kwargs["ocr_page_request_fields"] = ocr_page_request_fields
         if ocr_language is not None:
             kwargs["ocr_language"] = ocr_language
         if tessdata_path is not None:

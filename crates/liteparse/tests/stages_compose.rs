@@ -13,6 +13,7 @@
 //! set at two stage boundaries (after extract, after projection), so the
 //! same test proves the boundary types round-trip losslessly.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use liteparse::config::{CropBox, ImageMode, OutputFormat, PageOrientationCorrection};
@@ -624,9 +625,9 @@ async fn parse_equals_composed_stages_with_form_fields_and_rendered_screenshots(
 
 /// The configured OCR request fields reach every raster, with a page's own
 /// fields merged over the base for that page only.
-#[tokio::test]
+#[test]
 #[serial]
-async fn ocr_page_request_fields_merge_over_the_base() {
+fn ocr_page_request_fields_merge_over_the_base() {
     let lib = Library::init();
     let document =
         stages::open(&lib, &PdfInput::Path(fixture("page_labels.pdf")), None, &[]).unwrap();
@@ -655,26 +656,17 @@ async fn ocr_page_request_fields_merge_over_the_base() {
         ..parser.ocr_render_options(false, &extracted)
     };
     let (rasters, _) = stages::render_for_ocr(&document, &extracted.pages, 0, &options).unwrap();
-    let got: Vec<(u32, Vec<(String, String)>)> = rasters
+    let got: BTreeMap<u32, BTreeMap<String, String>> = rasters
         .iter()
-        .map(|r| {
-            (
-                r.page_number as u32,
-                r.request_fields.clone().into_iter().collect(),
-            )
-        })
+        .map(|r| (r.page_number as u32, r.request_fields.clone()))
         .collect();
-    let want: Vec<(u32, Vec<(String, String)>)> = numbers
+    let want: BTreeMap<u32, BTreeMap<String, String>> = numbers
         .iter()
         .map(|&n| {
             let rotate = if n == numbers[0] { "false" } else { "true" };
-            (
-                n,
-                vec![
-                    ("correct_rotation".to_string(), rotate.to_string()),
-                    ("return_word_boxes".to_string(), "true".to_string()),
-                ],
-            )
+            let page_fields = [("correct_rotation", rotate), ("return_word_boxes", "true")]
+                .map(|(k, v)| (k.to_string(), v.to_string()));
+            (n, BTreeMap::from(page_fields))
         })
         .collect();
     assert_eq!(got, want);

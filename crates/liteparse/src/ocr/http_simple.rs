@@ -56,9 +56,9 @@ struct ProdOcrWord {
 }
 
 /// The server's clockwise-on-screen angle as counter-clockwise degrees in
-/// [0, 360); a missing angle is upright.
-fn ccw_degrees(r: Option<f32>) -> f32 {
-    (-r.unwrap_or(0.0)).rem_euclid(360.0)
+/// [0, 360).
+fn ccw_degrees(r: f32) -> f32 {
+    (-r).rem_euclid(360.0)
 }
 
 /// One entry of the prod OCR worker's `result_meta` (`return_bbox_angles`):
@@ -84,6 +84,8 @@ fn polygon_bounds(poly: &[[f32; 2]]) -> [f32; 4] {
 }
 
 impl ProdOcrItem {
+    /// `rotation` is the line's `result_meta` angle; without one, the line
+    /// takes the angle of its first measured word that has one.
     fn into_ocr_result(self, words: Vec<ProdOcrWord>, rotation: Option<f32>) -> OcrResult {
         let ProdOcrItem(poly, text, confidence) = self;
         let [min_x, min_y, max_x, max_y] = polygon_bounds(&poly);
@@ -98,19 +100,14 @@ impl ProdOcrItem {
             bbox: [min_x, min_y, max_x, max_y],
             confidence,
             polygon,
+            rotation: rotation.or_else(|| words.iter().find_map(|w| w.r).map(ccw_degrees)),
             words: words
                 .into_iter()
                 .map(|w| OcrWord {
                     bbox: polygon_bounds(&w.bbox),
-                    polygon: match w.bbox.as_slice() {
-                        [a, b, c, d] => Some([*a, *b, *c, *d]),
-                        _ => None,
-                    },
-                    rotation: w.r.map(|r| ccw_degrees(Some(r))),
                     text: w.text,
                 })
                 .collect(),
-            rotation,
         }
     }
 }
@@ -156,7 +153,9 @@ impl HttpOcrResponse {
                     result_meta.clear();
                 }
                 let mut words = words.into_iter();
-                let mut angles = result_meta.into_iter().map(|m| ccw_degrees(m.r));
+                let mut angles = result_meta
+                    .into_iter()
+                    .map(|m| ccw_degrees(m.r.unwrap_or(0.0)));
                 result
                     .into_iter()
                     .map(|i| i.into_ocr_result(words.next().unwrap_or_default(), angles.next()))
@@ -262,14 +261,6 @@ fn is_connection_drop(err: &reqwest::Error) -> bool {
     false
 }
 
-/// The text fields of one OCR request: `language`, then the caller's
-/// fields as given (a `language` entry replaces the default).
-fn request_fields(language: &str, fields: &BTreeMap<String, String>) -> Vec<(String, String)> {
-    let mut all = BTreeMap::from([("language".to_string(), language.to_string())]);
-    all.extend(fields.clone());
-    all.into_iter().collect()
-}
-
 /// Send a single OCR request and return the raw response body. Encodes the
 /// multipart form fresh each call (a `Form` is consumed by `send`).
 async fn send_one(
@@ -277,7 +268,7 @@ async fn send_one(
     url: &str,
     headers: &[(String, String)],
     png_bytes: &[u8],
-    fields: &[(String, String)],
+    fields: &BTreeMap<String, String>,
     timeout_ms: u64,
 ) -> Result<String, reqwest::Error> {
     let mut form = Form::new().part(
@@ -347,12 +338,10 @@ impl HttpOcrEngine {
         &self,
         client: &Client,
         png_bytes: &[u8],
-        language: &str,
-        extra_fields: &BTreeMap<String, String>,
+        fields: &BTreeMap<String, String>,
     ) -> Result<String, reqwest::Error> {
         let delays = &self.retry.hedge_delays_ms;
         let timeout_ms = self.retry.request_timeout_ms;
-        let fields = request_fields(language, extra_fields);
 
         // Single-request fast path: no hedging, or a single (possibly delayed)
         // request. Borrows directly — no task spawn / cloning.
@@ -365,7 +354,7 @@ impl HttpOcrEngine {
                 &self.server_url,
                 &self.headers,
                 png_bytes,
-                &fields,
+                fields,
                 timeout_ms,
             )
             .await;
@@ -440,6 +429,12 @@ impl OcrEngine for HttpOcrEngine {
             img.write_to(&mut Cursor::new(&mut png_bytes), ImageFormat::Png)?;
 
             let client = Client::new();
+            // The form fields every try sends: the caller's, plus `language`
+            // unless the caller set one.
+            let mut fields = options.request_fields.clone();
+            fields
+                .entry("language".to_string())
+                .or_insert_with(|| options.language.clone());
 
             // Retry loop: each attempt sends one OCR request (or a hedged group
             // of duplicates when configured) and backs off exponentially on
@@ -449,15 +444,7 @@ impl OcrEngine for HttpOcrEngine {
             let mut attempt: u32 = 0;
             let raw = loop {
                 attempt += 1;
-                match self
-                    .send_hedged(
-                        &client,
-                        &png_bytes,
-                        &options.language,
-                        &options.request_fields,
-                    )
-                    .await
-                {
+                match self.send_hedged(&client, &png_bytes, &fields).await {
                     Ok(body) => break body,
                     Err(e) => {
                         if attempt >= max_attempts || !is_retryable(&e) {
@@ -587,11 +574,6 @@ mod tests {
                 vec![("42.50", [12.0, 50.0, 58.0, 70.0])],
             ]
         );
-        // The quad is kept so merging can take its bounds after a deskew.
-        assert_eq!(
-            results[0].words[0].polygon,
-            Some([[10.0, 20.0], [90.0, 21.0], [90.0, 40.0], [10.0, 39.0]])
-        );
     }
 
     /// Word lists that do not pair one per line are dropped, not shifted onto
@@ -631,28 +613,26 @@ mod tests {
         assert_eq!(rotations(""), vec![None; 3]);
     }
 
-    /// Each word's `r` becomes its counter-clockwise rotation, as for lines.
+    /// With no `result_meta` angle, a line takes the counter-clockwise angle
+    /// of its first measured word that has an `r`; `result_meta` wins over it.
     #[test]
-    fn test_prod_word_angles_set_word_rotation() {
-        let raw = r#"{"result":[[[[0,0],[90,0],[90,10],[0,10]],"a b c",0.9]],
-          "words":[[{"bbox":[[0,0],[10,0],[10,10],[0,10]],"text":"a","r":180},
+    fn test_prod_line_without_meta_takes_first_word_angle() {
+        let line = r#"[[[[0,0],[90,0],[90,10],[0,10]],"a b c",0.9]]"#;
+        let words = r#"[[{"bbox":[[0,0],[10,0],[10,10],[0,10]],"text":"a"},
                     {"bbox":[[20,0],[30,0],[30,10],[20,10]],"text":"b","r":-90},
-                    {"bbox":[[40,0],[50,0],[50,10],[40,10]],"text":"c"}]]}"#;
-        let parsed: HttpOcrResponse = serde_json::from_str(raw).unwrap();
-        let got: Vec<Option<f32>> = parsed.into_results()[0]
-            .words
-            .iter()
-            .map(|w| w.rotation)
-            .collect();
-        assert_eq!(got, vec![Some(180.0), Some(90.0), None]);
+                    {"bbox":[[40,0],[50,0],[50,10],[40,10]],"text":"c","r":180}]]"#;
+        let rotation = |meta: &str| {
+            let raw = format!(r#"{{"result":{line},"words":{words}{meta}}}"#);
+            let parsed: HttpOcrResponse = serde_json::from_str(&raw).unwrap();
+            parsed.into_results()[0].rotation
+        };
+        assert_eq!(rotation(""), Some(90.0));
+        assert_eq!(rotation(r#","result_meta":[{"r":180}]"#), Some(180.0));
     }
 
-    /// Serve one OCR request on a local socket and return the request bytes.
-    /// `engine` builds the engine under test from the socket's URL.
-    async fn capture_request(
-        request_fields: BTreeMap<String, String>,
-        engine: impl FnOnce(String) -> std::sync::Arc<dyn OcrEngine>,
-    ) -> String {
+    /// Serve one `HttpOcrEngine` request on a local socket and return the
+    /// request bytes.
+    async fn capture_request(request_fields: BTreeMap<String, String>) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/ocr", listener.local_addr().unwrap());
@@ -676,7 +656,7 @@ mod tests {
             sock.write_all(resp.as_bytes()).await.unwrap();
             String::from_utf8_lossy(&req).into_owned()
         });
-        let engine = engine(url);
+        let engine = HttpOcrEngine::new(url);
         let opts = OcrOptions {
             language: "en".into(),
             dpi: 150.0,
@@ -691,8 +671,6 @@ mod tests {
     /// with no fields LiteParse adds no flag of its own.
     #[tokio::test]
     async fn test_request_fields_are_sent_as_given() {
-        let engine =
-            |url| -> std::sync::Arc<dyn OcrEngine> { std::sync::Arc::new(HttpOcrEngine::new(url)) };
         let sent = |req: &str, name: &str, value: &str| {
             req.contains(&format!("name=\"{name}\"\r\n\r\n{value}\r\n"))
         };
@@ -701,13 +679,13 @@ mod tests {
             ("return_word_boxes".to_string(), "true".to_string()),
             ("language".to_string(), "fr".to_string()),
         ]);
-        let req = capture_request(fields, engine).await;
+        let req = capture_request(fields).await;
         assert!(sent(&req, "correct_rotation", "false"), "{req}");
         assert!(sent(&req, "return_word_boxes", "true"), "{req}");
         assert!(sent(&req, "language", "fr"), "{req}");
         assert_eq!(req.matches("name=\"language\"").count(), 1, "{req}");
 
-        let bare = capture_request(BTreeMap::new(), engine).await;
+        let bare = capture_request(BTreeMap::new()).await;
         assert!(sent(&bare, "language", "en"), "{bare}");
         assert_eq!(
             bare.matches("Content-Disposition: form-data").count(),

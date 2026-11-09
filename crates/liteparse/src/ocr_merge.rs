@@ -1204,78 +1204,28 @@ pub async fn recognize_rasters(
     pool.finish().await
 }
 
-/// Word boxes for one OCR result, in the same space as its item box.
-///
-/// Word-level engines (Tesseract's `RIL_WORD`) return one word per result, which
-/// keeps the item's own box. Line-level engines (PaddleOCR-style HTTP servers)
-/// return a whole line. When the server measured its words (`measured`, page
-/// space, one box per whitespace-separated word of `text`), each word takes its
-/// measured box. When the measured count differs from the text's words, each
-/// word gets the slice of the line box at its character offsets, so a line of
-/// `n` characters gives each character `width / n`; proportional fonts make a
-/// slice a few percent off the ink. The estimate splits only upright lines; a
-/// rotated line keeps one box. A line the server did not measure keeps one box
-/// too, so markdown layout and blocks read OCR lines the same way whether or
-/// not word boxes were requested.
+/// Word boxes for one OCR result, in the same space as its item box `line`.
+/// Each whitespace-separated word of `text` takes its measured box (`measured`,
+/// reading order) when the counts match; otherwise the result keeps one box.
 fn ocr_word_boxes(
     text: &str,
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-    rotation: f32,
+    line: (f32, f32, f32, f32),
     measured: &[(f32, f32, f32, f32)],
 ) -> Vec<WordBox> {
-    let chars: Vec<char> = text.chars().collect();
-    let mut spans: Vec<(usize, usize)> = Vec::new();
-    let mut start = None;
-    for (i, c) in chars.iter().enumerate() {
-        match (c.is_whitespace(), start) {
-            (false, None) => start = Some(i),
-            (true, Some(s)) => {
-                spans.push((s, i));
-                start = None;
-            }
-            _ => {}
-        }
+    let word = |text: &str, (x, y, width, height): (f32, f32, f32, f32)| WordBox {
+        text: text.to_string(),
+        x,
+        y,
+        width,
+        height,
+    };
+    // Table-artifact cleaning can drop a word the server measured.
+    if text.split_whitespace().count() != measured.len() {
+        return vec![word(text, line)];
     }
-    if let Some(s) = start {
-        spans.push((s, chars.len()));
-    }
-    // Measured words pair with the text's words only when the counts agree;
-    // table-artifact cleaning can drop a word the server measured.
-    if !measured.is_empty() && measured.len() == spans.len() {
-        return spans
-            .iter()
-            .zip(measured)
-            .map(|(&(s, e), &(x, y, width, height))| WordBox {
-                text: chars[s..e].iter().collect(),
-                x,
-                y,
-                width,
-                height,
-            })
-            .collect();
-    }
-    if measured.is_empty() || spans.len() < 2 || rotation != 0.0 {
-        return vec![WordBox {
-            text: text.to_string(),
-            x,
-            y,
-            width,
-            height,
-        }];
-    }
-    let char_width = width / chars.len() as f32;
-    spans
-        .into_iter()
-        .map(|(s, e)| WordBox {
-            text: chars[s..e].iter().collect(),
-            x: x + s as f32 * char_width,
-            y,
-            width: (e - s) as f32 * char_width,
-            height,
-        })
+    text.split_whitespace()
+        .zip(measured)
+        .map(|(t, &b)| word(t, b))
         .collect()
 }
 
@@ -1417,7 +1367,7 @@ pub fn merge_ocr_results(
             }
         };
         // An axis-aligned pixel box in page points. Under a deskew the box moves with its
-        // centre and keeps its size.
+        // centre and keeps its size, so rotating the centre back restores it (parser.rs).
         let to_page = |b: [f32; 4]| -> (f32, f32, f32, f32) {
             let (w, h) = ((b[2] - b[0]) * scale_factor, (b[3] - b[1]) * scale_factor);
             match deskew {
@@ -1471,14 +1421,11 @@ pub fn merge_ocr_results(
             }
 
             // The polygon's bounds give a rotated detection a tight upright box. The
-            // rotation (the line's angle, a measured word's, or the polygon's point order)
-            // sends rotated sidebar text through the projector's rotation reading-order handler.
+            // rotation (the engine's angle, else the polygon's point order) sends rotated
+            // sidebar text through the projector's rotation reading-order handler.
             let (ocr_x, ocr_y, ocr_w, ocr_h) = page_bounds(r.bbox, r.polygon);
-            let rotation = match r
-                .rotation
-                .or_else(|| r.words.iter().find_map(|w| w.rotation))
-            {
-                Some(deg) => snap_right_angle(deg),
+            let rotation = match r.rotation {
+                Some(deg) => canonical_quarter(deg) as f32,
                 None => r.polygon.map_or(0.0, |p| polygon_rotation_deg(&p)),
             };
 
@@ -1562,12 +1509,10 @@ pub fn merge_ocr_results(
             };
 
             let words = if emit_word_boxes {
-                let measured: Vec<_> = r
-                    .words
-                    .iter()
-                    .map(|w| page_bounds(w.bbox, w.polygon))
-                    .collect();
-                ocr_word_boxes(&cleaned, ocr_x, ocr_y, ocr_w, ocr_h, rotation, &measured)
+                // Engine boxes moved by their centre (`to_page`), so the rotate-back after
+                // layout restores each one; an unmeasured line keeps its own box.
+                let measured: Vec<_> = r.words.iter().map(|w| to_page(w.bbox)).collect();
+                ocr_word_boxes(&cleaned, to_page(r.bbox), &measured)
             } else {
                 Vec::new()
             };
@@ -1665,18 +1610,18 @@ fn upright_rotated_scan(page: &mut Page) {
         return;
     }
     let (w, h) = (page.page_width, page.page_height);
+    let turn = |(x, y, bw, bh): (f32, f32, f32, f32)| match q {
+        // reading bottom-to-top: the page's top edge is on the left
+        1 => (h - (y + bh), x, bh, bw),
+        2 => (w - (x + bw), h - (y + bh), bw, bh),
+        // reading top-to-bottom: the page's top edge is on the right
+        _ => (y, w - (x + bw), bh, bw),
+    };
     for it in &mut page.text_items {
-        let (x, y, iw, ih) = (it.x, it.y, it.width, it.height);
-        (it.x, it.y, it.width, it.height) = match q {
-            // reading bottom-to-top: the page's top edge is on the left
-            1 => (h - (y + ih), x, ih, iw),
-            2 => (w - (x + iw), h - (y + ih), iw, ih),
-            // reading top-to-bottom: the page's top edge is on the right
-            _ => (y, w - (x + iw), ih, iw),
-        };
+        (it.x, it.y, it.width, it.height) = turn((it.x, it.y, it.width, it.height));
         it.rotation = 0.0;
         for wb in &mut it.words {
-            (wb.x, wb.y, wb.width, wb.height) = (it.x, it.y, it.width, it.height);
+            (wb.x, wb.y, wb.width, wb.height) = turn((wb.x, wb.y, wb.width, wb.height));
         }
     }
     if q != 2 {
@@ -2396,12 +2341,7 @@ fn polygon_rotation_deg(poly: &[[f32; 2]; 4]) -> f32 {
     }
     let reading = if len0 >= len1 { e0 } else { e1 };
     // atan2 with screen-down y; negate to get the conventional CCW angle.
-    snap_right_angle(-reading[1].atan2(reading[0]).to_degrees())
-}
-
-/// Snap a counter-clockwise angle in degrees to the nearest of 0, 90, 180 and 270.
-fn snap_right_angle(deg: f32) -> f32 {
-    ((deg.rem_euclid(360.0) / 90.0).round() as i32 * 90).rem_euclid(360) as f32
+    canonical_quarter(-reading[1].atan2(reading[0]).to_degrees()) as f32
 }
 
 /// Check if an OCR bounding box overlaps with any existing text item.
@@ -3642,6 +3582,36 @@ mod tests {
         assert!(disabled[0].text_items.iter().all(|i| i.words.is_empty()));
     }
 
+    /// One page of OCR results merged with word boxes on, at `dpi`.
+    fn merge_ocr_page(results: Vec<OcrResult>, dpi: f32) -> Page {
+        let outcome = PageOcrOutcome {
+            page_number: 1,
+            dpi,
+            has_native_text: false,
+            image_rects: Vec::new(),
+            replace_native: false,
+            results,
+            error: None,
+        };
+        let mut pages = vec![make_blank_page(1)];
+        merge_ocr_results(&mut pages, vec![outcome], false, true).unwrap();
+        pages.remove(0)
+    }
+
+    fn word_rects(item: &TextItem) -> Vec<(&str, f32, f32, f32, f32)> {
+        item.words
+            .iter()
+            .map(|w| (w.text.as_str(), w.x, w.y, w.width, w.height))
+            .collect()
+    }
+
+    fn ocr_word(text: &str, bbox: [f32; 4]) -> OcrWord {
+        OcrWord {
+            text: text.into(),
+            bbox,
+        }
+    }
+
     /// A line-level engine returns a whole line per result. A line the server
     /// did not measure keeps one box, so table layout sees the same OCR
     /// geometry with and without measured word boxes.
@@ -3655,41 +3625,22 @@ mod tests {
             rotation: None,
             words: Vec::new(),
         };
-        let outcome = PageOcrOutcome {
-            page_number: 1,
-            dpi: 72.0,
-            has_native_text: false,
-            image_rects: Vec::new(),
-            replace_native: false,
-            results: vec![line],
-            error: None,
-        };
-        let mut pages = vec![make_blank_page(1)];
-        merge_ocr_results(&mut pages, vec![outcome], false, true).unwrap();
-        let item = &pages[0].text_items[0];
-        let words: Vec<(&str, f32, f32, f32, f32)> = item
-            .words
-            .iter()
-            .map(|w| (w.text.as_str(), w.x, w.y, w.width, w.height))
-            .collect();
+        let page = merge_ocr_page(vec![line], 72.0);
+        let item = &page.text_items[0];
         assert_eq!(
-            words,
+            word_rects(item),
             vec![(item.text.as_str(), item.x, item.y, item.width, item.height)]
-        );
-
-        // A rotated line keeps one box: its reading axis is not the x axis.
-        assert_eq!(
-            ocr_word_boxes("a b", 0.0, 0.0, 30.0, 10.0, 90.0, &[]).len(),
-            1
         );
     }
 
-    /// Words the OCR server measured replace the character-count estimate when
-    /// they pair one per word; otherwise the estimate stays.
+    /// Measured words become the word boxes when they pair one per word of the
+    /// cleaned text. Any other count keeps one box for the line: fewer words,
+    /// one fallback word for the whole line, or a measured `|` border that
+    /// table-artifact cleaning dropped from the text.
     #[test]
-    fn test_measured_ocr_word_boxes_replace_the_estimate() {
-        let line = |words: Vec<OcrWord>| OcrResult {
-            text: "Invoice total 42.50".into(),
+    fn test_measured_ocr_word_boxes_pair_one_per_word() {
+        let line = |text: &str, words: Vec<OcrWord>| OcrResult {
+            text: text.into(),
             bbox: [10.0, 20.0, 200.0, 30.0],
             confidence: 0.9,
             polygon: None,
@@ -3697,118 +3648,73 @@ mod tests {
             rotation: None,
         };
         let measured = vec![
-            OcrWord {
-                text: "Invoice".into(),
-                bbox: [11.0, 21.0, 60.0, 29.0],
-                polygon: None,
-                rotation: None,
-            },
-            OcrWord {
-                text: "total".into(),
-                bbox: [70.0, 21.0, 100.0, 29.0],
-                polygon: None,
-                rotation: None,
-            },
-            OcrWord {
-                text: "42.50".into(),
-                bbox: [160.0, 22.0, 199.0, 29.0],
-                polygon: None,
-                rotation: None,
-            },
+            ocr_word("Invoice", [11.0, 21.0, 60.0, 29.0]),
+            ocr_word("total", [70.0, 21.0, 100.0, 29.0]),
+            ocr_word("42.50", [160.0, 22.0, 199.0, 29.0]),
         ];
+        // 144 dpi pixels are half a point each.
         let merged = |result: OcrResult| {
-            let outcome = PageOcrOutcome {
-                page_number: 1,
-                // 144 dpi pixels are half a point each.
-                dpi: 144.0,
-                has_native_text: false,
-                image_rects: Vec::new(),
-                replace_native: false,
-                results: vec![result],
-                error: None,
-            };
-            let mut pages = vec![make_blank_page(1)];
-            merge_ocr_results(&mut pages, vec![outcome], false, true).unwrap();
-            pages[0].text_items[0]
-                .words
-                .iter()
-                .map(|w| (w.text.clone(), w.x, w.y, w.width, w.height))
+            let page = merge_ocr_page(vec![result], 144.0);
+            word_rects(&page.text_items[0])
+                .into_iter()
+                .map(|(t, x, y, w, h)| (t.to_string(), x, y, w, h))
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            merged(line(measured.clone())),
+            merged(line("Invoice total 42.50", measured.clone())),
             vec![
                 ("Invoice".to_string(), 5.5, 10.5, 24.5, 4.0),
                 ("total".to_string(), 35.0, 10.5, 15.0, 4.0),
                 ("42.50".to_string(), 80.0, 11.0, 19.5, 3.5),
             ]
         );
-        // Fewer measured words than text words: the estimate (19 chars over 95
-        // points, 5 each) is used instead. One word spanning the whole line is
-        // what the server returns for a line it could not measure.
-        let whole_line = OcrWord {
-            text: "Invoice total 42.50".into(),
-            bbox: [10.0, 20.0, 200.0, 30.0],
-            polygon: None,
-            rotation: None,
-        };
+        let whole_line = ocr_word("Invoice total 42.50", [10.0, 20.0, 200.0, 30.0]);
         for words in [measured[..2].to_vec(), vec![whole_line]] {
-            let estimated = merged(line(words));
             assert_eq!(
-                estimated
-                    .iter()
-                    .map(|w| (w.0.as_str(), w.1, w.3))
-                    .collect::<Vec<_>>(),
-                vec![
-                    ("Invoice", 5.0, 35.0),
-                    ("total", 45.0, 25.0),
-                    ("42.50", 75.0, 25.0)
-                ]
+                merged(line("Invoice total 42.50", words)),
+                vec![("Invoice total 42.50".to_string(), 5.0, 10.0, 95.0, 5.0)]
             );
         }
+        let bordered = vec![
+            ocr_word("|", [10.0, 20.0, 14.0, 30.0]),
+            ocr_word("1", [40.0, 20.0, 50.0, 30.0]),
+            ocr_word("9999999", [120.0, 20.0, 200.0, 30.0]),
+        ];
+        assert_eq!(
+            merged(line("| 1 9999999", bordered)),
+            vec![("1 9999999".to_string(), 5.0, 10.0, 95.0, 5.0)]
+        );
     }
 
-    /// A line turned 90° takes each measured word quad's bounds as its box.
+    /// A scan fed sideways is turned upright as a whole page; each measured
+    /// word box turns with its line and keeps its own place along it.
     #[test]
-    fn test_measured_words_on_a_turned_line_keep_their_quads() {
-        let word = |text: &str, top: f32, bottom: f32| OcrWord {
-            text: text.into(),
-            bbox: [10.0, top, 20.0, bottom],
-            polygon: Some([[10.0, bottom], [10.0, top], [20.0, top], [20.0, bottom]]),
-            rotation: None,
-        };
+    fn test_uprighted_scan_turns_each_measured_word_box() {
         let line = OcrResult {
-            text: "Invoice total".into(),
-            bbox: [10.0, 20.0, 20.0, 200.0],
+            text: "Invoice total amount".into(),
+            bbox: [10.0, 5.0, 20.0, 95.0],
             confidence: 0.9,
             // Reads bottom to top: 90° counter-clockwise.
-            polygon: Some([[10.0, 200.0], [10.0, 20.0], [20.0, 20.0], [20.0, 200.0]]),
+            polygon: Some([[10.0, 95.0], [10.0, 5.0], [20.0, 5.0], [20.0, 95.0]]),
             rotation: None,
-            words: vec![word("Invoice", 120.0, 200.0), word("total", 60.0, 110.0)],
+            words: vec![
+                ocr_word("Invoice", [10.0, 60.0, 20.0, 95.0]),
+                ocr_word("total", [10.0, 35.0, 20.0, 55.0]),
+                ocr_word("amount", [10.0, 5.0, 20.0, 30.0]),
+            ],
         };
-        let outcome = PageOcrOutcome {
-            page_number: 1,
-            dpi: 144.0,
-            has_native_text: false,
-            image_rects: Vec::new(),
-            replace_native: false,
-            results: vec![line],
-            error: None,
-        };
-        let mut pages = vec![make_blank_page(1)];
-        merge_ocr_results(&mut pages, vec![outcome], false, true).unwrap();
-        let item = &pages[0].text_items[0];
-        assert_eq!(item.rotation, 90.0);
-        let words: Vec<_> = item
-            .words
-            .iter()
-            .map(|w| (w.text.as_str(), w.x, w.y, w.width, w.height))
-            .collect();
+        let page = merge_ocr_page(vec![line], 72.0);
+        let item = &page.text_items[0];
         assert_eq!(
-            words,
+            (item.rotation, item.x, item.y, item.width, item.height),
+            (0.0, 5.0, 10.0, 90.0, 10.0)
+        );
+        assert_eq!(
+            word_rects(item),
             vec![
-                ("Invoice", 5.0, 60.0, 5.0, 40.0),
-                ("total", 5.0, 30.0, 5.0, 25.0)
+                ("Invoice", 5.0, 10.0, 35.0, 10.0),
+                ("total", 45.0, 10.0, 20.0, 10.0),
+                ("amount", 70.0, 10.0, 25.0, 10.0)
             ]
         );
     }
@@ -3816,15 +3722,9 @@ mod tests {
     /// The engine's angle decides a line's rotation over its quad's point order,
     /// including the 90/270 choice on a vertical line. A line read at 180° keeps
     /// its quad's bounds and its words in reading order, right to left on
-    /// screen. With no line angle, a measured word's angle stands in.
+    /// screen.
     #[test]
     fn test_engine_rotation_overrides_polygon_order() {
-        let word = |text: &str, x1: f32, x2: f32, rotation: Option<f32>| OcrWord {
-            text: text.into(),
-            bbox: [x1, 20.0, x2, 40.0],
-            polygon: None,
-            rotation,
-        };
         let merged = |polygon: [[f32; 2]; 4], words: Vec<OcrWord>, rotation: Option<f32>| {
             let xs = polygon.map(|p| p[0]);
             let ys = polygon.map(|p| p[1]);
@@ -3838,58 +3738,30 @@ mod tests {
                 words,
                 rotation,
             };
-            let outcome = PageOcrOutcome {
-                page_number: 1,
-                dpi: 144.0,
-                has_native_text: false,
-                image_rects: Vec::new(),
-                replace_native: false,
-                results: vec![line],
-                error: None,
-            };
-            let mut pages = vec![make_blank_page(1)];
-            merge_ocr_results(&mut pages, vec![outcome], false, true).unwrap();
-            pages.remove(0).text_items.remove(0)
-        };
-        let boxes = |item: &TextItem| -> Vec<(String, f32, f32)> {
-            item.words
-                .iter()
-                .map(|w| (w.text.clone(), w.x, w.width))
-                .collect()
+            merge_ocr_page(vec![line], 144.0).text_items.remove(0)
         };
         // Alone, each quad's point order reads as the angle in its name.
         let flat_0 = [[10.0, 20.0], [210.0, 20.0], [210.0, 40.0], [10.0, 40.0]];
-        let flat_180 = [[210.0, 40.0], [10.0, 40.0], [10.0, 20.0], [210.0, 20.0]];
         let up_90 = [[10.0, 200.0], [10.0, 20.0], [20.0, 20.0], [20.0, 200.0]];
         let down_270 = [[20.0, 20.0], [20.0, 200.0], [10.0, 200.0], [10.0, 20.0]];
 
-        let read_turned = |rotation| {
-            let words = vec![
-                word("Invoice", 110.0, 210.0, rotation),
-                word("total", 10.0, 100.0, rotation),
-            ];
-            words
-        };
-        let turned = merged(flat_0, read_turned(None), Some(180.0));
+        let read_turned = vec![
+            ocr_word("Invoice", [110.0, 20.0, 210.0, 40.0]),
+            ocr_word("total", [10.0, 20.0, 100.0, 40.0]),
+        ];
+        let turned = merged(flat_0, read_turned, Some(180.0));
         assert_eq!(turned.rotation, 180.0);
         assert_eq!(
             (turned.x, turned.y, turned.width, turned.height),
             (5.0, 10.0, 100.0, 10.0)
         );
         assert_eq!(
-            boxes(&turned),
-            vec![("Invoice".into(), 55.0, 50.0), ("total".into(), 5.0, 45.0)]
+            word_rects(&turned)
+                .into_iter()
+                .map(|(t, x, _, w, _)| (t, x, w))
+                .collect::<Vec<_>>(),
+            vec![("Invoice", 55.0, 50.0), ("total", 5.0, 45.0)]
         );
-        assert_eq!(
-            merged(flat_0, read_turned(Some(180.0)), None).rotation,
-            180.0
-        );
-
-        // One fallback word: only an upright line is split by the estimate.
-        let fallback = vec![word("Invoice total", 10.0, 210.0, None)];
-        let upright = merged(flat_180, fallback, Some(0.0));
-        assert_eq!(upright.rotation, 0.0);
-        assert_eq!(boxes(&upright).len(), 2);
 
         assert_eq!(merged(up_90, Vec::new(), Some(270.0)).rotation, 270.0);
         assert_eq!(merged(down_270, Vec::new(), Some(90.0)).rotation, 90.0);

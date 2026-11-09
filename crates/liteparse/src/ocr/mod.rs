@@ -25,7 +25,9 @@ pub struct OcrResult {
     pub polygon: Option<[[f32; 2]; 4]>,
     /// Measured word boxes inside this result, in its pixel space and reading
     /// order. Empty when the engine returned none (word-level engines, or a
-    /// line-level server not asked for them); merging then estimates them.
+    /// line-level server not asked for them). Merging uses them only when
+    /// their count matches the words of `text`; otherwise the result keeps
+    /// one box for the whole line.
     #[serde(default)]
     pub words: Vec<OcrWord>,
     /// The line's rotation as the engine measured it, in degrees
@@ -41,14 +43,6 @@ pub struct OcrWord {
     pub text: String,
     /// Axis-aligned box in pixel coordinates: [x1, y1, x2, y2].
     pub bbox: [f32; 4],
-    /// The word's 4-point quad when the engine returned one, as for a skewed
-    /// or turned line. Merging takes its bounds after any page deskew.
-    #[serde(default)]
-    pub polygon: Option<[[f32; 2]; 4]>,
-    /// The word's rotation as the engine measured it, in degrees
-    /// counter-clockwise in [0, 360). None when the engine sent no angle.
-    #[serde(default)]
-    pub rotation: Option<f32>,
 }
 
 pub struct OcrOptions {
