@@ -778,9 +778,10 @@ fn cells_from_pieces(
                 let anchors: Vec<f32> = covered[1..].iter().map(|&i| tracks[i]).collect();
                 // Real word x's first; the character-index estimate only when
                 // this piece has no verified word geometry to cut on.
-                let pieces = split_words_at_x_anchors(&span.words, &anchors).or_else(|| {
-                    split_text_at_x_anchors(&span.text, span.x, span.end_x - span.x, &anchors)
-                })?;
+                let pieces =
+                    split_words_at_x_anchors(&span.words, &anchors, tol).or_else(|| {
+                        split_text_at_x_anchors(&span.text, span.x, span.end_x - span.x, &anchors)
+                    })?;
                 let bold = is_bold_item(span.span);
                 for (idx, piece) in covered.iter().zip(pieces.iter()) {
                     if piece.is_empty() {
@@ -911,11 +912,12 @@ fn is_value_like(text: &str) -> bool {
 /// Returns `None` when there are too few words to host every anchor, when two
 /// anchors want the same boundary, or when an anchor's nearest boundary is
 /// further away than the track tolerance - a miss that large means no word
-/// actually starts at this column, so the caller should fall back rather than
-/// cut where the geometry says nothing happens.
+/// actually starts at this column. The caller can then reject the candidate
+/// or use a different representation, depending on its detection context.
 fn split_words_at_x_anchors(
     words: &[&crate::types::WordBox],
     anchors: &[f32],
+    tolerance: f32,
 ) -> Option<Vec<String>> {
     if anchors.is_empty() || words.len() < anchors.len() + 1 {
         return None;
@@ -926,7 +928,7 @@ fn split_words_at_x_anchors(
             .filter(|k| !cuts.contains(k))
             .map(|k| (k, (words[k].x - target).abs()))
             .min_by(|a, b| a.1.total_cmp(&b.1))?;
-        if dist > TABLE_TRACK_TOLERANCE_PT {
+        if dist > tolerance {
             return None;
         }
         cuts.push(k);
@@ -2381,12 +2383,11 @@ fn try_detect_description_list(lines: &[ProjectedLine], start_idx: usize) -> Opt
                 let straddles = c0_aligned && cell.end_x > col1_x + DESC_LIST_TRACK_TOL_PT;
                 if straddles
                     && let Some((left, right)) =
-                        split_merged_at_anchor(&cell.text, cell.start_x, cell.end_x, col1_x)
+                        split_description_cell_at_anchor(&lines[j], cell, col1_x)
                     && is_label_like(&left)
                 {
-                    // Split position is a linear estimate inside one merged
-                    // span, not an observed boundary — the halves carry text
-                    // only rather than a fabricated rect.
+                    // Reconstructed cells carry text only; do not fabricate
+                    // cell rectangles for the two halves of a merged span.
                     rows.push((j, left.into(), right.into()));
                     j += 1;
                     continue;
@@ -2456,9 +2457,51 @@ fn try_detect_description_list(lines: &[ProjectedLine], start_idx: usize) -> Opt
     })
 }
 
-/// Split a merged-column text item on the whitespace position whose linear
-/// x-estimate is closest to `anchor_x`. Returns trimmed (left, right) halves,
-/// or `None` if no usable whitespace split exists.
+/// Split a merged description row at an established column anchor. Complete,
+/// verified word boxes are authoritative: if no word starts near the anchor,
+/// do not guess a boundary in otherwise continuous text. When word geometry
+/// is missing or unusable, preserve the existing character-based fallback.
+/// `cell` must be the sole result of `split_cells(line)`, so verifying each
+/// nonempty span also verifies the full cell text.
+fn split_description_cell_at_anchor(
+    line: &ProjectedLine,
+    cell: &TableCell,
+    anchor_x: f32,
+) -> Option<(String, String)> {
+    // Word order and increasing x do not describe the same boundaries in RTL
+    // lines; preserve the existing path until that layout is handled explicitly.
+    if line.rtl {
+        return split_merged_at_anchor(&cell.text, cell.start_x, cell.end_x, anchor_x);
+    }
+    let mut spans: Vec<&TextItem> = line
+        .spans
+        .iter()
+        .filter(|span| !span.text.trim().is_empty())
+        .collect();
+    spans.sort_by(|a, b| a.x.total_cmp(&b.x));
+    let mut words = Vec::new();
+    for span in spans {
+        // Projection can rotate/reposition spans without transforming their
+        // word boxes. Do not compare those boxes with projected track anchors.
+        let rotation = span.rotation.rem_euclid(360.0);
+        if !(rotation <= 5.0 || rotation >= 355.0) {
+            return split_merged_at_anchor(&cell.text, cell.start_x, cell.end_x, anchor_x);
+        }
+        let Some(verified) = verified_words(span) else {
+            return split_merged_at_anchor(&cell.text, cell.start_x, cell.end_x, anchor_x);
+        };
+        words.extend(verified);
+    }
+    if words.is_empty() || words.windows(2).any(|pair| pair[0].x > pair[1].x) {
+        return split_merged_at_anchor(&cell.text, cell.start_x, cell.end_x, anchor_x);
+    }
+    // A miss with verified geometry is evidence against a column boundary.
+    // Propagate it rather than guessing a split that could turn prose into a row.
+    let pieces = split_words_at_x_anchors(&words, &[anchor_x], DESC_LIST_TRACK_TOL_PT)?;
+    Some((pieces[0].clone(), pieces[1].clone()))
+}
+
+/// Legacy character-position estimate for callers without usable word boxes.
 fn split_merged_at_anchor(
     text: &str,
     start_x: f32,
@@ -5876,6 +5919,87 @@ pub(super) fn escape_table_cell(s: &str) -> String {
 mod tests {
     use super::super::test_helpers::{line, line_with_spans, page, rect_borders, stroke};
     use super::*;
+
+    #[test]
+    fn description_split_uses_verified_word_positions_and_falls_back_when_unavailable() {
+        use crate::types::WordBox;
+
+        let word = |text: &str, x, width| WordBox {
+            text: text.into(),
+            x,
+            width,
+            ..Default::default()
+        };
+        let assert_fallback = |row: &ProjectedLine, cell: &TableCell, anchor| {
+            let expected = split_merged_at_anchor(&cell.text, cell.start_x, cell.end_x, anchor);
+            assert!(expected.is_some());
+            assert_eq!(
+                split_description_cell_at_anchor(row, cell, anchor),
+                expected
+            );
+        };
+        let mut row = line_with_spans(&[("Mode automatic mode", 0.0)], 10.0, 10.0);
+        let cell = split_cells(&row).remove(0);
+        // Callers that do not supply word geometry retain the old fallback.
+        assert_fallback(&row, &cell, 45.0);
+
+        row.spans[0].words = vec![
+            word("Mode", 0.0, 20.0),
+            word("automatic", 45.0, 40.0),
+            word("mode", 90.0, 20.0),
+        ];
+        assert_eq!(
+            split_description_cell_at_anchor(&row, &cell, 45.0),
+            Some(("Mode".into(), "automatic mode".into()))
+        );
+        // When all words are verified, a distant boundary must not be guessed.
+        row.spans[0].words[1].x = 70.0;
+        assert!(split_description_cell_at_anchor(&row, &cell, 45.0).is_none());
+
+        // Incomplete or mismatched geometry is not evidence against a split.
+        row.spans[0].words.pop();
+        assert_fallback(&row, &cell, 45.0);
+        row.spans[0].words.push(word("other", 90.0, 20.0));
+        assert_fallback(&row, &cell, 45.0);
+
+        // Word boxes of repositioned rotated text are not in the projected
+        // coordinate system, even if their x positions happen to overlap.
+        row.spans[0].words[2].text = "mode".into();
+        row.spans[0].rotation = 90.0;
+        assert_fallback(&row, &cell, 45.0);
+
+        row.spans[0].rotation = 0.0;
+        row.rtl = true;
+        assert_fallback(&row, &cell, 45.0);
+        row.rtl = false;
+        row.spans[0].words[1].x = 90.0;
+        row.spans[0].words[2].x = 70.0;
+        assert_fallback(&row, &cell, 45.0);
+
+        // A single cell can contain several spans in a different order, with
+        // whitespace between words or in spans that carry no text.
+        let mut mixed = line_with_spans(
+            &[
+                ("automatic\u{a0}mode  ", 25.0),
+                (" \t Mode\t", 0.0),
+                (" \t", 5.0),
+            ],
+            10.0,
+            10.0,
+        );
+        mixed.spans[0].words = vec![word("automatic", 25.0, 40.0), word("mode", 70.0, 20.0)];
+        mixed.spans[1].words = vec![word("Mode", 0.0, 20.0)];
+        let mixed_cell = split_cells(&mixed).remove(0);
+        assert_eq!(mixed_cell.text, "Mode automatic mode");
+        assert_eq!(
+            split_description_cell_at_anchor(&mixed, &mixed_cell, 25.0),
+            Some(("Mode".into(), "automatic mode".into()))
+        );
+        assert!(split_description_cell_at_anchor(&mixed, &mixed_cell, 45.0).is_none());
+        // The fallback also applies when only some spans have word boxes.
+        mixed.spans[0].words.clear();
+        assert_fallback(&mixed, &mixed_cell, 25.0);
+    }
 
     fn prose_test_words<'a>(
         words: &'a [&'a str],
