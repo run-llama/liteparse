@@ -634,13 +634,7 @@ async fn render_for_ocr_selection_overrides_complexity_gate() {
     // An image for a native-text page must not force OCR or even open its
     // image file. The explicit selection below can still override the gate.
     let gated_options = stages::OcrRenderOptions {
-        page_images: std::collections::HashMap::from([(
-            first,
-            stages::OcrPageImage {
-                path: "missing-page-image.png".into(),
-                dpi: 72.0,
-            },
-        )]),
+        page_images: std::collections::HashMap::from([(first, "missing-page-image.png".into())]),
         ..Default::default()
     };
     let gated = stages::render_for_ocr(&document, &pages, 0, &gated_options)

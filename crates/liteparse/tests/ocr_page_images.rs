@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use liteparse::config::{CropBox, OcrPageImage, PageOrientationCorrection};
+use liteparse::config::{CropBox, PageOrientationCorrection};
 use liteparse::ocr::{OcrEngine, OcrImage, OcrOptions, OcrResult};
 use liteparse::stages::{self, Library};
 use liteparse::types::PdfInput;
@@ -33,22 +33,12 @@ fn blank_pdf() -> PdfInput {
     PdfInput::Bytes(bytes)
 }
 
-fn image(
-    dir: &std::path::Path,
-    name: &str,
-    width: u32,
-    height: u32,
-    rgb: [u8; 3],
-    dpi: f32,
-) -> OcrPageImage {
+fn image(dir: &std::path::Path, name: &str, width: u32, height: u32, rgb: [u8; 3]) -> String {
     let path = dir.join(name);
     image::RgbImage::from_pixel(width, height, image::Rgb(rgb))
         .save(&path)
         .unwrap();
-    OcrPageImage {
-        path: path.to_string_lossy().into_owned(),
-        dpi,
-    }
+    path.to_string_lossy().into_owned()
 }
 
 struct PixelOcr {
@@ -104,7 +94,7 @@ impl OcrEngine for PixelOcr {
     }
 }
 
-fn config(images: HashMap<u32, OcrPageImage>) -> LiteParseConfig {
+fn config(images: HashMap<u32, String>) -> LiteParseConfig {
     LiteParseConfig {
         ocr_enabled: true,
         quiet: true,
@@ -119,14 +109,8 @@ fn config(images: HashMap<u32, OcrPageImage>) -> LiteParseConfig {
 async fn legacy_rgb_and_grayscale_engines_receive_selected_images_in_page_coordinates() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = config(HashMap::from([
-        (
-            1,
-            image(dir.path(), "one.png", 288, 144, [37, 37, 37], 144.0),
-        ),
-        (
-            3,
-            image(dir.path(), "three.png", 72, 144, [211, 211, 211], 72.0),
-        ),
+        (1, image(dir.path(), "one.png", 288, 144, [37, 37, 37])),
+        (3, image(dir.path(), "three.png", 72, 144, [211, 211, 211])),
     ]));
     cfg.target_pages = Some("3,1".into());
     cfg.page_orientation_corrections = vec![PageOrientationCorrection { page: 1, angle: 90 }];
@@ -172,9 +156,9 @@ async fn legacy_rgb_and_grayscale_engines_receive_selected_images_in_page_coordi
 }
 
 #[test]
-fn supplied_images_reject_invalid_dpi_geometry_and_zero_area() {
+fn inferred_dpi_allows_raster_rounding_but_rejects_stretched_or_empty_images() {
     let dir = tempfile::tempdir().unwrap();
-    let source = image(dir.path(), "page.png", 72, 144, [37, 37, 37], 72.0);
+    let source = image(dir.path(), "rounded.png", 73, 145, [37, 37, 37]);
     let lib = Library::init();
     let document = stages::open(&lib, &blank_pdf(), None, &[]).unwrap();
     let pages = stages::extract(&document, &stages::ExtractRequest::default())
@@ -185,24 +169,21 @@ fn supplied_images_reject_invalid_dpi_geometry_and_zero_area() {
         max_rasters: 1,
         ..Default::default()
     };
-    for dpi in [0.0, f32::NAN, 144.0] {
-        options.page_images.get_mut(&1).unwrap().dpi = dpi;
-        assert!(
-            stages::render_for_ocr(&document, &pages, 0, &options).is_err(),
-            "dpi {dpi}"
-        );
-    }
-    // PNM permits zero-width images. This one also fits the one-pixel
-    // rounding tolerance at low DPI, but OCR still requires actual pixels.
+    let raster = stages::render_for_ocr(&document, &pages, 0, &options)
+        .unwrap()
+        .0
+        .remove(0);
+    assert_eq!(raster.dpi, 72.5);
+    options
+        .page_images
+        .insert(1, image(dir.path(), "stretched.png", 80, 145, [37, 37, 37]));
+    assert!(stages::render_for_ocr(&document, &pages, 0, &options).is_err());
+    // PNM permits zero-width images, but OCR requires actual pixels.
     let empty = dir.path().join("empty.ppm");
     std::fs::write(&empty, b"P6\n0 1\n255\n").unwrap();
-    options.page_images.insert(
-        1,
-        OcrPageImage {
-            path: empty.to_string_lossy().into_owned(),
-            dpi: 0.5,
-        },
-    );
+    options
+        .page_images
+        .insert(1, empty.to_string_lossy().into_owned());
     assert!(stages::render_for_ocr(&document, &pages, 0, &options).is_err());
 }
 
@@ -246,13 +227,9 @@ fn encoded_images_stay_decoded_when_native_text_must_be_masked() {
         image::ColorType::Rgb8,
     )
     .unwrap();
-    options.page_images.insert(
-        1,
-        OcrPageImage {
-            path: path.to_string_lossy().into_owned(),
-            dpi: 72.0,
-        },
-    );
+    options
+        .page_images
+        .insert(1, path.to_string_lossy().into_owned());
     let reused = stages::render_for_ocr(&document, &pages, 0, &options)
         .unwrap()
         .0

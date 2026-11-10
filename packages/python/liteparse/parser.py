@@ -502,7 +502,7 @@ class LiteParse:
         crop_box: Optional[Tuple[float, float, float, float]] = None,
         skip_diagonal_text: Optional[bool] = None,
         page_orientation_corrections: Optional[List[Tuple[int, int]]] = None,
-        ocr_page_images: Mapping[int, tuple[str, float]] | None = None,
+        ocr_page_images: Mapping[int, str] | None = None,
         include_complexity: Optional[bool] = None,
         extract_vector_graphics: Optional[bool] = None,
         pool_size: Optional[int] = None,
@@ -579,10 +579,11 @@ class LiteParse:
             skip_diagonal_text: Drop diagonal text — items whose rotation is
                 more than 2° off the nearest right angle (0/90/180/270).
                 Default False. Use to exclude rotated watermarks/stamps.
-            ocr_page_images: Full-page OCR image paths and actual DPI, keyed by
-                1-based document page number. Images must match corrected page
-                orientation and remain available until parsing finishes. Missing
-                entries render normally. Supplying an image does not force OCR.
+            ocr_page_images: Full-page OCR image paths, keyed by 1-based document
+                page number. DPI is derived from image and PDF page dimensions.
+                Images must match corrected page orientation and remain available
+                until parsing finishes. Missing entries render normally. Supplying
+                an image does not force OCR.
             page_orientation_corrections: Per-page orientation corrections
                 from an upstream orientation classifier, as ``(page, angle)``
                 pairs: the 1-based page and the clockwise degrees (0, 90, 180

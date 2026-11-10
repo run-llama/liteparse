@@ -46,7 +46,6 @@ use crate::types::{
     DocumentMetadata, ExtractedImage, OutlineTarget, Page, ParsedPage, PdfInput, XfaPacket,
 };
 
-pub use crate::config::OcrPageImage;
 pub use crate::extract::{ExtractedPages, ExtractionOutputOptions};
 pub use crate::layout::{LayoutBlock, LayoutCell};
 pub use crate::markdown_layout::{Block, Cell, PositionedBlock, SpanCell, render_blocks};

@@ -66,7 +66,7 @@ test("original JPEG/PNG uploads survive bindings, pools and batch page numbering
   const config = {
     ocrEnabled: true, quiet: true, emitWordBoxes: true,
     ocrServerUrl: `http://127.0.0.1:${server.address().port}`,
-    ocrPageImages: { 1: { path: jpegPath, dpi: 36 }, 3: { path: pngPath, dpi: 72 } },
+    ocrPageImages: { 1: jpegPath, 3: pngPath },
   };
   for (const poolSize of [undefined, 1]) {
     // A discarded render at zero DPI would fail too.

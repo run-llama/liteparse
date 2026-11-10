@@ -86,9 +86,9 @@ pub struct OcrRenderOptions {
     pub max_rasters: usize,
     /// Requested render resolution; clamped per page by the long-edge cap.
     pub dpi: f32,
-    /// Full-page images supplied by the caller, keyed by 1-based source page.
+    /// Full-page image paths supplied by the caller, keyed by 1-based source page.
     /// A supplied image replaces rendering only after the normal OCR gate.
-    pub page_images: HashMap<u32, crate::config::OcrPageImage>,
+    pub page_images: HashMap<u32, String>,
     /// Use luma instead of RGB when rendering or materializing pixels for
     /// masking. Encoded inputs retain their format; recognizers choose how
     /// to decode them (see `OcrEngine::prefers_grayscale`).
@@ -945,36 +945,35 @@ pub fn render_pages_for_ocr(
     render_pages_for_ocr_capped(document, pages, start, options, options.max_rasters)
 }
 
-/// Validate the caller's resolution against the source page. One pixel of
-/// tolerance accounts for integer raster rounding. Images must contain pixels
-/// even when a tiny expected image puts zero within that tolerance.
-fn load_ocr_page_image(
-    source: &crate::config::OcrPageImage,
-    page: &Page,
-) -> Result<OcrImage, LiteParseError> {
-    if !source.dpi.is_finite() || source.dpi <= 0.0 {
-        return Err(LiteParseError::Config(format!(
-            "OCR image for page {} needs a finite, positive DPI",
-            page.page_number
-        )));
-    }
-    let image = OcrImage::from_file(&source.path)?;
+/// Infer resolution from the full-page image and PDF viewport. The longer
+/// page axis minimizes relative raster rounding error; the other axis must
+/// agree within one pixel. Embedded image DPI metadata is not used.
+fn load_ocr_page_image(path: &str, page: &Page) -> Result<(OcrImage, f32), LiteParseError> {
+    let image = OcrImage::from_file(path)?;
     let (width, height) = image.dimensions();
-    let expected_width = page.page_width * source.dpi / 72.0;
-    let expected_height = page.page_height * source.dpi / 72.0;
+    let pixels_per_point = if page.page_width >= page.page_height {
+        width as f32 / page.page_width
+    } else {
+        height as f32 / page.page_height
+    };
+    let dpi = pixels_per_point * 72.0;
     if width == 0
         || height == 0
-        || !expected_width.is_finite()
-        || !expected_height.is_finite()
-        || (width as f32 - expected_width).abs() > 1.0
-        || (height as f32 - expected_height).abs() > 1.0
+        || !page.page_width.is_finite()
+        || page.page_width <= 0.0
+        || !page.page_height.is_finite()
+        || page.page_height <= 0.0
+        || !dpi.is_finite()
+        || dpi <= 0.0
+        || (width as f32 - page.page_width * pixels_per_point).abs() > 1.0
+        || (height as f32 - page.page_height * pixels_per_point).abs() > 1.0
     {
         return Err(LiteParseError::Config(format!(
-            "OCR image for page {} is {}x{} at {} DPI; expected a full-page image of {:.1}x{:.1} pixels in corrected viewport orientation",
-            page.page_number, width, height, source.dpi, expected_width, expected_height
+            "OCR image for page {} is {}x{}; expected a full-page image matching the {:.1}x{:.1} point page in corrected viewport orientation",
+            page.page_number, width, height, page.page_width, page.page_height
         )));
     }
-    Ok(image)
+    Ok((image, dpi))
 }
 
 /// [`render_pages_for_ocr`] with `max_rasters` overriding the one in
@@ -1075,7 +1074,7 @@ pub(crate) fn render_pages_for_ocr_capped(
                 && matches!(garbled_scope(page), GarbledScope::None);
             let (mut image, eff_dpi) =
                 if let Some(source) = page_images.get(&(page.page_number as u32)) {
-                    (load_ocr_page_image(source, page)?, source.dpi)
+                    load_ocr_page_image(source, page)?
                 } else {
                     let long_edge_pt = page.page_width.max(page.page_height);
                     let mut eff_dpi = dpi;

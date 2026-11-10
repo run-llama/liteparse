@@ -207,29 +207,29 @@ use the normal renderer.
 const parser = new LiteParse({
   ocrEnabled: true,
   ocrPageImages: {
-    1: { path: "/path/to/page-1.png", dpi: 200 },
-    3: { path: "/path/to/page-3.jpg", dpi: 150 },
+    1: "/path/to/page-1.png",
+    3: "/path/to/page-3.jpg",
   },
 });
 const result = await parser.parse("document.pdf");
 ```
 
-Python accepts `ocr_page_images={1: ("/path/to/page-1.png", 200.0)}`.
-Rust callers set `LiteParseConfig::ocr_page_images` to a map of page numbers to
-`config::OcrPageImage { path, dpi }`. Composed Rust pipelines use the same map
+Python accepts `ocr_page_images={1: "/path/to/page-1.png"}`.
+Rust callers set `LiteParseConfig::ocr_page_images` to a `HashMap<u32, String>`
+of page numbers to local paths. Composed Rust pipelines use the same map
 in `stages::OcrRenderOptions::page_images`.
 
 Keys always refer to **1-based source document pages**, including selected-page
-and batch parses. `dpi` is the supplied image's actual resolution; it can differ
-from the parser's requested rendering DPI. Each image must cover the entire
-page in the orientation produced by the PDF's `/Rotate` and any configured
+and batch parses. LiteParse derives DPI from the image's pixel dimensions and
+PDF page size, independently of image resolution metadata and the parser's
+requested rendering DPI. Each image must cover the entire page in the
+orientation produced by the PDF's `/Rotate` and any configured
 `pageOrientationCorrections`. Its content, including form appearances, must
 match the PDF. Cropped, deskewed and stretched images are unsupported.
 
 With HTTP OCR, unmodified 8-bit JPEG/PNG images without an alpha channel are
 uploaded as their original bytes, with the matching MIME type. LiteParse reads
-the image header for dimensions and DPI validation; it does not decode and
-re-encode those pixels. The OCR server validates the compressed pixel data.
+the image header for dimensions; it does not decode and re-encode those pixels. The OCR server validates the compressed pixel data.
 Images with alpha channels, higher bit depths, EXIF rotation or native text that
 needs masking use decoded pixels. Pixel-based OCR engines, including Tesseract, keep their
 normal decoded inputs.
@@ -247,9 +247,9 @@ consuming stage outputs directly. Serialized stage payloads now contain a tagged
 `image` object. The Node.js/Python result types and existing OCR engine methods
 are unchanged.
 
-LiteParse checks image dimensions against the page and DPI, allowing one pixel
-of raster rounding. An unreadable or incompatible supplied image is a page
-error; it is not silently replaced with a render. `continueOnPageError` applies
+LiteParse derives the scale from the longer page axis and checks the other
+axis agrees within one pixel of raster rounding. An unreadable or incompatible
+supplied image is a page error; it is not silently replaced with a render. `continueOnPageError` applies
 as it does to rendering failures. Keep image files available until parsing
 finishes, including when using worker pools or batch iterators. The parser
 continues to apply its native-text masking and crop filters. Supplying OCR

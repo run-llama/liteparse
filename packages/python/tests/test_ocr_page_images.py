@@ -71,7 +71,7 @@ def test_page_images_survive_python_options(
     )[0]
     image = tmp_path / "page-three.png"
     image.write_bytes(screenshot.image_bytes)
-    images = {3: (str(image), 144.0)}
+    images = {3: str(image)}
     parser = LiteParse(
         ocr_enabled=True, ocr_server_url=ocr_server, ocr_page_images=images,
         target_pages="3", dpi=0, quiet=True, emit_word_boxes=True,

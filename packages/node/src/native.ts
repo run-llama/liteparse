@@ -22,7 +22,7 @@ interface NativeBindings {
 export interface LiteParseNativeConfig {
   ocrLanguage?: string;
   ocrEnabled?: boolean;
-  ocrPageImages?: Record<string, { path: string; dpi: number }>;
+  ocrPageImages?: Record<string, string>;
   ocrServerUrl?: string;
   ocrServerHeaders?: Record<string, string>;
   tessdataPath?: string;

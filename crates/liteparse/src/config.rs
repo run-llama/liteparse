@@ -12,9 +12,14 @@ pub struct LiteParseConfig {
     /// Existing full-page images to use instead of rendering for OCR, keyed by
     /// 1-based document page number (also with target pages and batch parsing).
     /// Missing entries use the normal renderer. Images do not force OCR or
-    /// replace requested screenshot outputs. See [`OcrPageImage`].
+    /// replace requested screenshot outputs. Values are local image paths;
+    /// DPI is derived from image dimensions and the PDF page size.
+    /// Images must cover the full corrected viewport, including `/Rotate` and
+    /// `page_orientation_corrections`, with matching content/form appearances.
+    /// Cropped, deskewed or stretched images are unsupported. Paths are read
+    /// lazily and must remain available until parsing finishes.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub ocr_page_images: HashMap<u32, OcrPageImage>,
+    pub ocr_page_images: HashMap<u32, String>,
     /// HTTP OCR server URL (uses Tesseract if not provided)
     pub ocr_server_url: Option<String>,
     /// Extra HTTP headers sent with every request to `ocr_server_url`, as
@@ -182,23 +187,6 @@ pub struct LiteParseConfig {
     /// vertical `lines`) in parse results. Default `false`; path objects are
     /// still inspected internally for layout detection when disabled.
     pub extract_vector_graphics: bool,
-}
-
-/// A full-page image already rendered by the caller, used only for OCR.
-///
-/// The image must cover the whole page in its corrected viewport orientation,
-/// including the PDF's `/Rotate` and `page_orientation_corrections`. Cropped,
-/// deskewed or stretched images are not supported. Content and form appearances
-/// must match the PDF; only dimensions and DPI can be checked automatically.
-/// Paths are read lazily for pages that need OCR and must remain available until
-/// parsing finishes. Native text extraction still reads the PDF.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OcrPageImage {
-    /// Local image path (for example, PNG or JPEG).
-    pub path: String,
-    /// Actual image resolution. Pixel-to-page scale is `72 / dpi`; this is
-    /// independent of the requested rendering DPI in [`LiteParseConfig`].
-    pub dpi: f32,
 }
 
 /// A caller-supplied orientation correction for one page. See

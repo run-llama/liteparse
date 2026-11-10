@@ -1236,7 +1236,7 @@ struct PyLiteParseConfig {
     #[pyo3(get)]
     ocr_enabled: bool,
     #[pyo3(get)]
-    ocr_page_images: HashMap<u32, (String, f32)>,
+    ocr_page_images: HashMap<u32, String>,
     #[pyo3(get)]
     ocr_server_url: Option<String>,
     #[pyo3(get)]
@@ -1326,11 +1326,7 @@ impl PyLiteParseConfig {
         Self {
             ocr_language: cfg.ocr_language.clone(),
             ocr_enabled: cfg.ocr_enabled,
-            ocr_page_images: cfg
-                .ocr_page_images
-                .iter()
-                .map(|(page, image)| (*page, (image.path.clone(), image.dpi)))
-                .collect(),
+            ocr_page_images: cfg.ocr_page_images.clone(),
             ocr_server_url: cfg.ocr_server_url.clone(),
             ocr_server_headers: if cfg.ocr_server_headers.is_empty() {
                 None
@@ -1558,7 +1554,7 @@ impl LiteParse {
         crop_box: Option<(f32, f32, f32, f32)>,
         skip_diagonal_text: Option<bool>,
         page_orientation_corrections: Option<Vec<(u32, u16)>>,
-        ocr_page_images: Option<HashMap<u32, (String, f32)>>,
+        ocr_page_images: Option<HashMap<u32, String>>,
         include_complexity: Option<bool>,
         extract_vector_graphics: Option<bool>,
     ) -> PyResult<Self> {
@@ -1572,10 +1568,7 @@ impl LiteParse {
                     "ocr_page_images keys must be positive document page numbers",
                 ));
             }
-            cfg.ocr_page_images = images
-                .into_iter()
-                .map(|(page, (path, dpi))| (page, liteparse::config::OcrPageImage { path, dpi }))
-                .collect();
+            cfg.ocr_page_images = images;
         }
         if let Some(v) = ocr_enabled {
             cfg.ocr_enabled = v;
