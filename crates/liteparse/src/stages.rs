@@ -789,6 +789,87 @@ mod tests {
         assert_eq!(render_document(&[]), "");
     }
 
+    /// Markdown of a one-page scan: three horizontal body lines, then the OCR
+    /// items `row` as `(text, x, y, rotation)`. A sideways item's box stands
+    /// upright: 10pt wide and 5pt tall per character.
+    fn ocr_markdown(row: &[(&str, f32, f32, f32)]) -> String {
+        let body = [
+            "Register of changes for the period ending May",
+            "Prepared by the records office for its review",
+            "All amounts are in dollars before any tax is due",
+        ];
+        let text_items = body
+            .iter()
+            .zip([100.0, 120.0, 140.0])
+            .map(|(&text, y)| (text, 50.0, y, 0.0))
+            .chain(row.iter().copied())
+            .map(|(text, x, y, rotation)| {
+                let length = text.chars().count() as f32 * 5.0;
+                let (width, height) = if rotation == 0.0 {
+                    (length, 10.0)
+                } else {
+                    (10.0, length)
+                };
+                TextItem {
+                    text: text.into(),
+                    x,
+                    y,
+                    width,
+                    height,
+                    rotation,
+                    font_size: Some(10.0),
+                    font_name: Some("OCR".into()),
+                    confidence: Some(0.9),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let page = crate::types::Page {
+            page_number: 1,
+            ocr_deskew: None,
+            page_label: None,
+            page_width: 612.0,
+            page_height: 792.0,
+            content_bounds: None,
+            text_items,
+            graphics: vec![],
+            vector_graphics: None,
+            struct_nodes: vec![],
+            image_refs: vec![],
+            annotations: None,
+            form_fields: None,
+            structure_tree: None,
+        };
+        render_document(&project_for_markdown(vec![page]))
+    }
+
+    #[test]
+    fn a_row_with_one_sideways_glyph_stays_in_the_markdown() {
+        // OCR can read a row's index digit as one glyph at 90°. The glyph sits just
+        // under the line above, so projection keeps it on its row. The row is still
+        // horizontal text: markdown keeps it and leaves the glyph out.
+        let md = ocr_markdown(&[
+            ("L", 50.0, 155.0, 90.0),
+            ("Current", 80.0, 155.0, 0.0),
+            ("A-001", 150.0, 155.0, 0.0),
+            ("Smith", 230.0, 155.0, 0.0),
+        ]);
+        assert!(md.contains("Current A-001 Smith"), "{md}");
+        assert!(!md.contains('L'), "{md}");
+    }
+
+    #[test]
+    fn a_line_made_mostly_of_sideways_text_is_skipped() {
+        // A margin stamp read at 90° with one fragment read upright is still margin
+        // furniture: the whole line stays out of the markdown.
+        let md = ocr_markdown(&[
+            ("arXiv:2401.00001v1", 50.0, 360.0, 90.0),
+            ("Q7", 52.0, 400.0, 0.0),
+        ]);
+        assert!(!md.contains("arXiv"), "{md}");
+        assert!(!md.contains("Q7"), "{md}");
+    }
+
     #[test]
     fn dedupe_rules_drops_edges_and_collapses_runs() {
         use Block::{HorizontalRule, Paragraph};
