@@ -89,8 +89,15 @@ pub struct OcrRenderOptions {
     /// Stop after this many rasters (`0` = no limit), so a long document can
     /// be processed in bounded rounds; the function returns where to resume.
     pub max_rasters: usize,
-    /// Requested render resolution; clamped per page by the long-edge cap.
+    /// Requested render resolution; lowered per page by `max_long_edge` and
+    /// by the built-in long-edge limit.
     pub dpi: f32,
+    /// Largest long edge, in pixels, a raster may have. Each page renders at
+    /// `dpi` or, when that would exceed the cap, at the lower dpi whose long
+    /// edge is exactly the cap, so pages of different sizes get different
+    /// dpis in one call (the raster's `dpi` reports which). `None` or
+    /// `Some(0)` leaves `dpi` alone.
+    pub max_long_edge: Option<u32>,
     /// Emit 1 byte/px luma instead of RGB (see `OcrEngine::prefers_grayscale`).
     pub grayscale: bool,
     /// Paint form-field appearances into the raster (runs document actions).
@@ -113,6 +120,7 @@ impl Default for OcrRenderOptions {
         Self {
             max_rasters: 0,
             dpi: crate::config::DEFAULT_DPI,
+            max_long_edge: None,
             grayscale: false,
             render_form_fields: false,
             continue_on_page_error: false,
@@ -980,6 +988,7 @@ pub(crate) fn render_pages_for_ocr_capped(
     let OcrRenderOptions {
         max_rasters: _,
         dpi,
+        max_long_edge,
         grayscale,
         render_form_fields,
         continue_on_page_error,
@@ -1059,9 +1068,14 @@ pub(crate) fn render_pages_for_ocr_capped(
                 }
             };
 
-            // Clamp the render DPI so the long edge stays within the raster budget.
+            // Fit the caller's cap, then clamp so the long edge stays within the raster budget.
             let long_edge_pt = page.page_width.max(page.page_height);
-            let mut eff_dpi = dpi;
+            let mut eff_dpi = fitting_dpi(
+                page.page_width,
+                page.page_height,
+                dpi,
+                max_long_edge.unwrap_or(0),
+            );
             if long_edge_pt > 0.0 {
                 let max_dpi = MAX_OCR_RENDER_LONG_EDGE_PX * 72.0 / long_edge_pt;
                 if eff_dpi > max_dpi {
@@ -1147,6 +1161,17 @@ pub(crate) fn render_pages_for_ocr_capped(
         }
     }
     Ok((rendered, next_start))
+}
+
+/// The render dpi for a `width` x `height` pt page: `dpi`, lowered so the long
+/// edge (`pt * dpi / 72`, rounded as pdfium sizes the bitmap) is at most
+/// `max_long_edge` pixels. A cap of 0, or a page with no size, keeps `dpi`.
+fn fitting_dpi(width: f32, height: f32, dpi: f32, max_long_edge: u32) -> f32 {
+    let long_edge_pt = width.max(height);
+    if max_long_edge == 0 || long_edge_pt <= 0.0 {
+        return dpi;
+    }
+    dpi.min(max_long_edge as f32 * 72.0 / long_edge_pt)
 }
 
 /// One page's recognition outcome: what the engine returned for one
@@ -2756,6 +2781,47 @@ mod tests {
             assert!(!stats.has_substantial_images);
             assert!(!stats.needs_ocr);
         }
+    }
+
+    /// The bitmap size pdfium renders a `pt` edge to at `dpi`.
+    fn rendered_px(pt: f32, dpi: f32) -> u32 {
+        (pt * (dpi / 72.0)).round() as u32
+    }
+
+    #[test]
+    fn capped_page_renders_to_exactly_the_cap() {
+        // Letter, A4, Legal, a landscape slide, a tall receipt and a poster
+        // that is over the cap even at 72 dpi.
+        let sizes = [
+            (612.0, 792.0),
+            (595.28, 841.89),
+            (612.0, 1008.0),
+            (960.0, 540.0),
+            (226.77, 2834.65),
+            (2592.0, 3456.0),
+        ];
+        for cap in [300, 1600, 2400, 4000] {
+            for (w, h) in sizes {
+                let dpi = fitting_dpi(w, h, 300.0, cap);
+                let long_edge = rendered_px(w, dpi).max(rendered_px(h, dpi));
+                if dpi < 300.0 {
+                    assert_eq!(long_edge, cap, "{w}x{h} pt at cap {cap}");
+                } else {
+                    assert!(long_edge <= cap, "{w}x{h} pt at cap {cap}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn page_under_the_cap_keeps_the_configured_dpi() {
+        assert_eq!(fitting_dpi(612.0, 792.0, 150.0, 2400), 150.0);
+    }
+
+    #[test]
+    fn zero_cap_or_empty_page_keeps_the_configured_dpi() {
+        assert_eq!(fitting_dpi(612.0, 792.0, 300.0, 0), 300.0);
+        assert_eq!(fitting_dpi(0.0, 0.0, 300.0, 2400), 300.0);
     }
 
     #[test]
