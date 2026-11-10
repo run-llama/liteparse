@@ -13,6 +13,7 @@
 //! set at two stage boundaries (after extract, after projection), so the
 //! same test proves the boundary types round-trip losslessly.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use liteparse::config::{CropBox, ImageMode, OutputFormat, PageOrientationCorrection};
@@ -74,6 +75,8 @@ impl OcrEngine for MockOcr {
                     bbox: [10.0, 10.0, 260.0, 40.0],
                     confidence: 0.99,
                     polygon: None,
+                    rotation: None,
+                    words: Vec::new(),
                 },
                 OcrResult {
                     text: "rotated".into(),
@@ -85,6 +88,8 @@ impl OcrEngine for MockOcr {
                         [300.0, 400.0],
                         [300.0, 100.0],
                     ]),
+                    rotation: None,
+                    words: Vec::new(),
                 },
             ])
         })
@@ -602,6 +607,8 @@ impl OcrEngine for SkewedMockOcr {
                         bbox: [x0, y0, x0 + len, y0 + rise + line_h],
                         confidence: 0.95,
                         polygon: Some(polygon),
+                        words: Vec::new(),
+                        rotation: None,
                     }
                 })
                 .collect())
@@ -737,6 +744,55 @@ async fn parse_equals_composed_stages_with_form_fields_and_rendered_screenshots(
     );
 }
 
+/// The configured OCR request fields reach every raster, with a page's own
+/// fields merged over the base for that page only.
+#[test]
+#[serial]
+fn ocr_page_request_fields_merge_over_the_base() {
+    let lib = Library::init();
+    let document =
+        stages::open(&lib, &PdfInput::Path(fixture("page_labels.pdf")), None, &[]).unwrap();
+    let probe = LiteParse::new(everything_config());
+    let extracted = stages::extract(&document, &probe.extract_request(None, usize::MAX)).unwrap();
+    let numbers: Vec<u32> = extracted
+        .pages
+        .iter()
+        .map(|p| p.page_number as u32)
+        .collect();
+    assert!(numbers.len() >= 2, "fixture needs two pages");
+    let fields = |pairs: &[(&str, &str)]| -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    };
+    let parser = LiteParse::new(LiteParseConfig {
+        ocr_request_fields: fields(&[("correct_rotation", "true"), ("return_word_boxes", "true")]),
+        ocr_page_request_fields: [(numbers[0], fields(&[("correct_rotation", "false")]))].into(),
+        ..everything_config()
+    });
+    let options = stages::OcrRenderOptions {
+        max_rasters: 0,
+        selection: Some(numbers.iter().copied().collect()),
+        ..parser.ocr_render_options(false, &extracted)
+    };
+    let (rasters, _) = stages::render_for_ocr(&document, &extracted.pages, 0, &options).unwrap();
+    let got: BTreeMap<u32, BTreeMap<String, String>> = rasters
+        .iter()
+        .map(|r| (r.page_number as u32, r.request_fields.clone()))
+        .collect();
+    let want: BTreeMap<u32, BTreeMap<String, String>> = numbers
+        .iter()
+        .map(|&n| {
+            let rotate = if n == numbers[0] { "false" } else { "true" };
+            let page_fields = [("correct_rotation", rotate), ("return_word_boxes", "true")]
+                .map(|(k, v)| (k.to_string(), v.to_string()));
+            (n, BTreeMap::from(page_fields))
+        })
+        .collect();
+    assert_eq!(got, want);
+}
+
 /// An explicit OCR page selection bypasses the complexity gate: a text-dense
 /// page that scoring would never send to OCR is rastered anyway, and pages
 /// outside the selection are skipped.
@@ -788,6 +844,8 @@ fn merge_ocr_rejects_outcome_for_unknown_page() {
             bbox: [0.0, 0.0, 10.0, 10.0],
             confidence: 1.0,
             polygon: None,
+            rotation: None,
+            words: Vec::new(),
         }],
         error: None,
     };

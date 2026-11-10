@@ -22,6 +22,12 @@ POST /ocr
 |-------|------|----------|-------------|
 | `file` | binary | Yes | Image file (PNG, JPG, etc.) |
 | `language` | string | No | Language code (default: `en`) |
+| `correct_rotation` | string | No | `true` lets the server detect and undo the page's rotation before reading it; `false` reads the page as sent. |
+| `return_word_boxes` | string | No | `true` asks a line-level server to also measure each word's box (see `results[].words`). |
+| `dense_ocr_detection` | string | No | `true` runs denser text detection. |
+| `return_bbox_angles` | string | No | `true` returns each line's angle in `result_meta`. |
+
+LiteParse sends `file` and `language`, plus every field in `ocr_request_fields` / `ocrRequestFields` as given, with the page's entry in `ocr_page_request_fields` / `ocrPageRequestFields` merged over them. A `language` entry replaces the default. LiteParse adds no other field, so `correct_rotation`, `return_word_boxes`, `dense_ocr_detection` and `return_bbox_angles` are sent only when the caller sets them. Servers may ignore any of these fields.
 
 ### Language Codes
 
@@ -48,10 +54,11 @@ Your server should map these to whatever format your underlying OCR engine expec
 {
   "results": [
     {
-      "text": "recognized text",
+      "text": "recognized",
       "bbox": [x1, y1, x2, y2],
       "confidence": 0.95,
-      "polygon": [[x1, y1], [x2, y2], [x3, y3], [x4, y4]]
+      "polygon": [[x1, y1], [x2, y2], [x3, y3], [x4, y4]],
+      "words": [{"text": "recognized", "bbox": [x1, y1, x2, y2]}]
     }
   ]
 }
@@ -66,6 +73,11 @@ Your server should map these to whatever format your underlying OCR engine expec
 | `results[].bbox` | [number, number, number, number] | Axis-aligned bounding box `[x1, y1, x2, y2]` where (x1,y1) is top-left and (x2,y2) is bottom-right |
 | `results[].confidence` | number | Confidence score between 0.0 and 1.0 |
 | `results[].polygon` | [[number, number], ×4] | **Optional.** 4-point detection polygon ordered top-left → top-right → bottom-right → bottom-left **in the glyphs' upright reading frame**. Lets LiteParse recover rotation for vertical/sideways text. |
+| `results[].words` | array | **Optional.** Measured word boxes inside this result, in reading order, each `{"text", "bbox": [x1, y1, x2, y2]}` in image pixels. LiteParse uses them as the result's word boxes when their count matches the words in `text` after cleanup. Otherwise, and when a result has no measured words, the result keeps one box for the whole line. |
+
+A server that returns the `{"result": [[quad, text, score], ...]}` shape may send the measured words as a top-level `words` list parallel to `result`: `words[i]` is a list of `{"bbox": [[x, y] ×4], "text"}` for `result[i]`. LiteParse drops all of them when the two lists differ in length. Each word's box is the bounds of its quad.
+
+The same shape may also send `result_meta`, a list parallel to `result`: `result_meta[i]` is `{"r": degrees}`, the rotation of `result[i]` clockwise on screen in (-180, 180], or `{}` when the line is upright. LiteParse takes each line's rotation from it, snapped to the nearest right angle, and drops the whole list when its length differs from `result`. Without it, LiteParse infers rotation from the order of the quad's points.
 
 ## Example
 
