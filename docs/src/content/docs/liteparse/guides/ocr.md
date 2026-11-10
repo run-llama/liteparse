@@ -219,10 +219,8 @@ If you are trying to integrate a method that doesn't return bounding boxes, you 
 
 ## Reusing page images in Rust
 
-Rust callers that already have full-page screenshots can supply them as OCR
-inputs to avoid rendering those pages again. LiteParse still reads the PDF for
-native text and decides which pages need OCR. Pages without a supplied image
-use the normal renderer.
+Supply existing full-page images to skip rendering them for OCR. Native PDF
+text extraction still runs. This option is available only in Rust.
 
 ```rust
 use std::collections::HashMap;
@@ -238,43 +236,16 @@ let parser = LiteParse::new(LiteParseConfig {
 });
 ```
 
-Composed Rust pipelines use the same `HashMap<u32, String>` of page numbers to
-local paths in `stages::OcrRenderOptions::page_images`. This option is available
-only through the Rust API. Supplied images retain their dimensions; render DPI
-and `max_long_edge` apply only to pages rendered by LiteParse.
+- Keys are **1-based source page numbers**, including selected-page and batch
+  parses. DPI is inferred from image dimensions and PDF page size.
+- Images must match the PDF's full page, content and orientation after `/Rotate`
+  and `page_orientation_corrections`. Cropped, stretched or deskewed images are
+  unsupported. Keep files available until parsing finishes.
+- Missing entries render normally. Supplying an image does not force OCR.
+  Invalid images are page errors; `continue_on_page_error` applies.
+- Supplied images keep their dimensions; render DPI and `max_long_edge` affect
+  only newly rendered pages. Requested screenshots are generated separately.
 
-Keys always refer to **1-based source document pages**, including selected-page
-and batch parses. LiteParse derives DPI from the image's pixel dimensions and
-PDF page size, independently of image resolution metadata and the parser's
-requested rendering DPI. Each image must cover the entire page in the
-orientation produced by the PDF's `/Rotate` and any configured
-`page_orientation_corrections`. Its content, including form appearances, must
-match the PDF. Cropped, deskewed and stretched images are unsupported.
-
-With HTTP OCR, unmodified 8-bit JPEG/PNG images without an alpha channel are
-uploaded as their original bytes, with the matching MIME type. LiteParse reads
-the image header for dimensions; it does not decode and re-encode those pixels.
-The OCR server validates the compressed pixel data. Images with alpha channels,
-higher bit depths, EXIF rotation or native text that needs masking use decoded
-pixels. Pixel-based OCR engines, including Tesseract, keep their normal decoded
-inputs.
-
-Rust OCR engines receive a single `OcrImage` through `recognize_image`.
-Existing engines can keep implementing the raw-pixel `recognize` method: the
-default adapter supplies pixels in the engine's preferred RGB/grayscale format.
-Engines that work with files can override `recognize_image` and borrow encoded
-bytes through `image.encoded()`. Pixel edits consume the image with
-`into_pixels`, then replace it with `OcrImage::Pixels`.
-
-**Rust stage migration:** `OcrRaster::image` replaces its `pixels`, `width` and
-`height` fields. Use `image.dimensions()` and `image.pixels(grayscale)` when
-consuming stage outputs directly. Serialized stage payloads now contain a tagged
-`image` object. Existing OCR engine methods are unchanged.
-
-LiteParse derives the scale from the longer page axis and checks the other
-axis agrees within one pixel of raster rounding. An unreadable or incompatible
-supplied image is a page error; it is not silently replaced with a render.
-`continue_on_page_error` applies as it does to rendering failures. Keep image
-files available until parsing finishes, including batch iterators. The parser
-continues to apply its native-text masking and crop filters. Supplying OCR
-images does not replace screenshots requested through `extract_screenshots`.
+For staged pipelines, set `OcrRenderOptions::page_images`. Access raster data
+through `OcrRaster::image`, using `dimensions()` or `pixels(grayscale)`.
+Existing OCR engine implementations need no changes.
