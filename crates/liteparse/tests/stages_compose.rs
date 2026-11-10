@@ -928,7 +928,9 @@ fn dot_screen_pdf(bits: u8) -> Vec<u8> {
 /// Count of raster bytes strictly between black and white.
 fn grey_pixels(bits: u8, blur: bool) -> usize {
     let lib = Library::init();
-    let document = stages::open(&lib, &PdfInput::Bytes(dot_screen_pdf(bits)), None, &[]).unwrap();
+    // pdfium reads the bytes in place, so they must outlive `document`.
+    let input = PdfInput::Bytes(dot_screen_pdf(bits));
+    let document = stages::open(&lib, &input, None, &[]).unwrap();
     let parser = LiteParse::new(LiteParseConfig::default());
     let pages = stages::extract(&document, &parser.extract_request(None, usize::MAX))
         .unwrap()
