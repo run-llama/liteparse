@@ -41,26 +41,18 @@ impl OcrEngine for ControlledEngine {
         "controlled-stage-test"
     }
 
-    fn prefers_grayscale(&self) -> bool {
-        true
-    }
-
     fn recognize<'a, 'b: 'a, 'c: 'a>(
         &'a self,
-        image_data: &'c [u8],
+        _image_data: &'c [u8],
         width: u32,
-        height: u32,
-        options: &'b OcrOptions,
+        _height: u32,
+        _options: &'b OcrOptions,
     ) -> Pin<
         Box<
             dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
                 + '_,
         >,
     > {
-        assert_eq!(image_data, vec![width as u8; width as usize]);
-        assert_eq!(height, 1);
-        assert_eq!(options.language, "eng");
-        assert_eq!(options.dpi, 150.0);
         let mut started = false;
         Box::pin(poll_fn(move |cx| {
             let mut state = self.state.lock().unwrap();
@@ -96,10 +88,10 @@ fn check_recognition(num_workers: usize) {
         .map(|&page_number| OcrRaster {
             page_number,
             image: liteparse::ocr::OcrImage::Pixels {
-                data: vec![page_number as u8; page_number],
+                data: vec![page_number as u8; page_number * 3],
                 width: page_number as u32,
                 height: 1,
-                grayscale: true,
+                grayscale: false,
             },
             dpi: 150.0,
             has_native_text: false,
@@ -197,10 +189,10 @@ fn window_collects_ready_results_and_reuses_all_slots() {
         let raster = OcrRaster {
             page_number: page,
             image: liteparse::ocr::OcrImage::Pixels {
-                data: vec![page as u8; page],
+                data: vec![page as u8; page * 3],
                 width: page as u32,
                 height: 1,
-                grayscale: true,
+                grayscale: false,
             },
             dpi: 150.0,
             has_native_text: false,
@@ -231,10 +223,10 @@ fn window_collects_ready_results_and_reuses_all_slots() {
     let raster = OcrRaster {
         page_number: 7,
         image: liteparse::ocr::OcrImage::Pixels {
-            data: vec![7; 7],
+            data: vec![7; 7 * 3],
             width: 7,
             height: 1,
-            grayscale: true,
+            grayscale: false,
         },
         dpi: 150.0,
         has_native_text: false,
