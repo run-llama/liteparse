@@ -102,10 +102,11 @@ export interface LiteParseConfig {
    */
   ocrFailureFatal: boolean;
   /**
-   * Blur OCR rasters of 1-bit full-page scans (default: false). Helps scans on
-   * dotted or dithered backgrounds that otherwise OCR as empty.
+   * Remove dot-screen specks from OCR rasters of 1-bit full-page scans on a
+   * dotted or dithered background, rendered at 200 dpi or more (default: true).
+   * Only pages dense with specks are touched; punctuation is kept.
    */
-  ocrBlurBilevelScans: boolean;
+  ocrDespeckleScans: boolean;
   /**
    * OCR request-hedging schedule (ms). Empty (default) = no hedging. Multiple
    * delays (e.g. `[0, 5000, 10000, 15000, 20000]`) fire duplicate requests per
@@ -693,7 +694,7 @@ export class LiteParse {
       quiet: userConfig.quiet,
       numWorkers: userConfig.numWorkers,
       ocrFailureFatal: userConfig.ocrFailureFatal,
-      ocrBlurBilevelScans: userConfig.ocrBlurBilevelScans,
+      ocrDespeckleScans: userConfig.ocrDespeckleScans,
       ocrHedgeDelaysMs: userConfig.ocrHedgeDelaysMs,
       emitWordBoxes: userConfig.emitWordBoxes,
       extractTextMetadata: userConfig.extractTextMetadata,
@@ -755,7 +756,7 @@ export class LiteParse {
       quiet: resolved.quiet ?? false,
       numWorkers: resolved.numWorkers ?? 1,
       ocrFailureFatal: resolved.ocrFailureFatal ?? true,
-      ocrBlurBilevelScans: resolved.ocrBlurBilevelScans ?? false,
+      ocrDespeckleScans: resolved.ocrDespeckleScans ?? true,
       ocrHedgeDelaysMs: resolved.ocrHedgeDelaysMs ?? [],
       emitWordBoxes: resolved.emitWordBoxes ?? false,
       extractTextMetadata: resolved.extractTextMetadata ?? false,

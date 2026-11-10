@@ -110,8 +110,11 @@ export interface JsLiteParseConfig {
    * results when OCR is unavailable, instead of rejecting.
    */
   ocrFailureFatal?: boolean
-  /** Blur OCR rasters of 1-bit full-page scans. Default false. */
-  ocrBlurBilevelScans?: boolean
+  /**
+   * Remove dot-screen specks from OCR rasters of speckled 1-bit full-page
+   * scans rendered at 200 dpi or more. Default true.
+   */
+  ocrDespeckleScans?: boolean
   /**
    * OCR request-hedging schedule (ms). Empty/unset = no hedging. Multiple
    * delays (e.g. `[0, 5000, 10000]`) fire duplicate requests per attempt and

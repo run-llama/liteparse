@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+fn default_true() -> bool {
+    true
+}
+
 /// Configuration for LiteParse document parsing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiteParseConfig {
@@ -121,11 +125,14 @@ pub struct LiteParseConfig {
     /// that prefer a degraded document over a hard failure (e.g. when the host
     /// has its own OCR fallback or treats OCR as best-effort enrichment).
     pub ocr_failure_fatal: bool,
-    /// Blur the OCR raster of 1-bit full-page scans (Gaussian, sigma 0.75).
-    /// Dotted or dithered backgrounds otherwise alias when the OCR server
-    /// downscales for detection and the page comes back empty. Default `false`.
-    #[serde(default)]
-    pub ocr_blur_bilevel_scans: bool,
+    /// Remove dot-screen specks from the OCR raster of 1-bit full-page scans on a
+    /// dotted or dithered background, when rendered at 200 dpi or more. Rendered
+    /// at the scan's resolution the dots read as diacritics and stray
+    /// punctuation, and servers that downscale for detection alias them. Only
+    /// pages dense with specks are touched; punctuation is several times larger
+    /// than a speck and kept. Default `true`.
+    #[serde(default = "default_true")]
+    pub ocr_despeckle_scans: bool,
     /// OCR request-hedging schedule (milliseconds) for the HTTP OCR engine.
     /// Empty (default) = no hedging. With multiple delays (e.g.
     /// `[0, 5000, 10000, 15000, 20000]`), each OCR attempt fires a duplicate
@@ -322,7 +329,7 @@ impl Default for LiteParseConfig {
             detect_screenshot_rects: false,
             render_form_fields: false,
             ocr_failure_fatal: true,
-            ocr_blur_bilevel_scans: false,
+            ocr_despeckle_scans: true,
             ocr_hedge_delays_ms: Vec::new(),
             emit_word_boxes: false,
             extract_text_metadata: false,
