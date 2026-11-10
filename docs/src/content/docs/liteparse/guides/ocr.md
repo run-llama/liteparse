@@ -234,12 +234,18 @@ Images with alpha channels, higher bit depths, EXIF rotation or native text that
 needs masking use decoded pixels. Pixel-based OCR engines, including Tesseract, keep their
 normal decoded inputs.
 
-Custom Rust OCR engines can opt in through `OcrEngine::accepts_encoded_images`
-and `recognize_encoded`. Composed pipelines can set
-`OcrRenderOptions::use_encoded_images` when their engine supports it, then use
-`stages::recognize` to dispatch either payload. An `OcrRaster` with
-`encoded_image` has an empty `pixels` buffer; callers consuming stage outputs
-directly must handle that payload explicitly.
+Rust OCR engines receive a single `OcrImage` through `recognize_image`.
+Existing engines can keep implementing the raw-pixel `recognize` method: the
+default adapter supplies pixels in the engine's preferred RGB/grayscale format.
+Engines that work with files can override `recognize_image` and borrow encoded
+bytes through `image.encoded()`. Pixel edits consume the image with
+`into_pixels`, then replace it with `OcrImage::Pixels`.
+
+**Rust stage migration:** `OcrRaster::image` replaces its `pixels`, `width` and
+`height` fields. Use `image.dimensions()` and `image.pixels(grayscale)` when
+consuming stage outputs directly. Serialized stage payloads now contain a tagged
+`image` object. The Node.js/Python result types and existing OCR engine methods
+are unchanged.
 
 LiteParse checks image dimensions against the page and DPI, allowing one pixel
 of raster rounding. An unreadable or incompatible supplied image is a page

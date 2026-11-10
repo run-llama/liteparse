@@ -659,10 +659,11 @@ async fn render_for_ocr_selection_overrides_complexity_gate() {
     assert_eq!(rasters.len(), 1);
     assert_eq!(rasters[0].page_number as u32, first);
     assert!(rasters[0].has_native_text);
-    assert!(rasters[0].width > 0 && rasters[0].height > 0);
+    let (width, height) = rasters[0].image.dimensions();
+    assert!(width > 0 && height > 0);
     // The raster's pixels survive the boundary as base64, not a number array.
     let json = serde_json::to_value(&rasters[0]).unwrap();
-    assert!(json["pixels"].is_string());
+    assert!(json["image"]["data"].is_string());
 }
 
 /// A hand-built outcome for a page that is not being merged is an error,

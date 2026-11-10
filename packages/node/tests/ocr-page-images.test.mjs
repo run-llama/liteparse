@@ -7,6 +7,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LiteParse } from "@llamaindex/liteparse";
 
+// Synthetic solid JPEG and RGB PNG; the PNG includes a text chunk so
+// decoding and re-encoding cannot accidentally pass the byte-preservation check.
+const jpeg = Buffer.from("/9j/4AAQSkZJRgABAgAAAQABAAD/wAARCABIACQDAREAAhEBAxEB/9sAQwADAgIDAgIDAwMDBAMDBAUIBQUEBAUKBwcGCAwKDAwLCgsLDQ4SEA0OEQ4LCxAWEBETFBUVFQwPFxgWFBgSFBUU/9sAQwEDBAQFBAUJBQUJFA0LDRQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD4MoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgD//2Q==", "base64");
+const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAEgAAACQCAIAAAAk4rpSAAACFElEQVR4Ae3AA6AkWZbG8f937o3IzKdyS2Oubdu2bdu2bdu2bWmMnpZKr54yMyLu+Xa3anqmhztr1a/+3d/9Hf8HEfzfRPB/E8H/TQT/NxH830TwfxPB/00E/zcR/N9E8H8Twf9NBP83EfzfRPB/E8H/TQT/NxH830TwfxPB/00E/zcR/N9E8H8Twf9NBP83EfzfRPB/E8H/TQT/NxH830TwfxPB/00E/zcR/N9E8H8Twf9NBP83EfzfRPB/E8H/TQT/NxH830TwfxPB/00E/zcR/N9E8H8Twf9NBP83EfzfRPB/E8H/TQT/NxH830TwfxPB/00E/zcR/N9E8H8Twf9NBP83EfzfRPB/E8H/TQT/NxH830TwfxPB/00E/zcR/N9E8H8Twf9NBP83EfzfRPB/E8H/TQT/NxH830TwfxPB/00E/zcR/N9E8H8Twf9NBP83EfzfRPB/E8H/TQT/NxH830TwfxPB/00E/zcR/N9E8H8Twf9NBP83EfzfRPB/E8H/TQT/NxH830TwfxPB/00E/zcR/N9E8H8Twf9NBP83EfzfRPB/E8H/TQT/NxH830TwfxPB/00E/zcR/N9E8H8Twf9NBP83EfzfRPB/E8H/TQT/NxH830TwfxPB/00E/zcR/N9E8H8Twf9NBP83EfzfRPB/E8H/TQT/NxH830TwfxPB/00E/zcR/N9E8H8Twf9N/CNzqgOcZbaKUAAAABl0RVh0Q29tbWVudABieXRlLXByZXNlcnZhdGlvbu3CW/kAAAAASUVORK5CYII=", "base64");
+
 function blankPdf() {
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
@@ -25,26 +30,35 @@ function blankPdf() {
   return Buffer.from(`${pdf}trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`);
 }
 
-test("OCR images retain source page keys through pool and batch parsing", async (t) => {
+test("original JPEG/PNG uploads survive bindings, pools and batch page numbering", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "liteparse-ocr-images-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const pdf = blankPdf();
-  const screenshots = await new LiteParse({ ocrEnabled: false, dpi: 144, quiet: true }).screenshot(pdf, [3]);
-  const path = join(dir, "page-three.png");
-  writeFileSync(path, screenshots[0].imageBuffer);
-
+  const jpegPath = join(dir, "one.bin");
+  const pngPath = join(dir, "three.png");
+  writeFileSync(jpegPath, jpeg);
+  writeFileSync(pngPath, png);
+  const uploads = [];
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const body = Buffer.concat(chunks);
-    const png = body.indexOf(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-    if (png < 0) { response.writeHead(400).end(); return; }
-    const width = body.readUInt32BE(png + 16);
-    const scale = width / 72;
+    const start = body.indexOf(Buffer.from("\r\n\r\n")) + 4;
+    const boundary = request.headers["content-type"].split("boundary=")[1];
+    const end = body.indexOf(Buffer.from(`\r\n--${boundary}`), start);
+    const data = body.subarray(start, end);
+    const headers = body.subarray(0, start).toString();
+    let text, dpi, mime, file;
+    if (data.equals(jpeg)) {
+      [text, dpi, mime, file] = ["JPEG", 36, "image/jpeg", "image.jpg"];
+    } else if (data.equals(png)) {
+      [text, dpi, mime, file] = ["PNG", 72, "image/png", "image.png"];
+    } else if (data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) && data.readUInt32BE(16) === 72) {
+      [text, dpi, mime, file] = ["RENDERED", 72, "image/png", "image.png"];
+    } else { response.writeHead(400).end(); return; }
+    uploads.push(headers.includes(mime) && headers.includes(`filename="${file}"`));
     response.setHeader("Content-Type", "application/json");
-    response.end(JSON.stringify({ results: [{
-      text: `IMAGE${width}`, bbox: [40, 20, 60, 30].map((v) => v * scale), confidence: 0.93,
-    }] }));
+    response.end(JSON.stringify({ results: [{ text, bbox: [40, 20, 60, 30].map((v) => v * dpi / 72), confidence: 0.93 }] }));
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -52,23 +66,25 @@ test("OCR images retain source page keys through pool and batch parsing", async 
   const config = {
     ocrEnabled: true, quiet: true, emitWordBoxes: true,
     ocrServerUrl: `http://127.0.0.1:${server.address().port}`,
-    ocrPageImages: { 3: { path, dpi: 144 } },
+    ocrPageImages: { 1: { path: jpegPath, dpi: 36 }, 3: { path: pngPath, dpi: 72 } },
   };
   for (const poolSize of [undefined, 1]) {
-    // Zero rendering DPI makes a discarded render fail as well: this must
-    // bypass rendering, not merely replace the raster after creating it.
-    const parser = new LiteParse({ ...config, targetPages: "3", dpi: 0, poolSize });
+    // A discarded render at zero DPI would fail too.
+    const parser = new LiteParse({ ...config, targetPages: "1,3", dpi: 0, poolSize });
     try {
       const result = await parser.parse(pdf);
-      assert.equal(result.pages[0].pageNum, 3);
-      const item = result.pages[0].textItems.find((item) => item.text === "IMAGE144");
-      assert.ok(item, result.text);
-      assert.equal(item.x, 40);
-      assert.equal(item.words[0].width, 20);
+      assert.deepEqual(result.pages.map((page) => page.pageNum), [1, 3]);
+      for (const [index, text] of ["JPEG", "PNG"].entries()) {
+        const item = result.pages[index].textItems.find((item) => item.text === text);
+        assert.ok(item, result.text);
+        assert.equal(item.x, 40);
+        assert.equal(item.words[0].width, 20);
+      }
     } finally { parser.close(); }
   }
   const parser = new LiteParse({ ...config, dpi: 72 });
   const texts = [];
   for await (const batch of parser.parseBatches(pdf, { batchSize: 1 })) texts.push(batch.result.text.trim());
-  assert.deepEqual(texts, ["IMAGE72", "IMAGE72", "IMAGE144"]);
+  assert.deepEqual(texts, ["JPEG", "RENDERED", "PNG"]);
+  assert.ok(uploads.every(Boolean), "uploaded MIME type or filename changed");
 });

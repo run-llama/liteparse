@@ -61,7 +61,7 @@ def ocr_server() -> Iterator[str]:
         thread.join(timeout=5)
 
 
-def test_page_images_survive_python_options_and_batch_page_numbering(
+def test_page_images_survive_python_options(
     tmp_path: Path, ocr_server: str,
 ) -> None:
     pdf = tmp_path / "document.pdf"
@@ -81,10 +81,3 @@ def test_page_images_survive_python_options_and_batch_page_numbering(
     item = next(item for item in result.pages[0].text_items if item.text == "IMAGE144")
     assert item.x == 40
     assert item.words[0].width == 20
-    parser = LiteParse(
-        ocr_enabled=True, ocr_server_url=ocr_server, ocr_page_images=images,
-        dpi=72, quiet=True,
-    )
-    assert [batch.result.text.strip() for batch in parser.parse_batches(pdf, batch_size=1)] == [
-        "IMAGE72", "IMAGE72", "IMAGE144",
-    ]

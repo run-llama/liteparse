@@ -407,7 +407,6 @@ impl LiteParse {
             max_rasters: self.config.num_workers.max(1),
             dpi: self.config.dpi,
             page_images: self.config.ocr_page_images.clone(),
-            use_encoded_images: false,
             grayscale,
             render_form_fields: self.config.render_form_fields,
             continue_on_page_error: self.config.continue_on_page_error,
@@ -758,10 +757,7 @@ impl LiteParse {
                 stages::extract(&document, &self.extract_request(target_pages, max_pages))?;
             // Derived here, before the document is dropped, so the OCR rounds
             // below reproduce exactly what extraction did to it.
-            let mut ocr_render_options = self.ocr_render_options(ocr_grayscale, &extracted);
-            ocr_render_options.use_encoded_images = ocr_engine
-                .as_ref()
-                .is_some_and(|engine| engine.accepts_encoded_images());
+            let ocr_render_options = self.ocr_render_options(ocr_grayscale, &extracted);
             let screenshot_options = self.screenshot_options(self.config.continue_on_page_error);
             // Reopening the input costs a full parse, so it is confined to the
             // one consumer that genuinely needs live widget annotations: the

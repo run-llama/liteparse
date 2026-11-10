@@ -41,6 +41,10 @@ impl OcrEngine for ControlledEngine {
         "controlled-stage-test"
     }
 
+    fn prefers_grayscale(&self) -> bool {
+        true
+    }
+
     fn recognize<'a, 'b: 'a, 'c: 'a>(
         &'a self,
         image_data: &'c [u8],
@@ -89,10 +93,12 @@ fn check_recognition(num_workers: usize) {
         .iter()
         .map(|&page_number| OcrRaster {
             page_number,
-            pixels: vec![page_number as u8; page_number],
-            encoded_image: None,
-            width: page_number as u32,
-            height: 1,
+            image: liteparse::ocr::OcrImage::Pixels {
+                data: vec![page_number as u8; page_number],
+                width: page_number as u32,
+                height: 1,
+                grayscale: true,
+            },
             dpi: 150.0,
             has_native_text: false,
             image_rects: vec![],
@@ -187,10 +193,12 @@ fn window_collects_ready_results_and_reuses_all_slots() {
     for page in [9, 3] {
         let raster = OcrRaster {
             page_number: page,
-            pixels: vec![page as u8; page],
-            encoded_image: None,
-            width: page as u32,
-            height: 1,
+            image: liteparse::ocr::OcrImage::Pixels {
+                data: vec![page as u8; page],
+                width: page as u32,
+                height: 1,
+                grayscale: true,
+            },
             dpi: 150.0,
             has_native_text: false,
             image_rects: vec![],
@@ -218,10 +226,12 @@ fn window_collects_ready_results_and_reuses_all_slots() {
     assert!(window.take_completed().is_empty());
     let raster = OcrRaster {
         page_number: 7,
-        pixels: vec![7; 7],
-        encoded_image: None,
-        width: 7,
-        height: 1,
+        image: liteparse::ocr::OcrImage::Pixels {
+            data: vec![7; 7],
+            width: 7,
+            height: 1,
+            grayscale: true,
+        },
         dpi: 150.0,
         has_native_text: false,
         image_rects: vec![],

@@ -1,13 +1,14 @@
-use std::{io::Cursor, pin::Pin, time::Duration};
+use std::{pin::Pin, time::Duration};
 
-use image::ImageFormat;
 use reqwest::{
     Client,
     multipart::{Form, Part},
 };
 use serde::{Deserialize, Serialize};
 
-use crate::ocr::{EncodedOcrImage, OcrEngine, OcrFuture, OcrImageFormat, OcrOptions, OcrResult};
+use crate::ocr::{
+    EncodedOcrImage, OcrEngine, OcrFuture, OcrImage, OcrImageFormat, OcrOptions, OcrResult,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HttpOcrResponseItem {
@@ -395,16 +396,15 @@ impl OcrEngine for HttpOcrEngine {
         &self.name
     }
 
-    fn accepts_encoded_images(&self) -> bool {
-        true
-    }
-
-    fn recognize_encoded<'a>(
+    fn recognize_image<'a>(
         &'a self,
-        image: &'a EncodedOcrImage,
+        image: &'a OcrImage,
         options: &'a OcrOptions,
     ) -> OcrFuture<'a> {
-        Box::pin(self.request_image(image, options))
+        Box::pin(async move {
+            let encoded = image.encoded()?;
+            self.request_image(encoded.as_ref(), options).await
+        })
     }
 
     fn recognize<'a, 'b: 'a, 'c: 'a>(
@@ -421,12 +421,7 @@ impl OcrEngine for HttpOcrEngine {
         >,
     > {
         Box::pin(async move {
-            // Encode raw RGB bytes as PNG for the server
-            let img: image::RgbImage =
-                image::ImageBuffer::from_raw(width, height, image_data.to_vec())
-                    .ok_or("failed to create image buffer from raw RGB data")?;
-            let mut png_bytes = Vec::new();
-            img.write_to(&mut Cursor::new(&mut png_bytes), ImageFormat::Png)?;
+            let png_bytes = crate::extract::encode_pixels_png(image_data, width, height)?;
 
             self.request_image(
                 &EncodedOcrImage {

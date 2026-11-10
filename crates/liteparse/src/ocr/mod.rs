@@ -25,37 +25,8 @@ pub struct OcrResult {
     pub polygon: Option<[[f32; 2]; 4]>,
 }
 
-/// File encoding accepted by OCR engines that receive compressed images.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum OcrImageFormat {
-    Jpeg,
-    Png,
-}
-
-impl OcrImageFormat {
-    pub fn mime_type(self) -> &'static str {
-        match self {
-            Self::Jpeg => "image/jpeg",
-            Self::Png => "image/png",
-        }
-    }
-
-    pub fn file_name(self) -> &'static str {
-        match self {
-            Self::Jpeg => "image.jpg",
-            Self::Png => "image.png",
-        }
-    }
-}
-
-/// Original JPEG/PNG file bytes, without pixel decoding or re-encoding.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EncodedOcrImage {
-    #[serde(with = "base64_bytes")]
-    pub data: Vec<u8>,
-    pub format: OcrImageFormat,
-}
+mod image;
+pub use image::{EncodedOcrImage, OcrImage, OcrImageFormat};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub type OcrFuture<'a> = Pin<
@@ -69,22 +40,6 @@ pub type OcrFuture<'a> = Pin<
 pub type OcrFuture<'a> = Pin<
     Box<dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>> + 'a>,
 >;
-
-/// Base64 (de)serialization for raw and encoded image byte buffers.
-pub(crate) mod base64_bytes {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&STANDARD.encode(bytes))
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
-        let encoded = String::deserialize(deserializer)?;
-        STANDARD.decode(encoded).map_err(serde::de::Error::custom)
-    }
-}
 
 pub struct OcrOptions {
     pub language: String,
@@ -102,20 +57,18 @@ pub struct OcrOptions {
 #[cfg(not(target_arch = "wasm32"))]
 pub trait OcrEngine: Send + Sync {
     fn name(&self) -> &str;
-    /// Whether this engine accepts original JPEG/PNG bytes. Pixel-based engines
-    /// keep the default; callers then prepare ordinary RGB/grayscale rasters.
-    fn accepts_encoded_images(&self) -> bool {
-        false
-    }
-
-    /// Recognize compressed image bytes. Engines opting in must implement this;
-    /// unsupported input is an error, without an implicit pixel conversion.
-    fn recognize_encoded<'a>(
+    /// Unified image entry point. The default adapter preserves existing OCR
+    /// engines by supplying pixels in their preferred format to `recognize`.
+    fn recognize_image<'a>(
         &'a self,
-        _image: &'a EncodedOcrImage,
-        _options: &'a OcrOptions,
+        image: &'a OcrImage,
+        options: &'a OcrOptions,
     ) -> OcrFuture<'a> {
-        Box::pin(async { Err("OCR engine does not accept encoded images".into()) })
+        Box::pin(async move {
+            let (width, height) = image.dimensions();
+            let pixels = image.pixels(self.prefers_grayscale())?;
+            self.recognize(&pixels, width, height, options).await
+        })
     }
     /// Whether this engine prefers a single-channel grayscale buffer: engines
     /// that binarize internally (Tesseract) do; color-trained engines want RGB.
@@ -134,20 +87,18 @@ pub trait OcrEngine: Send + Sync {
 #[cfg(target_arch = "wasm32")]
 pub trait OcrEngine: Send + Sync {
     fn name(&self) -> &str;
-    /// Whether this engine accepts original JPEG/PNG bytes. Pixel-based engines
-    /// keep the default; callers then prepare ordinary RGB/grayscale rasters.
-    fn accepts_encoded_images(&self) -> bool {
-        false
-    }
-
-    /// Recognize compressed image bytes. Engines opting in must implement this;
-    /// unsupported input is an error, without an implicit pixel conversion.
-    fn recognize_encoded<'a>(
+    /// Unified image entry point. The default adapter preserves existing OCR
+    /// engines by supplying pixels in their preferred format to `recognize`.
+    fn recognize_image<'a>(
         &'a self,
-        _image: &'a EncodedOcrImage,
-        _options: &'a OcrOptions,
+        image: &'a OcrImage,
+        options: &'a OcrOptions,
     ) -> OcrFuture<'a> {
-        Box::pin(async { Err("OCR engine does not accept encoded images".into()) })
+        Box::pin(async move {
+            let (width, height) = image.dimensions();
+            let pixels = image.pixels(self.prefers_grayscale())?;
+            self.recognize(&pixels, width, height, options).await
+        })
     }
     /// Whether this engine prefers a single-channel grayscale buffer: engines
     /// that binarize internally (Tesseract) do; color-trained engines want RGB.
