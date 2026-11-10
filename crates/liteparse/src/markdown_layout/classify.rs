@@ -1,4 +1,4 @@
-use crate::types::{OutlineTarget, ParsedPage, ProjectedLine, Rect};
+use crate::types::{OutlineTarget, ParsedPage, ProjectedLine, Rect, TextItem};
 
 use super::blocks::{Block, Cell, PositionedBlock, paragraph_from_accum};
 use super::headings::{
@@ -88,11 +88,56 @@ enum Interruption {
 /// watermarks, vertical legends) from the body-size and heading-size
 /// histograms so it doesn't compete with normal-flow text for heading slots.
 pub(super) fn is_rotated_line(line: &ProjectedLine) -> bool {
-    line.spans.iter().any(|s| {
-        let r = s.rotation.abs() % 360.0;
-        // Anything more than ~5° off the horizontal axes is "rotated" for
-        // our purposes. 0° and 180° are both horizontal text.
-        !(r < 5.0 || (175.0..=185.0).contains(&r) || (355.0..=360.0).contains(&r))
+    line.spans.iter().any(|s| is_sideways(s.rotation))
+}
+
+/// Whether text at `rotation` degrees reads more than ~5° off the horizontal
+/// axes. 0° and 180° are both horizontal text.
+fn is_sideways(rotation: f32) -> bool {
+    let r = rotation.abs() % 360.0;
+    !(r < 5.0 || (175.0..=185.0).contains(&r) || (355.0..=360.0).contains(&r))
+}
+
+/// `line` without its sideways spans, when they carry less than half of its
+/// non-whitespace characters: OCR read one glyph or speck of a horizontal row
+/// at 90°, and projection put it on the row. `None` when the line has no
+/// sideways span, or is mostly sideways text and so stays margin furniture.
+/// Text, box and indent are rebuilt from the upright spans the way projection
+/// builds them; the line's other aggregates are kept.
+fn without_stray_sideways(line: &ProjectedLine) -> Option<ProjectedLine> {
+    let chars = |s: &&TextItem| s.text.chars().filter(|c| !c.is_whitespace()).count();
+    let (sideways, upright): (Vec<&TextItem>, Vec<&TextItem>) =
+        line.spans.iter().partition(|s| is_sideways(s.rotation));
+    let sideways_chars: usize = sideways.iter().map(chars).sum();
+    if sideways_chars == 0 || sideways_chars >= upright.iter().map(chars).sum() {
+        return None;
+    }
+    let mut pieces: Vec<&str> = upright.iter().map(|s| s.text.as_str()).collect();
+    if line.rtl {
+        pieces.reverse();
+    }
+    let mut text = String::new();
+    for piece in pieces {
+        if !text.is_empty() && !text.ends_with(' ') {
+            text.push(' ');
+        }
+        text.push_str(piece);
+    }
+    let bbox = upright
+        .iter()
+        .map(|s| Rect {
+            x: s.x,
+            y: s.y,
+            width: s.width,
+            height: s.height,
+        })
+        .reduce(|a, b| a.union(&b))?;
+    Some(ProjectedLine {
+        text,
+        indent_x: bbox.x,
+        bbox,
+        spans: upright.into_iter().cloned().collect(),
+        ..line.clone()
     })
 }
 
@@ -617,6 +662,24 @@ fn classify_region(
         .collect();
     region_interruptions.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut interruptions = region_interruptions.into_iter().peekable();
+
+    // Outside tables, a line whose only sideways text is a stray OCR glyph
+    // renders without it, instead of being skipped below as margin furniture.
+    // Table runs were detected on the lines as projected and keep them.
+    let upright: Vec<(usize, ProjectedLine)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !rotated_content && !table_covered.contains(i))
+        .filter_map(|(i, line)| without_stray_sideways(line).map(|u| (i, u)))
+        .collect();
+    let upright_owned: Option<Vec<ProjectedLine>> = (!upright.is_empty()).then(|| {
+        let mut owned = lines.to_vec();
+        for (i, line) in upright {
+            owned[i] = line;
+        }
+        owned
+    });
+    let lines: &[ProjectedLine] = upright_owned.as_deref().unwrap_or(lines);
 
     let mut idx = 0;
     while idx < lines.len() {

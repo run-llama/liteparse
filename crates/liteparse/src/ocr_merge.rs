@@ -94,8 +94,15 @@ pub struct OcrRenderOptions {
     /// Stop after this many rasters (`0` = no limit), so a long document can
     /// be processed in bounded rounds; the function returns where to resume.
     pub max_rasters: usize,
-    /// Requested render resolution; clamped per page by the long-edge cap.
+    /// Requested render resolution; lowered per page by `max_long_edge` and
+    /// by the built-in long-edge limit.
     pub dpi: f32,
+    /// Largest long edge, in pixels, a raster may have. Each page renders at
+    /// `dpi` or, when that would exceed the cap, at the lower dpi whose long
+    /// edge is exactly the cap, so pages of different sizes get different
+    /// dpis in one call (the raster's `dpi` reports which). `None` or
+    /// `Some(0)` leaves `dpi` alone.
+    pub max_long_edge: Option<u32>,
     /// Emit 1 byte/px luma instead of RGB (see `OcrEngine::prefers_grayscale`).
     pub grayscale: bool,
     /// Paint form-field appearances into the raster (runs document actions).
@@ -124,6 +131,7 @@ impl Default for OcrRenderOptions {
         Self {
             max_rasters: 0,
             dpi: crate::config::DEFAULT_DPI,
+            max_long_edge: None,
             grayscale: false,
             render_form_fields: false,
             continue_on_page_error: false,
@@ -994,6 +1002,7 @@ pub(crate) fn render_pages_for_ocr_capped(
     let OcrRenderOptions {
         max_rasters: _,
         dpi,
+        max_long_edge,
         grayscale,
         render_form_fields,
         continue_on_page_error,
@@ -1075,9 +1084,14 @@ pub(crate) fn render_pages_for_ocr_capped(
                 }
             };
 
-            // Clamp the render DPI so the long edge stays within the raster budget.
+            // Fit the caller's cap, then clamp so the long edge stays within the raster budget.
             let long_edge_pt = page.page_width.max(page.page_height);
-            let mut eff_dpi = dpi;
+            let mut eff_dpi = fitting_dpi(
+                page.page_width,
+                page.page_height,
+                dpi,
+                max_long_edge.unwrap_or(0),
+            );
             if long_edge_pt > 0.0 {
                 let max_dpi = MAX_OCR_RENDER_LONG_EDGE_PX * 72.0 / long_edge_pt;
                 if eff_dpi > max_dpi {
@@ -1089,11 +1103,28 @@ pub(crate) fn render_pages_for_ocr_capped(
             let width = bitmap.width() as u32;
             let height = bitmap.height() as u32;
             // Grayscale or RGB per the engine; see `OcrEngine::prefers_grayscale`.
-            let pixels = if grayscale {
+            let mut pixels = if grayscale {
                 bitmap.to_luma()
             } else {
                 bitmap.to_rgb()
             };
+            // A page whose native text the merge keeps as is: blank that text out of the raster.
+            // The merge drops every OCR line overlapping kept native text, so reading those
+            // lines was wasted; OCR now only sees what the text layer doesn't cover (figures,
+            // scanned inserts, outlined text). Pages where OCR replaces native text (garbled
+            // fonts, an invisible OCR layer) keep the whole raster.
+            if has_native_text
+                && !replace_native
+                && matches!(garbled_scope(page), GarbledScope::None)
+            {
+                mask_native_text(
+                    &mut pixels,
+                    width,
+                    height,
+                    page,
+                    if grayscale { 1 } else { 3 },
+                );
+            }
 
             let image_rects = if has_native_text {
                 let pw = page.page_width;
@@ -1157,6 +1188,17 @@ pub(crate) fn render_pages_for_ocr_capped(
         }
     }
     Ok((rendered, next_start))
+}
+
+/// The render dpi for a `width` x `height` pt page: `dpi`, lowered so the long
+/// edge (`pt * dpi / 72`, rounded as pdfium sizes the bitmap) is at most
+/// `max_long_edge` pixels. A cap of 0, or a page with no size, keeps `dpi`.
+fn fitting_dpi(width: f32, height: f32, dpi: f32, max_long_edge: u32) -> f32 {
+    let long_edge_pt = width.max(height);
+    if max_long_edge == 0 || long_edge_pt <= 0.0 {
+        return dpi;
+    }
+    dpi.min(max_long_edge as f32 * 72.0 / long_edge_pt)
 }
 
 /// One page's recognition outcome: what the engine returned for one
@@ -1325,7 +1367,7 @@ pub fn merge_ocr_results(
         // A skewed scan: when all of the page's text is OCR, rotate the items upright about the
         // page centre. Axis-aligned boxes of tilted lines overlap the lines above and below,
         // and the projection then merges and reorders them. The tilt is recorded on the page
-        // and the output boxes are rotated back after layout (parser.rs).
+        // and the output boxes are rotated back after layout (`stages::rotate_back_ocr_deskew`).
         let deskew = if native_count == 0 {
             ocr_page_skew(&ocr_results)
         } else {
@@ -1704,6 +1746,36 @@ fn native_text_length(page: &Page) -> usize {
 /// Unicode mapping failed outright (Type3 fonts with no ToUnicode — the text
 /// is a char-code fallback and the bbox comes from deceptive declared
 /// metrics), or its content looks substitution-cipher garbled.
+/// Paint the boxes of the native text items the merge keeps (`!is_unusable_native`) white in an
+/// OCR raster of `page` (`channels` 1 or 3, tightly packed), widened by `MASK_MARGIN_PT`.
+fn mask_native_text(pixels: &mut [u8], width: u32, height: u32, page: &Page, channels: usize) {
+    const MASK_MARGIN_PT: f32 = 1.0;
+    if page.page_width <= 0.0 || page.page_height <= 0.0 {
+        return;
+    }
+    let (w, h) = (width as usize, height as usize);
+    let (sx, sy) = (
+        width as f32 / page.page_width,
+        height as f32 / page.page_height,
+    );
+    for item in page
+        .text_items
+        .iter()
+        .filter(|i| !is_unusable_native(i) && !i.text.trim().is_empty())
+    {
+        let x0 = ((item.x - MASK_MARGIN_PT) * sx).floor().max(0.0) as usize;
+        let y0 = ((item.y - MASK_MARGIN_PT) * sy).floor().max(0.0) as usize;
+        let x1 = (((item.x + item.width + MASK_MARGIN_PT) * sx).ceil() as usize).min(w);
+        let y1 = (((item.y + item.height + MASK_MARGIN_PT) * sy).ceil() as usize).min(h);
+        if x0 >= x1 || y0 >= y1 {
+            continue;
+        }
+        for y in y0..y1 {
+            pixels[(y * w + x0) * channels..(y * w + x1) * channels].fill(255);
+        }
+    }
+}
+
 fn is_unusable_native(item: &TextItem) -> bool {
     item.has_unicode_map_error || is_likely_garbled(&item.text)
 }
@@ -2735,6 +2807,47 @@ mod tests {
             assert!(!stats.has_substantial_images);
             assert!(!stats.needs_ocr);
         }
+    }
+
+    /// The bitmap size pdfium renders a `pt` edge to at `dpi`.
+    fn rendered_px(pt: f32, dpi: f32) -> u32 {
+        (pt * (dpi / 72.0)).round() as u32
+    }
+
+    #[test]
+    fn capped_page_renders_to_exactly_the_cap() {
+        // Letter, A4, Legal, a landscape slide, a tall receipt and a poster
+        // that is over the cap even at 72 dpi.
+        let sizes = [
+            (612.0, 792.0),
+            (595.28, 841.89),
+            (612.0, 1008.0),
+            (960.0, 540.0),
+            (226.77, 2834.65),
+            (2592.0, 3456.0),
+        ];
+        for cap in [300, 1600, 2400, 4000] {
+            for (w, h) in sizes {
+                let dpi = fitting_dpi(w, h, 300.0, cap);
+                let long_edge = rendered_px(w, dpi).max(rendered_px(h, dpi));
+                if dpi < 300.0 {
+                    assert_eq!(long_edge, cap, "{w}x{h} pt at cap {cap}");
+                } else {
+                    assert!(long_edge <= cap, "{w}x{h} pt at cap {cap}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn page_under_the_cap_keeps_the_configured_dpi() {
+        assert_eq!(fitting_dpi(612.0, 792.0, 150.0, 2400), 150.0);
+    }
+
+    #[test]
+    fn zero_cap_or_empty_page_keeps_the_configured_dpi() {
+        assert_eq!(fitting_dpi(612.0, 792.0, 300.0, 0), 300.0);
+        assert_eq!(fitting_dpi(0.0, 0.0, 300.0, 2400), 300.0);
     }
 
     #[test]

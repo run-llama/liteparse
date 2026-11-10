@@ -3,10 +3,11 @@
 //! [`LiteParse::parse`](crate::LiteParse::parse) is a fixed sequence of
 //! stages: open → orientation → extract → complexity → OCR render →
 //! recognition → OCR merge → content filters → grid projection → block
-//! classification → markdown rendering. This module exposes each stage as a
-//! function over serializable types so a caller can run the same sequence
-//! itself and insert its own inputs between stages — its own OCR engine, a
-//! page selection, extra blocks — or put a process boundary between any two.
+//! classification → markdown rendering → deskew rotate-back. This module
+//! exposes each stage as a function over serializable types so a caller can
+//! run the same sequence itself and insert its own inputs between stages —
+//! its own OCR engine, a page selection, extra blocks — or put a process
+//! boundary between any two.
 //!
 //! Stages split into two kinds. **pdfium-bound** stages take an open
 //! [`Document`] and must run while the [`Library`] that opened it is alive
@@ -24,7 +25,16 @@
 //! | content filters | [`apply_content_filters`] | pure |
 //! | projection | [`project`] | pure |
 //! | markdown | [`document_signals`] → [`extract_blocks`] → [`render_page_markdown`] | pure |
+//! | deskew rotate-back | [`rotate_back_ocr_deskew`] | pure |
 //! | screenshots | [`screenshots`] | pdfium |
+//!
+//! A caller sequencing these stages itself must finish with
+//! [`rotate_back_ocr_deskew`]: after projection, [`layout_complexity`],
+//! [`layout_blocks`] and [`render_page_markdown`] (and
+//! [`canonicalize_image_refs`] if used), as the last stage before reading
+//! boxes. [`merge_ocr`] deskews tilted scans, and without this stage the OCR
+//! item, word, block and cell boxes of those pages stay in the upright frame,
+//! off the image by the page's tilt.
 //!
 //! [`Document`] and [`Library`] are the `pdfium` crate's types re-exported
 //! verbatim, so that crate's handle API is part of this module's contract.
@@ -43,7 +53,7 @@ use crate::ocr_merge;
 use crate::projection;
 use crate::render;
 use crate::types::{
-    DocumentMetadata, ExtractedImage, OutlineTarget, Page, ParsedPage, PdfInput, XfaPacket,
+    DocumentMetadata, ExtractedImage, OutlineTarget, Page, ParsedPage, PdfInput, Rect, XfaPacket,
 };
 
 pub use crate::extract::{ExtractedPages, ExtractionOutputOptions};
@@ -572,6 +582,77 @@ fn dedupe_rules(blocks: &mut Vec<PositionedBlock>) {
     blocks.dedup_by(|a, b| matches!((&a.block, &b.block), (HorizontalRule, HorizontalRule)));
 }
 
+// ── Deskew rotate-back ─────────────────────────────────────────────────
+
+/// Move the boxes of every deskewed page back onto the page image. Pure and
+/// per page.
+///
+/// On a skewed scan [`merge_ocr`] rotates the OCR items upright about the
+/// page centre (`Page::ocr_deskew`) so lines group into rows. Projection,
+/// block classification and markdown all run on those upright items, and
+/// [`project`] carries the angle onto [`ParsedPage::ocr_deskew`]. This stage
+/// undoes the rotation on the output geometry: each OCR item box and every
+/// layout block and table-cell box becomes the axis-aligned bound of itself
+/// rotated back about the page centre. A word box, which the merge moved by
+/// its centre at its measured size, moves its centre back and keeps its size,
+/// so it comes back as the rect the OCR engine measured. Native items were
+/// never rotated and stay put. Text and markdown do not change.
+///
+/// Run it last, after [`layout_blocks`] (whose boxes it moves) and after
+/// [`layout_complexity`] (which measures the upright frame). It clears
+/// `ocr_deskew` on each page it moves, so a second call is a no-op. Pages
+/// without a deskew are untouched.
+pub fn rotate_back_ocr_deskew(pages: &mut [ParsedPage]) {
+    for page in pages {
+        if let Some(deg) = page.ocr_deskew.take() {
+            rotate_back_page(page, deg);
+        }
+    }
+}
+
+fn rotate_back_page(page: &mut ParsedPage, deg: f32) {
+    let (cx, cy) = (page.page_width / 2.0, page.page_height / 2.0);
+    let back = |x: f32, y: f32, w: f32, h: f32| -> (f32, f32, f32, f32) {
+        let pts = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+            .map(|(px, py)| ocr_merge::rotate_about(px, py, cx, cy, deg));
+        let x0 = pts.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+        let x1 = pts.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+        let y0 = pts.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+        let y1 = pts.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+        (x0, y0, x1 - x0, y1 - y0)
+    };
+    let rect = |r: &mut Rect| {
+        (r.x, r.y, r.width, r.height) = back(r.x, r.y, r.width, r.height);
+    };
+    for item in page
+        .text_items
+        .iter_mut()
+        .filter(|i| i.confidence.is_some())
+    {
+        (item.x, item.y, item.width, item.height) = back(item.x, item.y, item.width, item.height);
+        for w in &mut item.words {
+            let (mx, my) =
+                ocr_merge::rotate_about(w.x + w.width / 2.0, w.y + w.height / 2.0, cx, cy, deg);
+            (w.x, w.y) = (mx - w.width / 2.0, my - w.height / 2.0);
+        }
+    }
+    for block in page.blocks.iter_mut().flatten() {
+        if let Some(r) = block.bbox.as_mut() {
+            rect(r);
+        }
+        for cell in block
+            .header
+            .iter_mut()
+            .flatten()
+            .chain(block.rows.iter_mut().flatten().flatten())
+        {
+            if let Some(r) = cell.bbox.as_mut() {
+                rect(r);
+            }
+        }
+    }
+}
+
 // ── Screenshots ────────────────────────────────────────────────────────
 
 /// How [`screenshots`] renders pages.
@@ -681,6 +762,7 @@ mod tests {
             form_fields: None,
             structure_tree: None,
             blocks: None,
+            ocr_deskew: None,
         }
     }
 
@@ -709,6 +791,87 @@ mod tests {
     #[test]
     fn empty_document_renders_empty() {
         assert_eq!(render_document(&[]), "");
+    }
+
+    /// Markdown of a one-page scan: three horizontal body lines, then the OCR
+    /// items `row` as `(text, x, y, rotation)`. A sideways item's box stands
+    /// upright: 10pt wide and 5pt tall per character.
+    fn ocr_markdown(row: &[(&str, f32, f32, f32)]) -> String {
+        let body = [
+            "Register of changes for the period ending May",
+            "Prepared by the records office for its review",
+            "All amounts are in dollars before any tax is due",
+        ];
+        let text_items = body
+            .iter()
+            .zip([100.0, 120.0, 140.0])
+            .map(|(&text, y)| (text, 50.0, y, 0.0))
+            .chain(row.iter().copied())
+            .map(|(text, x, y, rotation)| {
+                let length = text.chars().count() as f32 * 5.0;
+                let (width, height) = if rotation == 0.0 {
+                    (length, 10.0)
+                } else {
+                    (10.0, length)
+                };
+                TextItem {
+                    text: text.into(),
+                    x,
+                    y,
+                    width,
+                    height,
+                    rotation,
+                    font_size: Some(10.0),
+                    font_name: Some("OCR".into()),
+                    confidence: Some(0.9),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let page = crate::types::Page {
+            page_number: 1,
+            ocr_deskew: None,
+            page_label: None,
+            page_width: 612.0,
+            page_height: 792.0,
+            content_bounds: None,
+            text_items,
+            graphics: vec![],
+            vector_graphics: None,
+            struct_nodes: vec![],
+            image_refs: vec![],
+            annotations: None,
+            form_fields: None,
+            structure_tree: None,
+        };
+        render_document(&project_for_markdown(vec![page]))
+    }
+
+    #[test]
+    fn a_row_with_one_sideways_glyph_stays_in_the_markdown() {
+        // OCR can read a row's index digit as one glyph at 90°. The glyph sits just
+        // under the line above, so projection keeps it on its row. The row is still
+        // horizontal text: markdown keeps it and leaves the glyph out.
+        let md = ocr_markdown(&[
+            ("L", 50.0, 155.0, 90.0),
+            ("Current", 80.0, 155.0, 0.0),
+            ("A-001", 150.0, 155.0, 0.0),
+            ("Smith", 230.0, 155.0, 0.0),
+        ]);
+        assert!(md.contains("Current A-001 Smith"), "{md}");
+        assert!(!md.contains('L'), "{md}");
+    }
+
+    #[test]
+    fn a_line_made_mostly_of_sideways_text_is_skipped() {
+        // A margin stamp read at 90° with one fragment read upright is still margin
+        // furniture: the whole line stays out of the markdown.
+        let md = ocr_markdown(&[
+            ("arXiv:2401.00001v1", 50.0, 360.0, 90.0),
+            ("Q7", 52.0, 400.0, 0.0),
+        ]);
+        assert!(!md.contains("arXiv"), "{md}");
+        assert!(!md.contains("Q7"), "{md}");
     }
 
     #[test]
