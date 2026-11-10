@@ -46,6 +46,19 @@ export interface LiteParseConfig {
   ocrServerUrl?: string;
   /** Extra HTTP headers sent with every request to `ocrServerUrl`. */
   ocrServerHeaders?: Record<string, string>;
+  /**
+   * Form fields sent as-is with every request to `ocrServerUrl`, next to
+   * `file` and `language` (a `language` entry replaces it). LiteParse adds no
+   * other field, so you own flags such as `correct_rotation` or
+   * `return_word_boxes`. Default empty.
+   */
+  ocrRequestFields?: Record<string, string>;
+  /**
+   * Per-page form fields, keyed by 1-based page number, merged over
+   * {@link LiteParseConfig.ocrRequestFields} for that page's request, e.g.
+   * `{ 3: { correct_rotation: "false" } }`. Default empty.
+   */
+  ocrPageRequestFields?: Record<number, Record<string, string>>;
   tessdataPath?: string;
   maxPages: number;
   targetPages?: string;
@@ -662,6 +675,8 @@ export class LiteParse {
       ocrEnabled: userConfig.ocrEnabled,
       ocrServerUrl: userConfig.ocrServerUrl,
       ocrServerHeaders: userConfig.ocrServerHeaders,
+      ocrRequestFields: userConfig.ocrRequestFields,
+      ocrPageRequestFields: userConfig.ocrPageRequestFields,
       tessdataPath: userConfig.tessdataPath,
       maxPages: userConfig.maxPages,
       targetPages: userConfig.targetPages,
@@ -723,6 +738,8 @@ export class LiteParse {
       ocrEnabled: resolved.ocrEnabled ?? true,
       ocrServerUrl: resolved.ocrServerUrl ?? undefined,
       ocrServerHeaders: resolved.ocrServerHeaders ?? undefined,
+      ocrRequestFields: resolved.ocrRequestFields ?? {},
+      ocrPageRequestFields: resolved.ocrPageRequestFields ?? {},
       tessdataPath: resolved.tessdataPath ?? undefined,
       maxPages: resolved.maxPages ?? 1000,
       targetPages: resolved.targetPages ?? undefined,

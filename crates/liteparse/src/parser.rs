@@ -193,52 +193,6 @@ pub struct LiteParse {
     glyph_resolver: Option<std::sync::Arc<dyn crate::GlyphResolver>>,
 }
 
-/// Undo the OCR merge's deskew (`Page::ocr_deskew`) on a page's output geometry: projection
-/// and layout ran on upright OCR items, but the boxes a caller reads must match the image.
-/// Each box becomes the axis-aligned bound of itself rotated back by `deg` about the page
-/// centre. Only OCR items move (native items were never rotated); layout blocks and their
-/// table cells are built from those items, so they move too.
-fn rotate_back_ocr_boxes(page: &mut ParsedPage, deg: f32) {
-    let (cx, cy) = (page.page_width / 2.0, page.page_height / 2.0);
-    let back = |x: f32, y: f32, w: f32, h: f32| -> (f32, f32, f32, f32) {
-        let pts = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
-            .map(|(px, py)| crate::ocr_merge::rotate_about(px, py, cx, cy, deg));
-        let x0 = pts.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
-        let x1 = pts.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
-        let y0 = pts.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
-        let y1 = pts.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
-        (x0, y0, x1 - x0, y1 - y0)
-    };
-    let rect = |r: &mut crate::types::Rect| {
-        (r.x, r.y, r.width, r.height) = back(r.x, r.y, r.width, r.height);
-    };
-    for item in page
-        .text_items
-        .iter_mut()
-        .filter(|i| i.confidence.is_some())
-    {
-        (item.x, item.y, item.width, item.height) = back(item.x, item.y, item.width, item.height);
-        for w in &mut item.words {
-            (w.x, w.y, w.width, w.height) = back(w.x, w.y, w.width, w.height);
-        }
-    }
-    for block in page.blocks.iter_mut().flatten() {
-        if let Some(r) = block.bbox.as_mut() {
-            rect(r);
-        }
-        for cell in block
-            .header
-            .iter_mut()
-            .flatten()
-            .chain(block.rows.iter_mut().flatten().flatten())
-        {
-            if let Some(r) = cell.bbox.as_mut() {
-                rect(r);
-            }
-        }
-    }
-}
-
 /// Run block classification once and fan the result out to everything that
 /// needs it: the rendered per-page markdown (when Markdown is the output
 /// format) and each page's `blocks` (when `extract_blocks` is on).
@@ -407,11 +361,14 @@ impl LiteParse {
             max_rasters: self.config.num_workers.max(1),
             dpi: self.config.dpi,
             page_images: self.config.ocr_page_images.clone(),
+            max_long_edge: None,
             grayscale,
             render_form_fields: self.config.render_form_fields,
             continue_on_page_error: self.config.continue_on_page_error,
             reflatten_pages,
             selection: None,
+            request_fields: self.config.ocr_request_fields.clone(),
+            page_request_fields: self.config.ocr_page_request_fields.clone(),
         }
     }
 
@@ -896,12 +853,6 @@ impl LiteParse {
         // crop region, and before projection so filtered items never surface.
         stages::apply_content_filters(&mut pages, &self.content_filters());
 
-        // Pages the OCR merge deskewed: their output boxes are rotated back after layout.
-        let deskews: Vec<(usize, f32)> = pages
-            .iter()
-            .filter_map(|p| p.ocr_deskew.map(|deg| (p.page_number, deg)))
-            .collect();
-
         // Grid projection
         let mut parsed_pages = self.project(pages);
 
@@ -942,14 +893,8 @@ impl LiteParse {
         if self.config.output_format == crate::config::OutputFormat::Markdown {
             stages::canonicalize_image_refs(&mut parsed_pages, &mut full_text, &images);
         }
-        for (page_number, deg) in &deskews {
-            if let Some(page) = parsed_pages
-                .iter_mut()
-                .find(|p| p.page_number == *page_number)
-            {
-                rotate_back_ocr_boxes(page, *deg);
-            }
-        }
+        // Last geometry stage: projection and layout ran on upright OCR items.
+        stages::rotate_back_ocr_deskew(&mut parsed_pages);
 
         let total = web_time::Instant::now().duration_since(t0).as_secs_f64() * 1000.0;
         log(&format!("[liteparse] total: {:.1}ms", total));
@@ -1351,6 +1296,98 @@ mod tests {
         }
     }
 
+    /// On a deskewed scan, measured word boxes without quads come back, after
+    /// projection and the rotate-back, as the rects the OCR engine measured.
+    #[test]
+    fn deskewed_ocr_word_boxes_come_back_as_measured() {
+        use crate::ocr::{OcrResult, OcrWord};
+        use crate::ocr_merge::{PageOcrOutcome, merge_ocr_results};
+        // Pixels `a..b` along a 30 px tall line from `(x, y)`, tilted 5° (y down).
+        let (sin, cos) = 5f32.to_radians().sin_cos();
+        let quad = |x: f32, y: f32, a: f32, b: f32| {
+            [(a, 0.0), (b, 0.0), (b, 30.0), (a, 30.0)]
+                .map(|(u, v)| [x + u * cos - v * sin, y + u * sin + v * cos])
+        };
+        let bounds = |q: [[f32; 2]; 4]| {
+            let xs = q.map(|p| p[0]);
+            let ys = q.map(|p| p[1]);
+            let min = |v: [f32; 4]| v.into_iter().fold(f32::INFINITY, f32::min);
+            let max = |v: [f32; 4]| v.into_iter().fold(f32::NEG_INFINITY, f32::max);
+            [min(xs), min(ys), max(xs), max(ys)]
+        };
+        let line = |y: f32, text: &str, words: Vec<OcrWord>| OcrResult {
+            text: text.into(),
+            bbox: bounds(quad(100.0, y, 0.0, 800.0)),
+            confidence: 0.9,
+            polygon: Some(quad(100.0, y, 0.0, 800.0)),
+            rotation: None,
+            words,
+        };
+        let measured = vec![
+            OcrWord {
+                text: "Invoice".into(),
+                bbox: bounds(quad(100.0, 200.0, 0.0, 300.0)),
+            },
+            OcrWord {
+                text: "total".into(),
+                bbox: bounds(quad(100.0, 200.0, 400.0, 700.0)),
+            },
+        ];
+        let outcome = PageOcrOutcome {
+            page_number: 1,
+            dpi: 144.0,
+            has_native_text: false,
+            image_rects: Vec::new(),
+            replace_native: false,
+            results: vec![
+                line(200.0, "Invoice total", measured.clone()),
+                line(400.0, "Second line of text", Vec::new()),
+                line(600.0, "Third line of text", Vec::new()),
+            ],
+            error: None,
+        };
+        let mut page = page_with_text_metadata();
+        page.text_items.clear();
+        (page.page_width, page.page_height) = (612.0, 792.0);
+        let mut pages = vec![page];
+        merge_ocr_results(&mut pages, vec![outcome], false, true).unwrap();
+        pages[0].ocr_deskew.expect("three 5° lines deskew the page");
+        let mut parsed = stages::project(pages);
+        stages::rotate_back_ocr_deskew(&mut parsed);
+
+        let got: Vec<(String, [f32; 4])> = parsed[0]
+            .text_items
+            .iter()
+            .flat_map(|i| &i.words)
+            .filter(|w| w.text == "Invoice" || w.text == "total")
+            .map(|w| (w.text.clone(), [w.x, w.y, w.x + w.width, w.y + w.height]))
+            .collect();
+        // An unmeasured line's one word box comes back with its item's box.
+        let close = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-3);
+        for item in parsed[0]
+            .text_items
+            .iter()
+            .filter(|i| i.text.ends_with("of text"))
+        {
+            let w = &item.words[0];
+            assert!(
+                close(
+                    [w.x, w.y, w.width, w.height],
+                    [item.x, item.y, item.width, item.height]
+                ),
+                "{}: {w:?} vs item {:?}",
+                item.text,
+                [item.x, item.y, item.width, item.height]
+            );
+        }
+        assert_eq!(got.len(), 2, "{got:?}");
+        for ((text, rect), want) in got.iter().zip(&measured) {
+            assert_eq!(text, &want.text);
+            let points = want.bbox.map(|v| v / 2.0);
+            assert!(close(*rect, points), "{text}: {rect:?} != {points:?}");
+        }
+    }
+
     #[test]
     #[allow(clippy::field_reassign_with_default)]
     fn test_new_stores_config() {
@@ -1567,6 +1604,7 @@ mod tests {
             form_fields: None,
             structure_tree: None,
             blocks: None,
+            ocr_deskew: None,
         }];
         let mut full_text = pages[0].markdown.clone();
         let images = vec![

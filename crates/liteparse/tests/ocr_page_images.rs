@@ -82,12 +82,16 @@ impl OcrEngine for PixelOcr {
                     bbox: [40.0, 20.0, 60.0, 30.0].map(|v| v * scale),
                     confidence: 0.93,
                     polygon: None,
+                    words: Vec::new(),
+                    rotation: None,
                 },
                 OcrResult {
                     text: "DROP".into(),
                     bbox: [0.0, 0.0, 5.0 * scale, 5.0 * scale],
                     confidence: 0.9,
                     polygon: None,
+                    words: Vec::new(),
+                    rotation: None,
                 },
             ])
         })
@@ -167,6 +171,7 @@ fn inferred_dpi_allows_raster_rounding_but_rejects_stretched_or_empty_images() {
     let mut options = stages::OcrRenderOptions {
         page_images: HashMap::from([(1, source)]),
         max_rasters: 1,
+        max_long_edge: Some(10),
         ..Default::default()
     };
     let raster = stages::render_for_ocr(&document, &pages, 0, &options)
@@ -335,6 +340,11 @@ async fn http_ocr_preserves_original_jpeg_png_bytes_and_content_types() {
                 &OcrOptions {
                     language: "eng".into(),
                     dpi: 72.0,
+                    request_fields: [
+                        ("language".into(), "fra".into()),
+                        ("return_word_boxes".into(), "true".into()),
+                    ]
+                    .into(),
                 },
             )
             .await
@@ -353,6 +363,10 @@ async fn http_ocr_preserves_original_jpeg_png_bytes_and_content_types() {
         );
         assert!(headers.contains(&format!("filename=\"{filename}\"")));
         assert_eq!(&body[header_end..header_end + original.len()], original);
-        assert!(body[header_end + original.len()..].starts_with(b"\r\n--"));
+        let fields = String::from_utf8_lossy(&body[header_end + original.len()..]);
+        assert!(fields.starts_with("\r\n--"));
+        assert!(fields.contains("name=\"language\"\r\n\r\nfra\r\n"));
+        assert!(fields.contains("name=\"return_word_boxes\"\r\n\r\ntrue\r\n"));
+        assert_eq!(fields.matches("name=\"language\"").count(), 1);
     }
 }

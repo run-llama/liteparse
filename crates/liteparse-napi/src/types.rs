@@ -30,6 +30,13 @@ pub struct JsLiteParseConfig {
     /// Extra HTTP headers sent with every request to `ocrServerUrl`
     /// (e.g. `{ Authorization: "Bearer <token>" }`).
     pub ocr_server_headers: Option<HashMap<String, String>>,
+    /// Form fields sent as-is with every request to `ocrServerUrl`, next to
+    /// `file` and `language` (a `language` entry replaces it). LiteParse adds
+    /// no other field.
+    pub ocr_request_fields: Option<HashMap<String, String>>,
+    /// Per-page form fields, keyed by 1-based page number, merged over
+    /// `ocrRequestFields` for that page's request.
+    pub ocr_page_request_fields: Option<HashMap<String, HashMap<String, String>>>,
     /// Path to tessdata directory for Tesseract.
     pub tessdata_path: Option<String>,
     /// Maximum number of pages to parse.
@@ -166,6 +173,19 @@ impl JsLiteParseConfig {
         if let Some(v) = self.ocr_server_headers {
             cfg.ocr_server_headers = v.into_iter().collect();
         }
+        if let Some(v) = self.ocr_request_fields {
+            cfg.ocr_request_fields = v;
+        }
+        if let Some(v) = self.ocr_page_request_fields {
+            for (page, fields) in v {
+                let n = page.parse::<u32>().map_err(|_| {
+                    Error::from_reason(format!(
+                        "invalid ocrPageRequestFields key: {page} (expected a page number)"
+                    ))
+                })?;
+                cfg.ocr_page_request_fields.insert(n, fields);
+            }
+        }
         if let Some(v) = self.tessdata_path {
             cfg.tessdata_path = Some(v);
         }
@@ -296,6 +316,13 @@ impl JsLiteParseConfig {
             } else {
                 Some(cfg.ocr_server_headers.iter().cloned().collect())
             },
+            ocr_request_fields: Some(cfg.ocr_request_fields.clone()),
+            ocr_page_request_fields: Some(
+                cfg.ocr_page_request_fields
+                    .iter()
+                    .map(|(n, fields)| (n.to_string(), fields.clone()))
+                    .collect(),
+            ),
             tessdata_path: cfg.tessdata_path.clone(),
             max_pages: Some(cfg.max_pages as u32),
             target_pages: cfg.target_pages.clone(),

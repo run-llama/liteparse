@@ -242,7 +242,7 @@ pub struct Page {
     pub page_number: usize,
     /// Tilt (degrees) the OCR merge removed from this page's OCR items: on a skewed scan the
     /// items are rotated upright about the page centre so lines group into rows correctly,
-    /// and their output boxes are rotated back after layout (`ParsedPage::ocr_deskew`).
+    /// and their output boxes are rotated back after layout (see `ParsedPage::ocr_deskew`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ocr_deskew: Option<f32>,
     /// The document's `/PageLabels` entry for this page ("iv", "A-1"), when
@@ -542,6 +542,13 @@ pub struct ParsedPage {
     /// without the font metadata the classifier needs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<crate::layout::LayoutBlock>>,
+    /// Tilt (degrees) the OCR merge removed from this page's OCR items
+    /// (`Page::ocr_deskew`), carried through projection. While set, the OCR item,
+    /// word, block and table-cell boxes are still in the upright frame;
+    /// [`stages::rotate_back_ocr_deskew`](crate::stages::rotate_back_ocr_deskew)
+    /// moves them back onto the image and clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocr_deskew: Option<f32>,
 }
 
 /// One embedded raster image on a page. `id` is a stable, page-scoped slug
