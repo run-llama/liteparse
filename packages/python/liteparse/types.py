@@ -486,8 +486,6 @@ class LiteParseConfig:
     #: ``(page, angle)`` pairs: 1-based page and the clockwise degrees
     #: (0/90/180/270) its content appears rotated. Empty when none.
     page_orientation_corrections: List[Tuple[int, int]] = field(default_factory=list)
-    #: Full-page image paths, keyed by 1-based document page. DPI is inferred.
-    ocr_page_images: dict[int, str] = field(default_factory=dict)
     extract_text_metadata: bool = False
     #: Keep running headers/footers in markdown output instead of stripping
     #: repeated page-band lines and page chrome.

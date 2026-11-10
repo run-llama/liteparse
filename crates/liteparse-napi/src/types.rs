@@ -25,8 +25,6 @@ pub struct JsLiteParseConfig {
     pub ocr_language: Option<String>,
     /// Whether OCR is enabled.
     pub ocr_enabled: Option<bool>,
-    /// Existing full-page OCR images, keyed by 1-based document page number.
-    pub ocr_page_images: Option<HashMap<String, String>>,
     /// HTTP OCR server URL. If set, uses HTTP OCR instead of Tesseract.
     pub ocr_server_url: Option<String>,
     /// Extra HTTP headers sent with every request to `ocrServerUrl`
@@ -158,23 +156,6 @@ impl JsLiteParseConfig {
         let mut cfg = LiteParseConfig::default();
         if let Some(v) = self.ocr_language {
             cfg.ocr_language = v;
-        }
-        if let Some(images) = self.ocr_page_images {
-            cfg.ocr_page_images = images
-                .into_iter()
-                .map(|(page, path)| {
-                    let page = page
-                        .parse::<u32>()
-                        .ok()
-                        .filter(|number| *number > 0 && number.to_string() == page)
-                        .ok_or_else(|| {
-                            Error::from_reason(
-                                "ocrPageImages keys must be positive document page numbers",
-                            )
-                        })?;
-                    Ok((page, path))
-                })
-                .collect::<Result<_>>()?;
         }
         if let Some(v) = self.ocr_enabled {
             cfg.ocr_enabled = v;
@@ -309,12 +290,6 @@ impl JsLiteParseConfig {
         Self {
             ocr_language: Some(cfg.ocr_language.clone()),
             ocr_enabled: Some(cfg.ocr_enabled),
-            ocr_page_images: Some(
-                cfg.ocr_page_images
-                    .iter()
-                    .map(|(page, path)| (page.to_string(), path.clone()))
-                    .collect(),
-            ),
             ocr_server_url: cfg.ocr_server_url.clone(),
             ocr_server_headers: if cfg.ocr_server_headers.is_empty() {
                 None

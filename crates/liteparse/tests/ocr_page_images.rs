@@ -269,3 +269,90 @@ fn encoded_images_with_exif_rotation_use_pixels_to_preserve_page_coordinates() {
         image::load_from_memory(&jpeg).unwrap().into_rgb8().as_raw()
     );
 }
+
+#[tokio::test]
+async fn http_ocr_preserves_original_jpeg_png_bytes_and_content_types() {
+    use liteparse::ocr::http_simple::{HttpOcrEngine, OcrRetryConfig};
+    use std::io::{BufRead, Read, Write};
+
+    let dir = tempfile::tempdir().unwrap();
+    for (extension, mime, filename) in [
+        ("jpg", "image/jpeg", "image.jpg"),
+        ("png", "image/png", "image.png"),
+    ] {
+        let path = image(
+            dir.path(),
+            &format!("page.{extension}"),
+            72,
+            144,
+            [37, 37, 37],
+        );
+        let mut original = std::fs::read(&path).unwrap();
+        if extension == "png" {
+            // A metadata chunk makes even a lossless pixel round-trip change
+            // the bytes, so PNG re-encoding cannot accidentally pass this test.
+            let text = b"tEXtComment\0byte-preservation";
+            let mut chunk = ((text.len() - 4) as u32).to_be_bytes().to_vec();
+            chunk.extend_from_slice(text);
+            chunk.extend_from_slice(&crc32fast::hash(text).to_be_bytes());
+            original.splice(original.len() - 12..original.len() - 12, chunk);
+            std::fs::write(&path, &original).unwrap();
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = std::io::BufReader::new(&mut socket);
+            let mut content_length = None;
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    content_length = Some(value.trim().parse::<usize>().unwrap());
+                }
+            }
+            let mut body = vec![0; content_length.unwrap()];
+            reader.read_exact(&mut body).unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\n{\"results\":[]}").unwrap();
+            body
+        });
+        let engine =
+            HttpOcrEngine::new(format!("http://{address}/ocr")).with_retry(OcrRetryConfig {
+                max_attempts: 1,
+                ..Default::default()
+            });
+        engine
+            .recognize_image(
+                &OcrImage::from_file(&path).unwrap(),
+                &OcrOptions {
+                    language: "eng".into(),
+                    dpi: 72.0,
+                },
+            )
+            .await
+            .unwrap();
+        let body = server.join().unwrap();
+        let header_end = body
+            .windows(4)
+            .position(|bytes| bytes == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        let headers = std::str::from_utf8(&body[..header_end]).unwrap();
+        assert!(
+            headers
+                .to_ascii_lowercase()
+                .contains(&format!("content-type: {mime}"))
+        );
+        assert!(headers.contains(&format!("filename=\"{filename}\"")));
+        assert_eq!(&body[header_end..header_end + original.len()], original);
+        assert!(body[header_end + original.len()..].starts_with(b"\r\n--"));
+    }
+}

@@ -43,13 +43,6 @@ export interface PoolOptions {
 export interface LiteParseConfig {
   ocrLanguage: string;
   ocrEnabled: boolean;
-  /**
-   * Local full-page image paths for OCR, keyed by 1-based document page number.
-   * DPI is derived from image dimensions and the corrected PDF page size.
-   * Missing entries render normally; supplying an image does not force OCR.
-   * Files must remain available until parsing finishes, including pool/batch use.
-   */
-  ocrPageImages?: Record<number, string>;
   ocrServerUrl?: string;
   /** Extra HTTP headers sent with every request to `ocrServerUrl`. */
   ocrServerHeaders?: Record<string, string>;
@@ -667,7 +660,6 @@ export class LiteParse {
     const nativeConfig: LiteParseNativeConfig = {
       ocrLanguage: userConfig.ocrLanguage,
       ocrEnabled: userConfig.ocrEnabled,
-      ocrPageImages: userConfig.ocrPageImages,
       ocrServerUrl: userConfig.ocrServerUrl,
       ocrServerHeaders: userConfig.ocrServerHeaders,
       tessdataPath: userConfig.tessdataPath,
@@ -729,7 +721,6 @@ export class LiteParse {
     this._config = {
       ocrLanguage: resolved.ocrLanguage ?? "eng",
       ocrEnabled: resolved.ocrEnabled ?? true,
-      ocrPageImages: resolved.ocrPageImages ?? {},
       ocrServerUrl: resolved.ocrServerUrl ?? undefined,
       ocrServerHeaders: resolved.ocrServerHeaders ?? undefined,
       tessdataPath: resolved.tessdataPath ?? undefined,

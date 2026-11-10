@@ -6,7 +6,6 @@ from typing import (
     Dict,
     Iterator,
     List,
-    Mapping,
     Optional,
     Tuple,
     Union,
@@ -502,7 +501,6 @@ class LiteParse:
         crop_box: Optional[Tuple[float, float, float, float]] = None,
         skip_diagonal_text: Optional[bool] = None,
         page_orientation_corrections: Optional[List[Tuple[int, int]]] = None,
-        ocr_page_images: Mapping[int, str] | None = None,
         include_complexity: Optional[bool] = None,
         extract_vector_graphics: Optional[bool] = None,
         pool_size: Optional[int] = None,
@@ -579,11 +577,6 @@ class LiteParse:
             skip_diagonal_text: Drop diagonal text — items whose rotation is
                 more than 2° off the nearest right angle (0/90/180/270).
                 Default False. Use to exclude rotated watermarks/stamps.
-            ocr_page_images: Full-page OCR image paths, keyed by 1-based document
-                page number. DPI is derived from image and PDF page dimensions.
-                Images must match corrected page orientation and remain available
-                until parsing finishes. Missing entries render normally. Supplying
-                an image does not force OCR.
             page_orientation_corrections: Per-page orientation corrections
                 from an upstream orientation classifier, as ``(page, angle)``
                 pairs: the 1-based page and the clockwise degrees (0, 90, 180
@@ -677,8 +670,6 @@ class LiteParse:
             kwargs["crop_box"] = crop_box
         if skip_diagonal_text is not None:
             kwargs["skip_diagonal_text"] = skip_diagonal_text
-        if ocr_page_images is not None:
-            kwargs["ocr_page_images"] = dict(ocr_page_images)
         if page_orientation_corrections is not None:
             kwargs["page_orientation_corrections"] = [
                 (int(page), int(angle)) for page, angle in page_orientation_corrections
@@ -998,7 +989,6 @@ class LiteParse:
             crop_box=cfg.crop_box,
             skip_diagonal_text=cfg.skip_diagonal_text,
             page_orientation_corrections=list(cfg.page_orientation_corrections),
-            ocr_page_images=dict(cfg.ocr_page_images),
             include_complexity=cfg.include_complexity,
             extract_text_metadata=cfg.extract_text_metadata,
             extract_images=cfg.extract_images,
