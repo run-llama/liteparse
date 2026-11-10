@@ -1318,7 +1318,7 @@ pub fn merge_ocr_results(
         // A skewed scan: when all of the page's text is OCR, rotate the items upright about the
         // page centre. Axis-aligned boxes of tilted lines overlap the lines above and below,
         // and the projection then merges and reorders them. The tilt is recorded on the page
-        // and the output boxes are rotated back after layout (parser.rs).
+        // and the output boxes are rotated back after layout (`stages::rotate_back_ocr_deskew`).
         let deskew = if native_count == 0 {
             ocr_page_skew(&ocr_results)
         } else {
