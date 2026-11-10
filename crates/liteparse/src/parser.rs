@@ -193,52 +193,6 @@ pub struct LiteParse {
     glyph_resolver: Option<std::sync::Arc<dyn crate::GlyphResolver>>,
 }
 
-/// Undo the OCR merge's deskew (`Page::ocr_deskew`) on a page's output geometry: projection
-/// and layout ran on upright OCR items, but the boxes a caller reads must match the image.
-/// Each box becomes the axis-aligned bound of itself rotated back by `deg` about the page
-/// centre. Only OCR items move (native items were never rotated); layout blocks and their
-/// table cells are built from those items, so they move too.
-fn rotate_back_ocr_boxes(page: &mut ParsedPage, deg: f32) {
-    let (cx, cy) = (page.page_width / 2.0, page.page_height / 2.0);
-    let back = |x: f32, y: f32, w: f32, h: f32| -> (f32, f32, f32, f32) {
-        let pts = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
-            .map(|(px, py)| crate::ocr_merge::rotate_about(px, py, cx, cy, deg));
-        let x0 = pts.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
-        let x1 = pts.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
-        let y0 = pts.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
-        let y1 = pts.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
-        (x0, y0, x1 - x0, y1 - y0)
-    };
-    let rect = |r: &mut crate::types::Rect| {
-        (r.x, r.y, r.width, r.height) = back(r.x, r.y, r.width, r.height);
-    };
-    for item in page
-        .text_items
-        .iter_mut()
-        .filter(|i| i.confidence.is_some())
-    {
-        (item.x, item.y, item.width, item.height) = back(item.x, item.y, item.width, item.height);
-        for w in &mut item.words {
-            (w.x, w.y, w.width, w.height) = back(w.x, w.y, w.width, w.height);
-        }
-    }
-    for block in page.blocks.iter_mut().flatten() {
-        if let Some(r) = block.bbox.as_mut() {
-            rect(r);
-        }
-        for cell in block
-            .header
-            .iter_mut()
-            .flatten()
-            .chain(block.rows.iter_mut().flatten().flatten())
-        {
-            if let Some(r) = cell.bbox.as_mut() {
-                rect(r);
-            }
-        }
-    }
-}
-
 /// Run block classification once and fan the result out to everything that
 /// needs it: the rendered per-page markdown (when Markdown is the output
 /// format) and each page's `blocks` (when `extract_blocks` is on).
@@ -406,6 +360,7 @@ impl LiteParse {
             // by free slots and ignores this field.
             max_rasters: self.config.num_workers.max(1),
             dpi: self.config.dpi,
+            max_long_edge: None,
             grayscale,
             render_form_fields: self.config.render_form_fields,
             continue_on_page_error: self.config.continue_on_page_error,
@@ -896,12 +851,6 @@ impl LiteParse {
         // crop region, and before projection so filtered items never surface.
         stages::apply_content_filters(&mut pages, &self.content_filters());
 
-        // Pages the OCR merge deskewed: their output boxes are rotated back after layout.
-        let deskews: Vec<(usize, f32)> = pages
-            .iter()
-            .filter_map(|p| p.ocr_deskew.map(|deg| (p.page_number, deg)))
-            .collect();
-
         // Grid projection
         let mut parsed_pages = self.project(pages);
 
@@ -942,14 +891,8 @@ impl LiteParse {
         if self.config.output_format == crate::config::OutputFormat::Markdown {
             stages::canonicalize_image_refs(&mut parsed_pages, &mut full_text, &images);
         }
-        for (page_number, deg) in &deskews {
-            if let Some(page) = parsed_pages
-                .iter_mut()
-                .find(|p| p.page_number == *page_number)
-            {
-                rotate_back_ocr_boxes(page, *deg);
-            }
-        }
+        // Last geometry stage: projection and layout ran on upright OCR items.
+        stages::rotate_back_ocr_deskew(&mut parsed_pages);
 
         let total = web_time::Instant::now().duration_since(t0).as_secs_f64() * 1000.0;
         log(&format!("[liteparse] total: {:.1}ms", total));
@@ -1567,6 +1510,7 @@ mod tests {
             form_fields: None,
             structure_tree: None,
             blocks: None,
+            ocr_deskew: None,
         }];
         let mut full_text = pages[0].markdown.clone();
         let images = vec![

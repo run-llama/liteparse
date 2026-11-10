@@ -177,6 +177,12 @@ fn round_trip<T: serde::Serialize + serde::de::DeserializeOwned>(value: T, what:
 /// `LiteParse::parse_resolved` step for step; the point is that nothing in
 /// that function is unreachable from here.
 async fn compose(parser: &LiteParse, input: PdfInput) -> ParseResult {
+    compose_with(parser, input, true).await
+}
+
+/// [`compose`], optionally leaving out the final deskew rotate-back, so a test
+/// can show what a caller that skips it gets.
+async fn compose_with(parser: &LiteParse, input: PdfInput, rotate_back: bool) -> ParseResult {
     let config = parser.config();
     let password = config.password.as_deref();
     let markdown = config.output_format == OutputFormat::Markdown;
@@ -383,6 +389,10 @@ async fn compose(parser: &LiteParse, input: PdfInput) -> ParseResult {
     if markdown {
         stages::canonicalize_image_refs(&mut parsed, &mut text, &images);
     }
+    // Last: deskewed pages' boxes go back onto the image.
+    if rotate_back {
+        stages::rotate_back_ocr_deskew(&mut parsed);
+    }
     // `parse()` writes image files only with `image_output_dir`; none of the
     // configurations here set it, so `path` stays unset on both sides.
     for image in images.iter_mut() {
@@ -549,6 +559,115 @@ async fn parse_equals_composed_stages_on_converted_image() {
         result.text.contains("MOCK "),
         "a converted image should be OCR-only: {}",
         result.text
+    );
+}
+
+/// Mock OCR for a scan tilted 1 degree clockwise: five long text lines that
+/// descend to the right, each with its tilted polygon, so the OCR merge
+/// deskews the page.
+struct SkewedMockOcr;
+
+impl OcrEngine for SkewedMockOcr {
+    fn name(&self) -> &str {
+        "skewed-mock"
+    }
+    fn recognize<'a, 'b: 'a, 'c: 'a>(
+        &'a self,
+        _image_data: &'c [u8],
+        width: u32,
+        height: u32,
+        _options: &'b OcrOptions,
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let (w, h) = (width as f32, height as f32);
+            let (x0, len, line_h) = (0.1 * w, 0.7 * w, 0.02 * h);
+            let rise = len * 1.0f32.to_radians().tan();
+            Ok((0..5)
+                .map(|i| {
+                    let y0 = h * (0.2 + 0.12 * i as f32);
+                    let polygon = [
+                        [x0, y0],
+                        [x0 + len, y0 + rise],
+                        [x0 + len, y0 + rise + line_h],
+                        [x0, y0 + line_h],
+                    ];
+                    OcrResult {
+                        text: format!("skewed line {i} with several words"),
+                        bbox: [x0, y0, x0 + len, y0 + rise + line_h],
+                        confidence: 0.95,
+                        polygon: Some(polygon),
+                    }
+                })
+                .collect())
+        })
+    }
+}
+
+/// A deskewed scan: `parse()` rotates the OCR boxes back onto the image, and
+/// the composed stages match it only when they end with
+/// `stages::rotate_back_ocr_deskew`. Without that call the text is the same
+/// but the OCR boxes stay in the upright frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn composed_stages_need_deskew_rotate_back() {
+    if skip_integration() {
+        return;
+    }
+    let config = LiteParseConfig {
+        ocr_enabled: true,
+        quiet: true,
+        output_format: OutputFormat::Markdown,
+        extract_blocks: true,
+        emit_word_boxes: true,
+        ..LiteParseConfig::default()
+    };
+    let parser = LiteParse::new(config).with_ocr_engine(Arc::new(SkewedMockOcr));
+    let input = PdfInput::Path(fixture("receipt.png"));
+    let via_parse = parser.parse_input(input.clone()).await.unwrap();
+    let rotated = compose_with(&parser, input.clone(), true).await;
+    let unrotated = compose_with(&parser, input, false).await;
+
+    assert_eq!(
+        snapshot(&via_parse),
+        snapshot(&rotated),
+        "parse() and the composed stages with the rotate-back diverged"
+    );
+
+    // The page was deskewed, and the rotate-back consumed the angle.
+    let page = &unrotated.pages[0];
+    let deg = page.ocr_deskew.expect("the skewed scan was not deskewed");
+    assert!((deg - 1.0).abs() < 0.05, "deskew angle {deg}");
+    assert!(via_parse.pages[0].ocr_deskew.is_none());
+
+    // Same text either way; only geometry moves.
+    assert_eq!(via_parse.text, unrotated.text);
+    let ocr_boxes = |r: &ParseResult| -> Vec<(f32, f32, f32, f32)> {
+        r.pages[0]
+            .text_items
+            .iter()
+            .filter(|i| i.confidence.is_some())
+            .map(|i| (i.x, i.y, i.width, i.height))
+            .collect()
+    };
+    let (back, upright) = (ocr_boxes(&via_parse), ocr_boxes(&unrotated));
+    assert!(!back.is_empty(), "no OCR items on the page");
+    assert_eq!(back.len(), upright.len());
+    assert!(
+        back.iter().zip(&upright).all(|(a, b)| a != b),
+        "every OCR box should move: {back:?} vs {upright:?}"
+    );
+    // A second call is a no-op.
+    let mut again = via_parse.pages.clone();
+    stages::rotate_back_ocr_deskew(&mut again);
+    assert_eq!(
+        serde_json::to_value(&again).unwrap(),
+        serde_json::to_value(&via_parse.pages).unwrap()
     );
 }
 
