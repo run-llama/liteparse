@@ -102,9 +102,8 @@ export interface LiteParseConfig {
    */
   ocrFailureFatal: boolean;
   /**
-   * Lightly blur OCR rasters of 1-bit full-page scans (default: false). Dense
-   * dot patterns (security paper, dithering) alias when the OCR server shrinks
-   * the page for text detection, and the page comes back nearly empty.
+   * Blur OCR rasters of 1-bit full-page scans (default: false). Helps scans on
+   * dotted or dithered backgrounds that otherwise OCR as empty.
    */
   ocrBlurBilevelScans: boolean;
   /**

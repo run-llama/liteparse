@@ -955,13 +955,12 @@ fn count_columns(region: &Region, total_items: usize) -> usize {
 /// to avoid excessive memory usage.
 pub(crate) const MAX_OCR_RENDER_LONG_EDGE_PX: f32 = 4096.0;
 
-/// Gaussian sigma (raster pixels) for [`OcrRenderOptions::blur_bilevel_scans`].
-/// Tuned on 300 dpi renders: dotted pages read the same from 0.6 to 0.9; around
-/// 0.5 many stay unread.
+/// Sigma for [`OcrRenderOptions::blur_bilevel_scans`]. Picked on 300 dpi renders;
+/// 0.6 to 0.9 all work.
 const BILEVEL_SCAN_BLUR_SIGMA: f32 = 0.75;
 
-/// Whether the page is a 1-bit scan: a top-level image covering the page
-/// (either orientation, so `/Rotate` pages count) with 1 bit per pixel.
+/// True if a top-level 1-bpp image covers the page. Checks both orientations
+/// because object bounds ignore `/Rotate`.
 fn is_bilevel_scan(page_obj: &pdfium::Page) -> bool {
     let (pw, ph) = (page_obj.width(), page_obj.height());
     let covers = |w: f32, h: f32| {
@@ -996,7 +995,7 @@ fn gaussian_blur(pixels: &mut [u8], width: usize, height: usize, channels: usize
         })
         .collect();
     let total: f32 = weights.iter().sum();
-    // 16.16 fixed point: the taps sum to 65536, so a full-white run stays 255.
+    // 16.16 fixed point; taps sum to exactly 65536 so flat areas don't shift.
     let mut kernel: Vec<u32> = weights
         .iter()
         .map(|w| (w / total * 65536.0).round() as u32)

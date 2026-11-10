@@ -110,10 +110,7 @@ export interface JsLiteParseConfig {
    * results when OCR is unavailable, instead of rejecting.
    */
   ocrFailureFatal?: boolean
-  /**
-   * Lightly blur OCR rasters of 1-bit full-page scans so dot patterns don't
-   * alias in the OCR server's detector downscale. Default false.
-   */
+  /** Blur OCR rasters of 1-bit full-page scans. Default false. */
   ocrBlurBilevelScans?: boolean
   /**
    * OCR request-hedging schedule (ms). Empty/unset = no hedging. Multiple

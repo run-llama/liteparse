@@ -947,8 +947,7 @@ fn grey_pixels(bits: u8, blur: bool) -> usize {
         .count()
 }
 
-/// `ocr_blur_bilevel_scans` softens the raster of a 1-bit full-page scan and
-/// leaves 8-bit scans (and everything with the option off) untouched.
+/// Only 1-bit full-page scans get blurred, and only with the option on.
 #[test]
 #[serial]
 fn blur_bilevel_scans_only_touches_one_bit_scans() {

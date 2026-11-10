@@ -121,10 +121,9 @@ pub struct LiteParseConfig {
     /// that prefer a degraded document over a hard failure (e.g. when the host
     /// has its own OCR fallback or treats OCR as best-effort enrichment).
     pub ocr_failure_fatal: bool,
-    /// Lightly blur (Gaussian, sigma 0.75 px) the OCR raster of pages that are a
-    /// 1-bit full-page scan. Dense dot patterns on bilevel scans (security paper,
-    /// dithering) alias when an OCR server shrinks the page for text detection,
-    /// and the detector then finds almost no lines. Default `false`.
+    /// Blur the OCR raster of 1-bit full-page scans (Gaussian, sigma 0.75).
+    /// Dotted or dithered backgrounds otherwise alias when the OCR server
+    /// downscales for detection and the page comes back empty. Default `false`.
     #[serde(default)]
     pub ocr_blur_bilevel_scans: bool,
     /// OCR request-hedging schedule (milliseconds) for the HTTP OCR engine.
