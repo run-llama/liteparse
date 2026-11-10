@@ -1005,7 +1005,6 @@ fn gaussian_blur(pixels: &mut [u8], width: usize, height: usize, channels: usize
 
     let row = width * channels;
     let mut tmp = vec![0u8; pixels.len()];
-    // Horizontal pass: pixels -> tmp.
     for y in 0..height {
         let src = &pixels[y * row..(y + 1) * row];
         let dst = &mut tmp[y * row..(y + 1) * row];
@@ -1020,7 +1019,6 @@ fn gaussian_blur(pixels: &mut [u8], width: usize, height: usize, channels: usize
             }
         }
     }
-    // Vertical pass: tmp -> pixels, a whole row at a time.
     let mut acc = vec![0u32; row];
     for y in 0..height {
         acc.fill(1 << 15);
