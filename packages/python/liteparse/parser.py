@@ -495,6 +495,7 @@ class LiteParse:
         detect_screenshot_rects: Optional[bool] = None,
         render_form_fields: Optional[bool] = None,
         ocr_failure_fatal: Optional[bool] = None,
+        ocr_despeckle_scans: Optional[bool] = None,
         ocr_hedge_delays_ms: Optional[List[int]] = None,
         emit_word_boxes: Optional[bool] = None,
         extract_text_metadata: Optional[bool] = None,
@@ -555,6 +556,10 @@ class LiteParse:
                 parse (default: True). Set False to keep already-recovered native
                 text and return partial results instead of raising — for callers
                 that prefer a degraded document over a hard failure.
+            ocr_despeckle_scans: Remove dot-screen specks from the OCR raster
+                of 1-bit full-page scans on a dotted or dithered background,
+                when rendered at 200 dpi or more (default: True). Only pages
+                dense with specks are touched; punctuation is kept.
             ocr_hedge_delays_ms: Request-hedging schedule for HTTP OCR, in
                 milliseconds. Empty or single-element means no hedging (one
                 request per attempt — the default). With multiple delays (e.g.
@@ -660,6 +665,8 @@ class LiteParse:
             kwargs["render_form_fields"] = render_form_fields
         if ocr_failure_fatal is not None:
             kwargs["ocr_failure_fatal"] = ocr_failure_fatal
+        if ocr_despeckle_scans is not None:
+            kwargs["ocr_despeckle_scans"] = ocr_despeckle_scans
         if ocr_hedge_delays_ms is not None:
             kwargs["ocr_hedge_delays_ms"] = ocr_hedge_delays_ms
         if emit_word_boxes is not None:
@@ -984,6 +991,7 @@ class LiteParse:
             extract_structure_tree=cfg.extract_structure_tree,
             extract_blocks=cfg.extract_blocks,
             ocr_failure_fatal=cfg.ocr_failure_fatal,
+            ocr_despeckle_scans=cfg.ocr_despeckle_scans,
             ocr_hedge_delays_ms=list(cfg.ocr_hedge_delays_ms),
             emit_word_boxes=cfg.emit_word_boxes,
             crop_box=cfg.crop_box,

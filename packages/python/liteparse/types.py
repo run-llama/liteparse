@@ -476,6 +476,7 @@ class LiteParseConfig:
     extract_structure_tree: bool
     extract_blocks: bool
     ocr_failure_fatal: bool
+    ocr_despeckle_scans: bool
     ocr_hedge_delays_ms: List[int]
     emit_word_boxes: bool
     #: ``(top, right, bottom, left)`` crop fractions, or ``None`` when the whole
