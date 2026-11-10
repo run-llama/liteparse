@@ -607,6 +607,8 @@ impl OcrEngine for SkewedMockOcr {
                         bbox: [x0, y0, x0 + len, y0 + rise + line_h],
                         confidence: 0.95,
                         polygon: Some(polygon),
+                        words: Vec::new(),
+                        rotation: None,
                     }
                 })
                 .collect())
