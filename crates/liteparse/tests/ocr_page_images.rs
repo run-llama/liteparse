@@ -235,6 +235,7 @@ fn image_validation_rejects_bad_scale_and_unreadable_sources_without_rendering()
         .pages;
     let mut options = stages::OcrRenderOptions {
         grayscale: true,
+        use_encoded_images: true,
         page_images: HashMap::from([(1, source.clone())]),
         max_rasters: 1,
         ..Default::default()
@@ -246,6 +247,7 @@ fn image_validation_rejects_bad_scale_and_unreadable_sources_without_rendering()
     let (rasters, _) = stages::render_for_ocr(&document, &pages, 0, &options).unwrap();
     assert_eq!(rasters[0].pixels, vec![255; 72 * 144 * 3]);
     options.grayscale = true;
+    options.use_encoded_images = false;
     let gray = dir.path().join("gray.png");
     image::GrayImage::from_pixel(72, 144, image::Luma([37]))
         .save(&gray)
@@ -292,4 +294,257 @@ fn image_validation_rejects_bad_scale_and_unreadable_sources_without_rendering()
         );
         assert!(stages::render_for_ocr(&document, &pages, 0, &options).is_err());
     }
+}
+
+#[tokio::test]
+async fn http_ocr_preserves_original_jpeg_and_png_bytes_mime_and_retry_payloads() {
+    use liteparse::ocr::http_simple::{HttpOcrEngine, OcrRetryConfig};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let png = image(dir.path(), "page.png", 72, 144, [255, 0, 0, 255], 72.0);
+    let jpeg_path = dir.path().join("page-image.bin");
+    let rgb = image::RgbImage::from_pixel(72, 144, image::Rgb([0, 0, 255]));
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
+        .encode_image(&rgb)
+        .unwrap();
+    std::fs::write(&jpeg_path, &jpeg).unwrap();
+    // A tEXt chunk survives forwarding but would be lost in pixel re-encoding.
+    let mut png_bytes = std::fs::read(&png.path).unwrap();
+    let text = b"Comment\0encoded-byte-regression";
+    let mut chunk = (text.len() as u32).to_be_bytes().to_vec();
+    chunk.extend_from_slice(b"tEXt");
+    chunk.extend_from_slice(text);
+    chunk.extend_from_slice(&crc32fast::hash(&chunk[4..]).to_be_bytes());
+    png_bytes.splice(png_bytes.len() - 12..png_bytes.len() - 12, chunk);
+    std::fs::write(&png.path, &png_bytes).unwrap();
+    let expected = [
+        (jpeg, "image/jpeg", "image.jpg", "JPEG"),
+        (
+            std::fs::read(&png.path).unwrap(),
+            "image/png",
+            "image.png",
+            "PNG",
+        ),
+    ];
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        for (bytes, mime, file, text) in expected {
+            for attempt in 0..2 {
+                let (mut stream, _) =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 4096];
+                let header_end = loop {
+                    let n = stream.read(&mut buffer).await.unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&buffer[..n]);
+                    if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                };
+                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse().unwrap())
+                    })
+                    .unwrap();
+                while request.len() < header_end + length {
+                    let n = stream.read(&mut buffer).await.unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&buffer[..n]);
+                }
+                let body = &request[header_end..header_end + length];
+                let data_start = body
+                    .windows(4)
+                    .position(|part| part == b"\r\n\r\n")
+                    .unwrap()
+                    + 4;
+                let part_headers = std::str::from_utf8(&body[..data_start]).unwrap();
+                assert!(part_headers.contains(mime), "{part_headers}");
+                assert!(
+                    part_headers.contains(&format!("filename=\"{file}\"")),
+                    "{part_headers}"
+                );
+                assert_eq!(
+                    &body[data_start..data_start + bytes.len()],
+                    bytes.as_slice()
+                );
+                assert!(body[data_start + bytes.len()..].starts_with(b"\r\n--"));
+                let (status, payload) = if attempt == 0 {
+                    ("500 Internal Server Error", "retry".to_string())
+                } else {
+                    (
+                        "200 OK",
+                        format!(
+                            r#"{{"results":[{{"text":"{text}","bbox":[40,20,60,30],"confidence":0.93}}]}}"#
+                        ),
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        }
+    });
+    let mut cfg = config(HashMap::from([
+        (
+            1,
+            OcrPageImage {
+                path: jpeg_path.to_string_lossy().into_owned(),
+                dpi: 72.0,
+            },
+        ),
+        (3, png),
+    ]));
+    cfg.target_pages = Some("1,3".into());
+    cfg.num_workers = 1;
+    cfg.dpi = 0.0;
+    let engine = HttpOcrEngine::new(url).with_retry(OcrRetryConfig {
+        max_attempts: 2,
+        base_backoff_ms: 0,
+        jitter_ms: 0,
+        ..Default::default()
+    });
+    let result = LiteParse::new(cfg)
+        .with_ocr_engine(Arc::new(engine))
+        .parse_input(blank_pdf())
+        .await
+        .unwrap();
+    server.await.unwrap();
+    assert_eq!(
+        result
+            .pages
+            .iter()
+            .map(|page| page.page_number)
+            .collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+    for (page, text) in result.pages.iter().zip(["JPEG", "PNG"]) {
+        let item = page
+            .text_items
+            .iter()
+            .find(|item| item.text == text)
+            .unwrap();
+        assert_eq!((item.x, item.y, item.width), (40.0, 20.0, 20.0));
+        assert_eq!(item.confidence, Some(0.93));
+    }
+}
+
+#[test]
+fn encoded_images_stay_decoded_when_native_text_must_be_masked() {
+    let lib = Library::init();
+    let document = stages::open(
+        &lib,
+        &PdfInput::Path("../../integration_tests_data/sample.pdf".into()),
+        None,
+        &[],
+    )
+    .unwrap();
+    let pages = stages::extract(
+        &document,
+        &stages::ExtractRequest {
+            target_pages: Some(&[1]),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .pages;
+    let mut options = stages::OcrRenderOptions {
+        dpi: 72.0,
+        use_encoded_images: true,
+        selection: Some([1].into_iter().collect()),
+        ..Default::default()
+    };
+    let baseline = stages::render_for_ocr(&document, &pages, 0, &options)
+        .unwrap()
+        .0
+        .remove(0);
+    assert!(baseline.has_native_text);
+    let bitmap = document.page(0).unwrap().render(72.0).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("native.png");
+    image::save_buffer(
+        &path,
+        &bitmap.to_rgb(),
+        bitmap.width() as u32,
+        bitmap.height() as u32,
+        image::ColorType::Rgb8,
+    )
+    .unwrap();
+    options.page_images.insert(
+        1,
+        OcrPageImage {
+            path: path.to_string_lossy().into_owned(),
+            dpi: 72.0,
+        },
+    );
+    let reused = stages::render_for_ocr(&document, &pages, 0, &options)
+        .unwrap()
+        .0
+        .remove(0);
+    assert!(reused.encoded_image.is_none());
+    assert_eq!(reused.pixels, baseline.pixels);
+}
+
+#[test]
+fn encoded_images_with_exif_rotation_use_pixels_to_preserve_page_coordinates() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
+        .encode_image(&image::RgbImage::from_pixel(
+            72,
+            144,
+            image::Rgb([0, 0, 255]),
+        ))
+        .unwrap();
+    // JPEG APP1: Exif, little-endian TIFF, one SHORT orientation entry = 6
+    // (rotate 90 degrees). Pixel coordinates themselves remain 72×144.
+    let exif = b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0";
+    let mut segment = vec![0xff, 0xe1];
+    segment.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
+    segment.extend_from_slice(exif);
+    jpeg.splice(2..2, segment);
+    let path = dir.path().join("oriented.jpg");
+    std::fs::write(&path, &jpeg).unwrap();
+    let lib = Library::init();
+    let document = stages::open(&lib, &blank_pdf(), None, &[]).unwrap();
+    let pages = stages::extract(&document, &stages::ExtractRequest::default())
+        .unwrap()
+        .pages;
+    let options = stages::OcrRenderOptions {
+        max_rasters: 1,
+        use_encoded_images: true,
+        page_images: HashMap::from([(
+            1,
+            OcrPageImage {
+                path: path.to_string_lossy().into_owned(),
+                dpi: 72.0,
+            },
+        )]),
+        ..Default::default()
+    };
+    let raster = stages::render_for_ocr(&document, &pages, 0, &options)
+        .unwrap()
+        .0
+        .remove(0);
+    assert!(raster.encoded_image.is_none());
+    assert_eq!((raster.width, raster.height), (72, 144));
+    assert_eq!(
+        raster.pixels,
+        image::load_from_memory(&jpeg)
+            .unwrap()
+            .into_rgb8()
+            .into_raw()
+    );
 }

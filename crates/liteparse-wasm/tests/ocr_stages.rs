@@ -90,6 +90,7 @@ fn check_recognition(num_workers: usize) {
         .map(|&page_number| OcrRaster {
             page_number,
             pixels: vec![page_number as u8; page_number],
+            encoded_image: None,
             width: page_number as u32,
             height: 1,
             dpi: 150.0,
@@ -187,6 +188,7 @@ fn window_collects_ready_results_and_reuses_all_slots() {
         let raster = OcrRaster {
             page_number: page,
             pixels: vec![page as u8; page],
+            encoded_image: None,
             width: page as u32,
             height: 1,
             dpi: 150.0,
@@ -217,6 +219,7 @@ fn window_collects_ready_results_and_reuses_all_slots() {
     let raster = OcrRaster {
         page_number: 7,
         pixels: vec![7; 7],
+        encoded_image: None,
         width: 7,
         height: 1,
         dpi: 150.0,

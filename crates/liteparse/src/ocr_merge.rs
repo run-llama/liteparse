@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::error::LiteParseError;
-use crate::ocr::{OcrEngine, OcrOptions, OcrResult};
+use crate::ocr::{EncodedOcrImage, OcrEngine, OcrImageFormat, OcrOptions, OcrResult};
 use crate::types::{CutAxis, Page, ParsedPage, Rect, Region, RegionKind, TextItem, WordBox};
 #[cfg(target_arch = "wasm32")]
 use futures_util::{
@@ -45,7 +45,7 @@ const MIN_COLUMN_ITEM_FRACTION: f32 = 0.15;
 /// `DenseGraphics`.
 const DENSE_GRAPHICS_MIN_COVERAGE: f32 = 0.2;
 
-/// Owned page bitmap prepared for OCR, plus the page facts the merge needs
+/// Owned OCR image (pixels or original encoded bytes), plus the page facts the merge needs
 /// to judge the engine's output. Produced by [`render_pages_for_ocr`],
 /// consumed by [`recognize_rasters`]; the non-pixel facts are carried into
 /// the [`PageOcrOutcome`] so [`merge_ocr_results`] never needs the raster or
@@ -58,8 +58,13 @@ pub struct OcrRaster {
     pub page_number: usize,
     /// Tightly-packed pixels: 1 byte/px (grayscale) or 3 (RGB). Serialized
     /// as a base64 string, since a JSON array of numbers is ~3.5× the size.
-    #[serde(with = "base64_bytes")]
+    #[serde(with = "crate::ocr::base64_bytes")]
     pub pixels: Vec<u8>,
+    /// Original JPEG/PNG bytes when encoded input was requested and no pixel
+    /// edits were needed. `pixels` is empty in this case; recognition dispatches
+    /// to `OcrEngine::recognize_encoded` instead of `recognize`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoded_image: Option<EncodedOcrImage>,
     pub width: u32,
     pub height: u32,
     /// DPI this page was actually rendered at (the long-edge cap can lower it
@@ -94,6 +99,11 @@ pub struct OcrRenderOptions {
     /// Full-page images supplied by the caller, keyed by 1-based source page.
     /// A supplied image replaces rendering only after the normal OCR gate.
     pub page_images: HashMap<u32, crate::config::OcrPageImage>,
+    /// Permit original 8-bit JPEG/PNG bytes for unmodified supplied images.
+    /// Enable only with an engine accepting encoded images; false keeps the
+    /// stage's ordinary RGB/grayscale output. Alpha channels and native-text
+    /// masking still require decoded pixels.
+    pub use_encoded_images: bool,
     /// Emit 1 byte/px luma instead of RGB (see `OcrEngine::prefers_grayscale`).
     pub grayscale: bool,
     /// Paint form-field appearances into the raster (runs document actions).
@@ -117,28 +127,13 @@ impl Default for OcrRenderOptions {
             max_rasters: 0,
             dpi: crate::config::DEFAULT_DPI,
             page_images: HashMap::new(),
+            use_encoded_images: false,
             grayscale: false,
             render_form_fields: false,
             continue_on_page_error: false,
             reflatten_pages: HashSet::new(),
             selection: None,
         }
-    }
-}
-
-/// Base64 (de)serialization for raster pixel buffers.
-mod base64_bytes {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&STANDARD.encode(bytes))
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
-        let encoded = String::deserialize(deserializer)?;
-        STANDARD.decode(encoded).map_err(serde::de::Error::custom)
     }
 }
 
@@ -204,6 +199,21 @@ pub(crate) struct OcrTaskPool {
     submitted: usize,
 }
 
+async fn recognize_raster(
+    engine: &dyn OcrEngine,
+    raster: &OcrRaster,
+    options: &OcrOptions,
+) -> OcrTaskResult {
+    match &raster.encoded_image {
+        Some(image) => engine.recognize_encoded(image, options).await,
+        None => {
+            engine
+                .recognize(&raster.pixels, raster.width, raster.height, options)
+                .await
+        }
+    }
+}
+
 impl OcrTaskPool {
     pub(crate) fn new(engine: Arc<dyn OcrEngine>, language: &str, num_workers: usize) -> Self {
         Self {
@@ -243,12 +253,7 @@ impl OcrTaskPool {
             let runtime = tokio::runtime::Handle::current();
             let task = self.tasks.spawn(async move {
                 match tokio::task::spawn_blocking(move || {
-                    runtime.block_on(engine.recognize(
-                        &raster.pixels,
-                        raster.width,
-                        raster.height,
-                        &options,
-                    ))
+                    runtime.block_on(recognize_raster(engine.as_ref(), &raster, &options))
                 })
                 .await
                 {
@@ -262,9 +267,7 @@ impl OcrTaskPool {
         {
             let order = self.submitted;
             self.tasks.push(Box::pin(async move {
-                let result = engine
-                    .recognize(&raster.pixels, raster.width, raster.height, &options)
-                    .await;
+                let result = recognize_raster(engine.as_ref(), &raster, &options).await;
                 (order, pending.with_result(result))
             }));
         }
@@ -971,23 +974,40 @@ pub fn render_pages_for_ocr(
     render_pages_for_ocr_capped(document, pages, start, options, options.max_rasters)
 }
 
-/// Decode only images selected for OCR. One pixel of tolerance accounts for
-/// integer raster rounding; larger mismatches would misplace OCR boxes.
+struct LoadedOcrImage {
+    pixels: Vec<u8>,
+    encoded_image: Option<EncodedOcrImage>,
+    width: u32,
+    height: u32,
+    dpi: f32,
+}
+
+/// Read images selected for OCR and validate their headers before choosing
+/// encoded bytes or decoded pixels. One pixel of tolerance accounts for raster
+/// rounding; larger geometry mismatches would misplace OCR boxes.
 fn load_ocr_page_image(
     source: &crate::config::OcrPageImage,
     page: &Page,
     grayscale: bool,
-) -> Result<(Vec<u8>, u32, u32, f32), LiteParseError> {
+    use_encoded_images: bool,
+) -> Result<LoadedOcrImage, LiteParseError> {
     if !source.dpi.is_finite() || source.dpi <= 0.0 {
         return Err(LiteParseError::Config(format!(
             "OCR image for page {} needs a finite, positive DPI",
             page.page_number
         )));
     }
-    let image = image::ImageReader::open(&source.path)?
-        .with_guessed_format()?
-        .decode()?;
-    let (width, height) = (image.width(), image.height());
+    use image::ImageDecoder;
+    let bytes = std::fs::read(&source.path)?;
+    let reader =
+        image::ImageReader::new(std::io::Cursor::new(bytes.as_slice())).with_guessed_format()?;
+    let format = match reader.format() {
+        Some(image::ImageFormat::Jpeg) => Some(OcrImageFormat::Jpeg),
+        Some(image::ImageFormat::Png) => Some(OcrImageFormat::Png),
+        _ => None,
+    };
+    let mut decoder = reader.into_decoder()?;
+    let (width, height) = decoder.dimensions();
     let expected_width = page.page_width * source.dpi / 72.0;
     let expected_height = page.page_height * source.dpi / 72.0;
     // Some decoders accept empty rasters. OCR needs pixels even when a tiny
@@ -1004,6 +1024,35 @@ fn load_ocr_page_image(
             page.page_number, width, height, source.dpi, expected_width, expected_height
         )));
     }
+    // Keep the decoder's normal allocation limits even when the compressed
+    // payload is forwarded. Header inspection does not allocate pixel buffers.
+    let mut limits = image::Limits::default();
+    limits.reserve(decoder.total_bytes())?;
+    decoder.set_limits(limits)?;
+    // Forward only files whose pixel frame and color representation already
+    // match OCR input. Alpha, bit-depth conversion and EXIF rotation need the
+    // decoded path so downstream decoders cannot change page coordinates.
+    if use_encoded_images
+        && matches!(
+            decoder.color_type(),
+            image::ColorType::Rgb8 | image::ColorType::L8
+        )
+        && let Some(format) = format
+        && decoder.orientation()? == image::metadata::Orientation::NoTransforms
+    {
+        drop(decoder);
+        return Ok(LoadedOcrImage {
+            pixels: Vec::new(),
+            encoded_image: Some(EncodedOcrImage {
+                data: bytes,
+                format,
+            }),
+            width,
+            height,
+            dpi: source.dpi,
+        });
+    }
+    let image = image::DynamicImage::from_decoder(decoder)?;
     let pixels = match (image, grayscale) {
         // JPEG and RGB PNG decoders already own the buffer the OCR engine
         // needs. Move it directly instead of copying through RGBA pixels.
@@ -1029,7 +1078,13 @@ fn load_ocr_page_image(
             pixels
         }
     };
-    Ok((pixels, width, height, source.dpi))
+    Ok(LoadedOcrImage {
+        pixels,
+        encoded_image: None,
+        width,
+        height,
+        dpi: source.dpi,
+    })
 }
 
 /// [`render_pages_for_ocr`] with `max_rasters` overriding the one in
@@ -1046,6 +1101,7 @@ pub(crate) fn render_pages_for_ocr_capped(
         max_rasters: _,
         dpi,
         page_images,
+        use_encoded_images,
         grayscale,
         render_form_fields,
         continue_on_page_error,
@@ -1125,42 +1181,48 @@ pub(crate) fn render_pages_for_ocr_capped(
                 }
             };
 
+            let mask_native = has_native_text
+                && !replace_native
+                && matches!(garbled_scope(page), GarbledScope::None);
             // Supplied images bypass PDFium rendering. Their own DPI controls
             // OCR coordinate recovery; the requested render DPI does not.
-            let (mut pixels, width, height, eff_dpi) =
-                if let Some(source) = page_images.get(&(page.page_number as u32)) {
-                    load_ocr_page_image(source, page, grayscale)?
-                } else {
-                    let long_edge_pt = page.page_width.max(page.page_height);
-                    let mut eff_dpi = dpi;
-                    if long_edge_pt > 0.0 {
-                        let max_dpi = MAX_OCR_RENDER_LONG_EDGE_PX * 72.0 / long_edge_pt;
-                        if eff_dpi > max_dpi {
-                            eff_dpi = max_dpi;
-                        }
+            let LoadedOcrImage {
+                mut pixels,
+                encoded_image,
+                width,
+                height,
+                dpi: eff_dpi,
+            } = if let Some(source) = page_images.get(&(page.page_number as u32)) {
+                load_ocr_page_image(source, page, grayscale, *use_encoded_images && !mask_native)?
+            } else {
+                let long_edge_pt = page.page_width.max(page.page_height);
+                let mut eff_dpi = dpi;
+                if long_edge_pt > 0.0 {
+                    let max_dpi = MAX_OCR_RENDER_LONG_EDGE_PX * 72.0 / long_edge_pt;
+                    if eff_dpi > max_dpi {
+                        eff_dpi = max_dpi;
                     }
-                    let bitmap = page_obj.render_with_form(eff_dpi, form.as_ref())?;
-                    let pixels = if grayscale {
-                        bitmap.to_luma()
-                    } else {
-                        bitmap.to_rgb()
-                    };
-                    (
-                        pixels,
-                        bitmap.width() as u32,
-                        bitmap.height() as u32,
-                        eff_dpi,
-                    )
+                }
+                let bitmap = page_obj.render_with_form(eff_dpi, form.as_ref())?;
+                let pixels = if grayscale {
+                    bitmap.to_luma()
+                } else {
+                    bitmap.to_rgb()
                 };
+                LoadedOcrImage {
+                    pixels,
+                    encoded_image: None,
+                    width: bitmap.width() as u32,
+                    height: bitmap.height() as u32,
+                    dpi: eff_dpi,
+                }
+            };
             // A page whose native text the merge keeps as is: blank that text out of the raster.
             // The merge drops every OCR line overlapping kept native text, so reading those
             // lines was wasted; OCR now only sees what the text layer doesn't cover (figures,
             // scanned inserts, outlined text). Pages where OCR replaces native text (garbled
             // fonts, an invisible OCR layer) keep the whole raster.
-            if has_native_text
-                && !replace_native
-                && matches!(garbled_scope(page), GarbledScope::None)
-            {
+            if mask_native {
                 mask_native_text(
                     &mut pixels,
                     width,
@@ -1194,6 +1256,7 @@ pub(crate) fn render_pages_for_ocr_capped(
             Ok(Some(OcrRaster {
                 page_number: page.page_number,
                 pixels,
+                encoded_image,
                 width,
                 height,
                 dpi: eff_dpi,
@@ -3311,6 +3374,7 @@ mod tests {
             page_number: idx + 1,
             // 1x1 grayscale pixel; the engine never inspects it.
             pixels: vec![0u8],
+            encoded_image: None,
             width: 1,
             height: 1,
             dpi: 72.0,

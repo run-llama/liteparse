@@ -226,6 +226,21 @@ page in the orientation produced by the PDF's `/Rotate` and any configured
 `pageOrientationCorrections`. Its content, including form appearances, must
 match the PDF. Cropped, deskewed and stretched images are unsupported.
 
+With HTTP OCR, unmodified 8-bit JPEG/PNG images without an alpha channel are
+uploaded as their original bytes, with the matching MIME type. LiteParse reads
+the image header for dimensions and DPI validation; it does not decode and
+re-encode those pixels. The OCR server validates the compressed pixel data.
+Images with alpha channels, higher bit depths, EXIF rotation or native text that
+needs masking use decoded pixels. Pixel-based OCR engines, including Tesseract, keep their
+normal decoded inputs.
+
+Custom Rust OCR engines can opt in through `OcrEngine::accepts_encoded_images`
+and `recognize_encoded`. Composed pipelines can set
+`OcrRenderOptions::use_encoded_images` when their engine supports it, then use
+`stages::recognize` to dispatch either payload. An `OcrRaster` with
+`encoded_image` has an empty `pixels` buffer; callers consuming stage outputs
+directly must handle that payload explicitly.
+
 LiteParse checks image dimensions against the page and DPI, allowing one pixel
 of raster rounding. An unreadable or incompatible supplied image is a page
 error; it is not silently replaced with a render. `continueOnPageError` applies

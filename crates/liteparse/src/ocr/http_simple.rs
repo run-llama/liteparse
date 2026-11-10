@@ -7,7 +7,7 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::ocr::{OcrEngine, OcrOptions, OcrResult};
+use crate::ocr::{EncodedOcrImage, OcrEngine, OcrFuture, OcrImageFormat, OcrOptions, OcrResult};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HttpOcrResponseItem {
@@ -193,16 +193,16 @@ async fn send_one(
     client: &Client,
     url: &str,
     headers: &[(String, String)],
-    png_bytes: &[u8],
+    image: &EncodedOcrImage,
     language: &str,
     timeout_ms: u64,
 ) -> Result<String, reqwest::Error> {
     let form = Form::new()
         .part(
             "file",
-            Part::bytes(png_bytes.to_vec())
-                .file_name("image.png")
-                .mime_str("image/png")?,
+            Part::bytes(image.data.clone())
+                .file_name(image.format.file_name())
+                .mime_str(image.format.mime_type())?,
         )
         .text("language", language.to_string());
     let mut request = client
@@ -262,7 +262,7 @@ impl HttpOcrEngine {
     async fn send_hedged(
         &self,
         client: &Client,
-        png_bytes: &[u8],
+        image: &EncodedOcrImage,
         language: &str,
     ) -> Result<String, reqwest::Error> {
         let delays = &self.retry.hedge_delays_ms;
@@ -278,7 +278,7 @@ impl HttpOcrEngine {
                 client,
                 &self.server_url,
                 &self.headers,
-                png_bytes,
+                image,
                 language,
                 timeout_ms,
             )
@@ -286,7 +286,7 @@ impl HttpOcrEngine {
         }
 
         // Hedged path: spawn one task per delay (spawned tasks need owned data,
-        // so clone the cheap bits and the PNG per hedge — the duplicate upload
+        // so clone the cheap bits and the image per hedge — the duplicate upload
         // is the cost hedging deliberately pays). The first Ok wins and the
         // remaining tasks are aborted (which cancels their in-flight requests);
         // if all fail, surface the last error so the retry loop can back off.
@@ -297,13 +297,13 @@ impl HttpOcrEngine {
             let client = client.clone();
             let url = self.server_url.clone();
             let headers = self.headers.clone();
-            let png = png_bytes.to_vec();
+            let image = image.clone();
             let lang = language.to_string();
             handles.push(tokio::spawn(async move {
                 if delay > 0 {
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
-                let res = send_one(&client, &url, &headers, &png, &lang, timeout_ms).await;
+                let res = send_one(&client, &url, &headers, &image, &lang, timeout_ms).await;
                 let _ = tx.send(res).await;
             }));
         }
@@ -325,11 +325,86 @@ impl HttpOcrEngine {
         // so at least one error is present when we reach here.
         Err(last_err.expect("hedge group always yields at least one result"))
     }
+
+    async fn request_image(
+        &self,
+        image: &EncodedOcrImage,
+        options: &OcrOptions,
+    ) -> Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>> {
+        let client = Client::new();
+
+        // Retry loop: each attempt sends one OCR request (or a hedged group
+        // of duplicates when configured) and backs off exponentially on
+        // transient failures. The image bytes are prepared once and
+        // cloned per request.
+        let max_attempts = self.retry.max_attempts.max(1);
+        let mut attempt: u32 = 0;
+        let raw = loop {
+            attempt += 1;
+            match self.send_hedged(&client, image, &options.language).await {
+                Ok(body) => break body,
+                Err(e) => {
+                    if attempt >= max_attempts || !is_retryable(&e) {
+                        return Err(e.into());
+                    }
+                    // A dropped connection ("socket hang up") gets a short
+                    // fixed backoff; everything else gets exponential
+                    // backoff clamped to the cap. Jitter spreads concurrent
+                    // page retries so they don't all hit a recovering
+                    // server at once.
+                    let base = if is_connection_drop(&e) {
+                        self.retry.fast_retry_ms
+                    } else {
+                        (self
+                            .retry
+                            .base_backoff_ms
+                            .saturating_mul(2u64.saturating_pow(attempt - 1)))
+                        .min(self.retry.max_backoff_ms)
+                    };
+                    let delay = base + jitter_ms(self.retry.jitter_ms);
+                    if std::env::var("LITEPARSE_DEBUG_OCR").is_ok() {
+                        eprintln!(
+                            "[ocr-http] attempt {attempt}/{max_attempts} failed ({e}); retrying in {delay}ms"
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+            }
+        };
+        // Parse from the buffered body (rather than `.json()`) so a
+        // malformed/unexpected response can surface a snippet of what the
+        // server actually returned.
+        let response: HttpOcrResponse = serde_json::from_str(&raw).map_err(|e| {
+            let snippet: String = raw.chars().take(200).collect();
+            format!("OCR server returned unparseable response: {e}; body starts: {snippet}")
+        })?;
+        let results = response.into_results();
+        if std::env::var("LITEPARSE_DEBUG_OCR").is_ok() {
+            eprintln!(
+                "[ocr-http] {} bytes -> {} result(s)",
+                raw.len(),
+                results.len()
+            );
+        }
+        Ok(results)
+    }
 }
 
 impl OcrEngine for HttpOcrEngine {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn accepts_encoded_images(&self) -> bool {
+        true
+    }
+
+    fn recognize_encoded<'a>(
+        &'a self,
+        image: &'a EncodedOcrImage,
+        options: &'a OcrOptions,
+    ) -> OcrFuture<'a> {
+        Box::pin(self.request_image(image, options))
     }
 
     fn recognize<'a, 'b: 'a, 'c: 'a>(
@@ -353,65 +428,14 @@ impl OcrEngine for HttpOcrEngine {
             let mut png_bytes = Vec::new();
             img.write_to(&mut Cursor::new(&mut png_bytes), ImageFormat::Png)?;
 
-            let client = Client::new();
-
-            // Retry loop: each attempt sends one OCR request (or a hedged group
-            // of duplicates when configured) and backs off exponentially on
-            // transient failures. The PNG bytes above are encoded once and
-            // cloned per request.
-            let max_attempts = self.retry.max_attempts.max(1);
-            let mut attempt: u32 = 0;
-            let raw = loop {
-                attempt += 1;
-                match self
-                    .send_hedged(&client, &png_bytes, &options.language)
-                    .await
-                {
-                    Ok(body) => break body,
-                    Err(e) => {
-                        if attempt >= max_attempts || !is_retryable(&e) {
-                            return Err(e.into());
-                        }
-                        // A dropped connection ("socket hang up") gets a short
-                        // fixed backoff; everything else gets exponential
-                        // backoff clamped to the cap. Jitter spreads concurrent
-                        // page retries so they don't all hit a recovering
-                        // server at once.
-                        let base = if is_connection_drop(&e) {
-                            self.retry.fast_retry_ms
-                        } else {
-                            (self
-                                .retry
-                                .base_backoff_ms
-                                .saturating_mul(2u64.saturating_pow(attempt - 1)))
-                            .min(self.retry.max_backoff_ms)
-                        };
-                        let delay = base + jitter_ms(self.retry.jitter_ms);
-                        if std::env::var("LITEPARSE_DEBUG_OCR").is_ok() {
-                            eprintln!(
-                                "[ocr-http] attempt {attempt}/{max_attempts} failed ({e}); retrying in {delay}ms"
-                            );
-                        }
-                        tokio::time::sleep(Duration::from_millis(delay)).await;
-                    }
-                }
-            };
-            // Parse from the buffered body (rather than `.json()`) so a
-            // malformed/unexpected response can surface a snippet of what the
-            // server actually returned.
-            let response: HttpOcrResponse = serde_json::from_str(&raw).map_err(|e| {
-                let snippet: String = raw.chars().take(200).collect();
-                format!("OCR server returned unparseable response: {e}; body starts: {snippet}")
-            })?;
-            let results = response.into_results();
-            if std::env::var("LITEPARSE_DEBUG_OCR").is_ok() {
-                eprintln!(
-                    "[ocr-http] {} bytes -> {} result(s)",
-                    raw.len(),
-                    results.len()
-                );
-            }
-            Ok(results)
+            self.request_image(
+                &EncodedOcrImage {
+                    data: png_bytes,
+                    format: OcrImageFormat::Png,
+                },
+                options,
+            )
+            .await
         })
     }
 }

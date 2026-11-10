@@ -61,33 +61,43 @@ fn measure(input: &PdfInput, images: &[(String, OcrPageImage)], label: &str) {
         },
     )];
     for (name, image) in images {
-        cases.push((
-            name.clone(),
-            OcrRenderOptions {
-                dpi: 200.0,
-                selection: Some([1].into_iter().collect()),
-                page_images: HashMap::from([(1, image.clone())]),
-                ..Default::default()
-            },
-        ));
+        for use_encoded_images in [false, true] {
+            cases.push((
+                if use_encoded_images {
+                    format!("{name}-encoded-request")
+                } else {
+                    name.clone()
+                },
+                OcrRenderOptions {
+                    dpi: 200.0,
+                    selection: Some([1].into_iter().collect()),
+                    page_images: HashMap::from([(1, image.clone())]),
+                    use_encoded_images,
+                    ..Default::default()
+                },
+            ));
+        }
     }
     let mut samples = vec![Vec::new(); cases.len()];
+    let mut encoded = vec![false; cases.len()];
     for round in 0..24 {
         for offset in 0..cases.len() {
             let index = (round + offset) % cases.len();
             let start = Instant::now();
             let raster = stages::render_for_ocr(&document, &pages, 0, &cases[index].1).unwrap();
             let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            encoded[index] = raster.0[0].encoded_image.is_some();
             black_box(&raster);
             if round >= 4 {
                 samples[index].push(elapsed);
             }
         }
     }
-    for ((name, _), values) in cases.iter().zip(&mut samples) {
+    for (index, ((name, _), values)) in cases.iter().zip(&mut samples).enumerate() {
         values.sort_by(f64::total_cmp);
         println!(
-            "{label}\t{name}\tmedian_ms={:.3}\tmin_ms={:.3}\tn={}",
+            "{label}\t{name}\tpayload={}\tmedian_ms={:.3}\tmin_ms={:.3}\tn={}",
+            if encoded[index] { "encoded" } else { "pixels" },
             values[values.len() / 2],
             values[0],
             values.len()
