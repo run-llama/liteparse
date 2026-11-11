@@ -388,6 +388,24 @@ fn handle_rotation_reading_order(items: &mut [ProjectedTextItem], page_height: f
     items.sort_by(|a, b| a.item.y.total_cmp(&b.item.y));
 }
 
+fn between_text_on_baseline(items: &[ProjectedTextItem], idx: usize) -> bool {
+    let number = &items[idx].item;
+    let mut left = false;
+    let mut right = false;
+    for (j, other) in items.iter().enumerate() {
+        let text = &other.item;
+        if j == idx
+            || text.text.trim().is_empty()
+            || (text.y - number.y).abs() > number.height.min(text.height) * 0.5
+        {
+            continue;
+        }
+        left |= text.x + text.width <= number.x;
+        right |= text.x >= number.x + number.width;
+    }
+    left && right
+}
+
 fn clean_projected_items(items: &mut Vec<ProjectedTextItem>, page_width: f32) {
     // Rust equivalent of cleanRawText margin cleanup.
     // Keep this conservative: only remove likely margin line numbers when they appear isolated.
@@ -445,7 +463,7 @@ fn clean_projected_items(items: &mut Vec<ProjectedTextItem>, page_width: f32) {
             .copied()
             .unwrap_or(false);
 
-        rows.len() < 3 || !likely_margin(item) || line_has_content
+        (rows.len() < 3 && !item.is_margin_line_number) || !likely_margin(item) || line_has_content
     });
 }
 
@@ -554,8 +572,8 @@ fn form_lines(
             .iter()
             .map(|&i| items[i].item.y.round() as i32)
             .collect();
-        if rows.len() >= 3 {
-            for i in margin_idxs {
+        for i in margin_idxs {
+            if rows.len() >= 3 || between_text_on_baseline(items, i) {
                 items[i].is_margin_line_number = true;
             }
         }
@@ -4538,6 +4556,7 @@ fn xy_cut_rec(
     let banner = xy_find_banner_cut(items, &idxs, &bbox, median_h);
     let h = xy_find_best_cut(items, &idxs, &bbox, CutAxis::Horizontal, median_h, figures);
     let v = xy_find_best_cut(items, &idxs, &bbox, CutAxis::Vertical, median_h, figures);
+
     // Fallback column-start histogram. Only consulted when BOTH density
     // cuts returned None — those are the cases (wide-heading filled gutter,
     // figure-straddle layouts) where the column structure is real but the
@@ -5479,6 +5498,25 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert!(lines[0].iter().any(|i| i.item.text == "7.7"));
         assert!(lines[0].iter().all(|i| !i.is_margin_line_number));
+    }
+
+    #[test]
+    fn isolated_gutter_digit_is_still_margin_line_number() {
+        // Two-column paper: "12" alone in the gutter, well clear of both
+        // columns' text, keeps its line-number flag.
+        let mut items = vec![
+            item_at("left column text", 60.0, 100.0, 230.0, 10.0),
+            item_at("12", 310.0, 100.0, 8.0, 10.0),
+            item_at("right column text", 330.0, 100.0, 230.0, 10.0),
+        ];
+        let lines = form_lines(&mut items, 10.0, 10.0, 612.0, true);
+        let flagged: Vec<_> = lines
+            .iter()
+            .flatten()
+            .filter(|i| i.is_margin_line_number)
+            .map(|i| i.item.text.as_str())
+            .collect();
+        assert_eq!(flagged, vec!["12"]);
     }
 
     #[test]
