@@ -260,7 +260,9 @@ pub fn classify_page_with_filters(
         &filtered_owned
     };
 
-    // Detached footer numbers do not participate in body table reconstruction.
+    // A footer can extend a candidate table region and reduce the fraction of
+    // lines that look tabular, rejecting an otherwise valid table. Classify the
+    // body first, then append the detached footer after paragraph stitching.
     let (footer_lines, body_lines): (Vec<_>, Vec<_>) = lines
         .iter()
         .cloned()
@@ -503,6 +505,8 @@ pub fn classify_page_with_filters(
         interrupt_cursor += 1;
     }
 
+    // Appending here gives the footer its own final paragraph, outside table
+    // detection and cross-column paragraph continuation.
     let mut blocks = stitch_regions(blocks, &region_boundaries);
     blocks.extend(footer_lines.into_iter().map(|line| {
         PositionedBlock::new(

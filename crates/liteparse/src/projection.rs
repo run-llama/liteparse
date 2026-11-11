@@ -388,6 +388,43 @@ fn handle_rotation_reading_order(items: &mut [ProjectedTextItem], page_height: f
     items.sort_by(|a, b| a.item.y.total_cmp(&b.item.y));
 }
 
+// Three distinct baselines establish a repeated column. One or two isolated
+// numeric rows can instead be page numbers or table values.
+const MIN_GUTTER_ROWS: usize = 3;
+
+/// Candidate numbers use the existing two-column gutter tolerances: their center
+/// is strictly between 5 pt left and 20 pt right of the page midpoint, and their
+/// width is below 15 pt. These are layout heuristics, not PDF format limits.
+///
+/// Keep one or two ASCII digits, optionally followed by an OCR `O` for zero.
+/// The three-character limit allows that suffix after two digits. Footer
+/// detection below uses the same horizontal band but requires actual digits.
+fn is_gutter_number_candidate(item: &ProjectedTextItem, page_width: f32) -> bool {
+    let center = item.item.x + item.item.width * 0.5;
+    let chars: Vec<_> = item.item.text.trim().chars().collect();
+    if !(center > page_width * 0.5 - 5.0
+        && center < page_width * 0.5 + 20.0
+        && item.item.width < 15.0)
+        || chars.is_empty()
+        || chars.len() > 3
+    {
+        return false;
+    }
+    let mut digits = 0;
+    for (idx, c) in chars.iter().enumerate() {
+        if c.is_ascii_digit() {
+            digits += 1;
+        } else if *c != 'O' || idx != chars.len() - 1 {
+            return false;
+        }
+    }
+    (1..=2).contains(&digits)
+}
+
+/// Text on both sides of a separated number is direct evidence that it occupies
+/// the space between columns, even without a repeated vertical sequence.
+/// Half the smaller glyph height is the existing same-baseline tolerance; using
+/// the smaller height prevents a tall font box from spanning adjacent rows.
 fn between_text_on_baseline(items: &[ProjectedTextItem], idx: usize) -> bool {
     let number = &items[idx].item;
     let mut left = false;
@@ -407,11 +444,8 @@ fn between_text_on_baseline(items: &[ProjectedTextItem], idx: usize) -> bool {
 }
 
 fn clean_projected_items(items: &mut Vec<ProjectedTextItem>, page_width: f32) {
-    // Rust equivalent of cleanRawText margin cleanup.
-    // Keep this conservative: only remove likely margin line numbers when they appear isolated.
-    let midpoint = page_width * 0.5;
-    let margin_left = midpoint - 5.0;
-    let margin_right = midpoint + 20.0;
+    // Apply the same column requirement after grid rendering. Preserve the
+    // earlier baseline-context flag and the existing same-line body-text guard.
 
     let mut has_non_margin_by_line: HashMap<i32, bool> = HashMap::new();
     for item in items.iter() {
@@ -422,35 +456,9 @@ fn clean_projected_items(items: &mut Vec<ProjectedTextItem>, page_width: f32) {
     }
 
     let likely_margin = |item: &ProjectedTextItem| {
-        let center = item.item.x + item.item.width * 0.5;
-        let text = item.item.text.trim();
-        let looks_like_line_number = {
-            let chars: Vec<char> = text.chars().collect();
-            if chars.is_empty() || chars.len() > 3 {
-                false
-            } else {
-                let mut digit_count = 0usize;
-                let mut valid = true;
-                for (idx, c) in chars.iter().enumerate() {
-                    if c.is_ascii_digit() {
-                        digit_count += 1;
-                    } else if *c == 'O' && idx == chars.len() - 1 {
-                        // OCR confusion 0->O
-                    } else {
-                        valid = false;
-                        break;
-                    }
-                }
-                valid && (1..=2).contains(&digit_count)
-            }
-        };
-
-        item.is_margin_line_number
-            || (center > margin_left
-                && center < margin_right
-                && looks_like_line_number
-                && item.item.width < 15.0)
+        item.is_margin_line_number || is_gutter_number_candidate(item, page_width)
     };
+    // Rounded point coordinates count baselines, rather than fragments on one row.
     let rows: HashSet<_> = items
         .iter()
         .filter(|item| likely_margin(item))
@@ -463,7 +471,9 @@ fn clean_projected_items(items: &mut Vec<ProjectedTextItem>, page_width: f32) {
             .copied()
             .unwrap_or(false);
 
-        (rows.len() < 3 && !item.is_margin_line_number) || !likely_margin(item) || line_has_content
+        (rows.len() < MIN_GUTTER_ROWS && !item.is_margin_line_number)
+            || !likely_margin(item)
+            || line_has_content
     });
 }
 
@@ -508,38 +518,15 @@ fn form_lines(
         }
     };
 
-    // For two-column documents, detect and mark margin line numbers
+    // A lone centered footer has the same shape as a gutter number. Require
+    // a repeated column or text on both sides before marking it for removal.
     if page_width > 0.0 {
-        let midpoint = page_width / 2.0;
-        let margin_left = midpoint - 5.0;
-        let margin_right = midpoint + 20.0;
-
-        fn is_margin_line_number_text(text: &str) -> bool {
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
-                return false;
-            }
-            let chars: Vec<char> = trimmed.chars().collect();
-            if chars.len() > 3 {
-                return false;
-            }
-
-            let mut digit_count = 0usize;
-            for (idx, c) in chars.iter().enumerate() {
-                if c.is_ascii_digit() {
-                    digit_count += 1;
-                } else if *c == 'O' && idx == chars.len() - 1 {
-                    // OCR confusion: 0 -> O
-                } else {
-                    return false;
-                }
-            }
-            (1..=2).contains(&digit_count)
-        }
-
         // A real gutter line number is isolated on its baseline. An item that
         // abuts a neighbour is a fragment of a larger token, e.g. the "7" of a
         // table cell PDFium emits as "7" + ".7" (issue #465).
+        /// Preserve the existing token-fragment guard: a quarter glyph height
+        /// admits a tight join, and half a height restricts it to one baseline.
+        /// The 0.5 pt overlap tolerance accommodates rounded box widths.
         fn abuts_neighbour(items: &[ProjectedTextItem], idx: usize) -> bool {
             let it = &items[idx].item;
             let max_gap = it.height * 0.25;
@@ -559,13 +546,7 @@ fn form_lines(
 
         let margin_idxs: Vec<usize> = (0..items.len())
             .filter(|&i| {
-                let item = &items[i];
-                let center = item.item.x + item.item.width / 2.0;
-                center > margin_left
-                    && center < margin_right
-                    && is_margin_line_number_text(&item.item.text)
-                    && item.item.width < 15.0
-                    && !abuts_neighbour(items, i)
+                is_gutter_number_candidate(&items[i], page_width) && !abuts_neighbour(items, i)
             })
             .collect();
         let rows: HashSet<_> = margin_idxs
@@ -573,7 +554,7 @@ fn form_lines(
             .map(|&i| items[i].item.y.round() as i32)
             .collect();
         for i in margin_idxs {
-            if rows.len() >= 3 || between_text_on_baseline(items, i) {
+            if rows.len() >= MIN_GUTTER_ROWS || between_text_on_baseline(items, i) {
                 items[i].is_margin_line_number = true;
             }
         }
@@ -4885,9 +4866,19 @@ fn xy_cut_rec(
     }
 }
 
-// Numeric footer lines are detached from the body region tree and emitted last.
+/// Reserved path for footer lines outside the XY-cut tree. Normal paths contain
+/// child indices; `u16::MAX` marks a detached line while preserving every body
+/// path. Markdown classification recognizes this marker and emits the line last.
 pub(crate) const NUMERIC_FOOTER_PATH: &[u16] = &[u16::MAX];
 
+/// A footer is a centered one- or two-digit item below every other text item.
+/// Use original glyph geometry so grid snapping cannot change this decision.
+///
+/// The lower half limits the search to the page end. In the bottom tenth, the
+/// half-height gap only requires a distinct baseline. Above that band, require
+/// two smaller-glyph heights, leaving a blank line between body and footer.
+/// This stronger gap handles large blank bottom margins without detaching a
+/// nearby numeric table value. These fractions are conservative layout rules.
 fn isolated_numeric_footer(
     items: &[ProjectedTextItem],
     idx: usize,
@@ -4906,8 +4897,6 @@ fn isolated_numeric_footer(
     {
         return false;
     }
-    // A footer above a large blank bottom margin needs a full blank line
-    // between it and the body. Near the physical edge, keep the tighter gap.
     let gap_ratio = if item.orig_y < page_height * 0.9 {
         2.0
     } else {
@@ -4920,7 +4909,11 @@ fn isolated_numeric_footer(
     })
 }
 
-/// Build the page's XY-cut region tree.
+/// Build the page's XY-cut body region tree.
+///
+/// Exclude isolated footer numbers from both density/banner cuts and the root
+/// bounds. One extra bottom line can change which column split is accepted and
+/// alter reading order. Retain the original items for a detached footer line.
 ///
 /// `figures` is an optional set of figure-region bounding rectangles (from
 /// `figure_cluster::detect_figure_rects`); pass `&[]` to disable obstacle
@@ -5098,6 +5091,8 @@ pub(crate) fn build_projected_lines(
         }
     }
 
+    // Reuse the original item to preserve its text and word boxes. Its detached
+    // path lets Markdown keep it outside global and cross-region table passes.
     for idx in 0..items.len() {
         if isolated_numeric_footer(items, idx, page_width, page_height) {
             out.push(build_one_line(

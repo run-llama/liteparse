@@ -125,6 +125,10 @@ pub fn compute_header_footer_set(pages: &[ParsedPage]) -> std::collections::Hash
                 .push((norm, stats.is_chrome_pattern));
         }
     }
+    // Keep the band through lookup: a repeated footer page number normalizes
+    // to `#`, which must not remove a numeric plot label in the header band.
+    // Figure overlap alone is insufficient to exempt text: logos overlap real
+    // running headers too, so those still need repetition-based removal.
     for (band, keys) in qualified {
         let non_pattern = keys.iter().filter(|(_, pat)| !pat).count();
         let letterhead = non_pattern > MAX_REPEATED_LINES_PER_BAND;
@@ -413,8 +417,8 @@ pub fn detect_single_page_chrome(
 }
 
 /// Returns true if `line` (located on `page`) matches the running
-/// header/footer set: the line sits in the top or bottom band AND its
-/// normalized text is in `header_footer`.
+/// header/footer set: both the margin band and normalized text must match.
+/// This preserves top-band content when only footer text repeats, and vice versa.
 pub(super) fn is_header_or_footer(
     line: &ProjectedLine,
     page: &ParsedPage,
