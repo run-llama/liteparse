@@ -568,13 +568,13 @@ fn form_lines(
     const WORD_GAP_ALIGNMENT_TOLERANCE: f32 = 0.1;
 
     /// Rounding widths to whole points inserts spaces at touching glyphs (apparent gaps 0.2-0.5 pt).
-    /// Use original boxes only for upright native items with matching font size/height
-    /// and original y/height within the same 0.1 pt allowance as the continuous merge.
+    /// Use original boxes only for upright native items with matching `font_size` and
+    /// `font_height`, and original y/height within the continuous merge's 0.1 pt allowance.
     ///
     /// Rotated items need their restacked coordinates: at 90 degrees, page x is across
     /// the text, not along it. Scripts need their separate runs and host line bands.
     /// For example, a footnote "a" after "pregnancy" has an original gap of -0.14 pt
-    /// but a rounded gap of +0.27 pt. Using its original box would swallow the marker.
+    /// but a rounded gap of +0.27 pt. Its original box would merge it into "pregnancya".
     ///
     /// OCR boxes describe detections, not adjacent glyphs. Overlapping detections can
     /// leave an original overlap of -0.72 pt but a rounded gap of +0.56 pt after merging.
