@@ -4900,16 +4900,23 @@ fn isolated_numeric_footer(
     if item.is_margin_line_number
         || !(1..=2).contains(&text.len())
         || !text.bytes().all(|b| b.is_ascii_digit())
-        || item.orig_y < page_height * 0.9
+        || item.orig_y < page_height * 0.5
         || center <= page_width * 0.5 - 5.0
         || center >= page_width * 0.5 + 20.0
     {
         return false;
     }
+    // A footer above a large blank bottom margin needs a full blank line
+    // between it and the body. Near the physical edge, keep the tighter gap.
+    let gap_ratio = if item.orig_y < page_height * 0.9 {
+        2.0
+    } else {
+        0.5
+    };
     items.iter().enumerate().all(|(other_idx, other)| {
         other_idx == idx
             || other.item.text.trim().is_empty()
-            || other.orig_y + item.orig_height.min(other.orig_height) * 0.5 < item.orig_y
+            || other.orig_y + item.orig_height.min(other.orig_height) * gap_ratio < item.orig_y
     })
 }
 
@@ -5621,6 +5628,20 @@ mod tests {
             }
             _ => panic!("expected a vertical split, got {:?}", region.kind),
         }
+    }
+
+    #[test]
+    fn footer_above_blank_bottom_margin_is_detached_but_table_value_is_not() {
+        let mut items = vec![
+            item_at("description", 50.0, 560.0, 200.0, 10.0),
+            item_at("67", 294.0, 605.0, 8.0, 10.0),
+        ];
+        let (lines, _) = build_projected_lines(&items, 595.0, 842.0, &[]);
+        assert_eq!(lines.last().unwrap().region_path, NUMERIC_FOOTER_PATH);
+        items[1].orig_y = 575.0;
+        items[1].item.y = 575.0;
+        let (lines, _) = build_projected_lines(&items, 595.0, 842.0, &[]);
+        assert!(lines.iter().all(|l| l.region_path != NUMERIC_FOOTER_PATH));
     }
 
     #[test]
