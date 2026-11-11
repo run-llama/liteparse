@@ -563,11 +563,28 @@ fn form_lines(
         ya.cmp(&yb).then_with(|| a.item.x.total_cmp(&b.item.x))
     });
 
-    // Rotation can restack items onto a new canvas. Original boxes remain in
-    // page coordinates, so only upright items share their original gap axes.
-    fn gap_geometry(item: &ProjectedTextItem) -> (f32, f32) {
-        if item.rotated {
-            (item.item.x, item.item.width)
+    // Original boxes share gap axes for runs with the same size and baseline.
+    // Script runs carry their host's band, so their own geometry stays separate.
+    fn gap_geometry(item: &ProjectedTextItem, other: &ProjectedTextItem) -> (f32, f32) {
+        let a = &item.item;
+        let b = &other.item;
+        let native_mismatch = a.confidence.is_none()
+            && b.confidence.is_none()
+            && (a.font_size != b.font_size
+                || a.font_height != b.font_height
+                || (item.orig_y - other.orig_y).abs() > 0.1
+                || (item.orig_height - other.orig_height).abs() > 0.1);
+        if item.rotated
+            || other.rotated
+            || native_mismatch
+            || a.script_geom.is_some()
+            || b.script_geom.is_some()
+            || a.sup
+            || b.sup
+            || a.sub
+            || b.sub
+        {
+            (a.x, a.width)
         } else {
             (item.orig_x, item.orig_width)
         }
@@ -587,8 +604,8 @@ fn form_lines(
         if (cur.item.y - prev.item.y).abs() <= y_tolerance
             && (cur.item.height - prev.item.height).abs() <= h_tolerance
         {
-            let (prev_x, prev_width) = gap_geometry(prev);
-            let (cur_x, _) = gap_geometry(cur);
+            let (prev_x, prev_width) = gap_geometry(prev, cur);
+            let (cur_x, _) = gap_geometry(cur, prev);
             let delta_x = cur_x - (prev_x + prev_width);
             return (-0.5..0.0).contains(&delta_x) || (0.0..0.1).contains(&delta_x);
         }
@@ -851,9 +868,13 @@ fn form_lines(
                 // builder inserts a space based on `gap > space_threshold`.
                 // Punctuation joins (`Standards`+`.`, `width`+`)`, etc.)
                 // and overlapping/negative-gap merges still go through.
-                let (prev_x, prev_width) = gap_geometry(prev);
-                let (item_x, _) = gap_geometry(&item);
-                let alpha_alpha_gap = item_x - (prev_x + prev_width) > 0.0
+                let (prev_x, prev_width) = gap_geometry(prev, &item);
+                let (item_x, _) = gap_geometry(&item, prev);
+                // OCR detections can overlap after a prior merge. Preserve a
+                // rounded positive gap as a word boundary for OCR pairs.
+                let ocr_gap = (prev.item.confidence.is_some() || item.item.confidence.is_some())
+                    && delta_x > 0.0;
+                let alpha_alpha_gap = (item_x - (prev_x + prev_width) > 0.0 || ocr_gap)
                     && prev
                         .item
                         .text
@@ -6158,6 +6179,62 @@ mod tests {
             parsed[0].text.split_whitespace().collect::<Vec<_>>(),
             ["Financials", "Sector"]
         );
+    }
+
+    #[test]
+    fn overlapping_ocr_detections_keep_the_following_label_separate() {
+        let mut items = vec![
+            item_at("b", 9.12218, 34.08, 5.2812614, 4.799999),
+            item_at("h", 9.12218, 34.56, 3.6008606, 3.8400002),
+            item_at("Label", 13.6832695, 33.36, 60.2544, 5.040001),
+        ];
+        for item in &mut items {
+            item.item.font_name = Some("OCR".into());
+            item.item.font_size = Some(item.item.height);
+            item.item.confidence = Some(0.98);
+            item.item.width = item.item.width.round();
+            item.item.height = item.item.height.round();
+        }
+        let lines = form_lines(&mut items, 5.0, 5.0, 500.0, true);
+        let text: Vec<_> = lines
+            .iter()
+            .flatten()
+            .map(|item| item.item.text.as_str())
+            .collect();
+        assert_eq!(text, ["bh Label"]);
+    }
+
+    #[test]
+    fn original_gap_does_not_silently_join_scripts_or_mismatched_native_runs() {
+        for case in 0..6 {
+            let mut items = vec![
+                item_at("word", 40.0, 100.0, 10.2, 9.0),
+                item_at("a", 50.2, 100.0, 3.3, 9.0),
+            ];
+            let marker = &mut items[1].item;
+            match case {
+                0 => marker.script_geom = Some((98.0, 6.0)),
+                1 => marker.sup = true,
+                2 => marker.sub = true,
+                3 => marker.font_size = Some(6.0),
+                4 => marker.font_height = Some(6.0),
+                _ => {
+                    marker.y += 0.2;
+                    items[1].orig_y += 0.2;
+                }
+            }
+            for item in &mut items {
+                item.item.width = item.item.width.round();
+                item.item.height = item.item.height.round();
+            }
+            let lines = form_lines(&mut items, 5.0, 9.0, 500.0, true);
+            let text: Vec<_> = lines
+                .iter()
+                .flatten()
+                .map(|p| p.item.text.as_str())
+                .collect();
+            assert_eq!(text, ["word a"], "case {case}");
+        }
     }
 
     #[test]
