@@ -403,12 +403,7 @@ fn clean_projected_items(items: &mut Vec<ProjectedTextItem>, page_width: f32) {
         }
     }
 
-    items.retain(|item| {
-        let line_key = item.item.y.round() as i32;
-        let line_has_content = has_non_margin_by_line
-            .get(&line_key)
-            .copied()
-            .unwrap_or(false);
+    let likely_margin = |item: &ProjectedTextItem| {
         let center = item.item.x + item.item.width * 0.5;
         let text = item.item.text.trim();
         let looks_like_line_number = {
@@ -432,13 +427,25 @@ fn clean_projected_items(items: &mut Vec<ProjectedTextItem>, page_width: f32) {
             }
         };
 
-        let likely_margin = item.is_margin_line_number
+        item.is_margin_line_number
             || (center > margin_left
                 && center < margin_right
                 && looks_like_line_number
-                && item.item.width < 15.0);
+                && item.item.width < 15.0)
+    };
+    let rows: HashSet<_> = items
+        .iter()
+        .filter(|item| likely_margin(item))
+        .map(|item| item.item.y.round() as i32)
+        .collect();
+    items.retain(|item| {
+        let line_key = item.item.y.round() as i32;
+        let line_has_content = has_non_margin_by_line
+            .get(&line_key)
+            .copied()
+            .unwrap_or(false);
 
-        !likely_margin || line_has_content
+        rows.len() < 3 || !likely_margin(item) || line_has_content
     });
 }
 
@@ -543,8 +550,14 @@ fn form_lines(
                     && !abuts_neighbour(items, i)
             })
             .collect();
-        for i in margin_idxs {
-            items[i].is_margin_line_number = true;
+        let rows: HashSet<_> = margin_idxs
+            .iter()
+            .map(|&i| items[i].item.y.round() as i32)
+            .collect();
+        if rows.len() >= 3 {
+            for i in margin_idxs {
+                items[i].is_margin_line_number = true;
+            }
         }
     }
 
@@ -5469,22 +5482,28 @@ mod tests {
     }
 
     #[test]
-    fn isolated_gutter_digit_is_still_margin_line_number() {
-        // Two-column paper: "12" alone in the gutter, well clear of both
-        // columns' text, keeps its line-number flag.
-        let mut items = vec![
-            item_at("left column text", 60.0, 100.0, 230.0, 10.0),
-            item_at("12", 310.0, 100.0, 8.0, 10.0),
-            item_at("right column text", 330.0, 100.0, 230.0, 10.0),
-        ];
-        let lines = form_lines(&mut items, 10.0, 10.0, 612.0, true);
-        let flagged: Vec<_> = lines
-            .iter()
-            .flatten()
-            .filter(|i| i.is_margin_line_number)
-            .map(|i| i.item.text.as_str())
-            .collect();
-        assert_eq!(flagged, vec!["12"]);
+    fn lone_footer_number_survives_but_gutter_number_column_is_removed() {
+        for positions in [vec![760.0], vec![100.0, 120.0, 140.0]] {
+            let column = positions.len() >= 3;
+            let mut items = positions
+                .into_iter()
+                .map(|y| item_at("12", 310.0, y, 8.0, 10.0))
+                .collect();
+            let lines = form_lines(&mut items, 10.0, 10.0, 612.0, true);
+            let mut projected: Vec<_> = lines.into_iter().flatten().collect();
+            assert!(
+                projected
+                    .iter()
+                    .all(|item| item.is_margin_line_number == column)
+            );
+            clean_projected_items(&mut projected, 612.0);
+            if column {
+                assert!(projected.is_empty());
+            } else {
+                assert_eq!(projected.len(), 1);
+                assert_eq!(projected[0].item.text, "12");
+            }
+        }
     }
 
     #[test]
