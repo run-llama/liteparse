@@ -75,6 +75,13 @@ pub struct LiteParseConfig {
     /// downstream than risk losing content. Only affects Markdown output.
     #[serde(default)]
     pub keep_headers_footers: bool,
+    /// Keep native text hidden by rectangular clips. By default a word that
+    /// lies entirely outside its clip (e.g. overflow from a fixed-height
+    /// table cell, which would otherwise land in the next row) is dropped;
+    /// a partly visible word is always kept whole. Set `true` to keep all
+    /// text the PDF contains, visible or not.
+    #[serde(default)]
+    pub keep_clipped_text: bool,
     /// Extract all PDF annotations into each parsed page. Default `false`.
     /// This is independent of `extract_links`, which only controls Markdown
     /// link reconstruction.
@@ -321,6 +328,7 @@ impl Default for LiteParseConfig {
             image_output_dir: None,
             extract_links: true,
             keep_headers_footers: false,
+            keep_clipped_text: false,
             extract_annotations: false,
             extract_form_fields: false,
             extract_structure_tree: false,

@@ -518,6 +518,7 @@ Options:
       --extract-vector-graphics Include page vector shapes and merged H/V lines
       --no-links               Emit link anchor text as plain text (no [text](url)) in markdown
       --keep-headers-footers   Keep running headers/footers in markdown (skip repeated-line stripping)
+      --keep-clipped-text      Keep text hidden by clips (e.g. overflow from fixed-height table cells)
       --extract-annotations    Include PDF annotations in page output
       --extract-form-fields    Include AcroForm widget fields and values
       --preserve-small-text    Keep very small text

@@ -38,6 +38,7 @@ export interface LiteParseNativeConfig {
   imageOutputDir?: string;
   extractLinks?: boolean;
   keepHeadersFooters?: boolean;
+  keepClippedText?: boolean;
   extractAnnotations?: boolean;
   extractFormFields?: boolean;
   extractStructureTree?: boolean;
