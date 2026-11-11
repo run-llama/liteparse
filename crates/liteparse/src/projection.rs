@@ -563,6 +563,16 @@ fn form_lines(
         ya.cmp(&yb).then_with(|| a.item.x.total_cmp(&b.item.x))
     });
 
+    // Rotation can restack items onto a new canvas. Original boxes remain in
+    // page coordinates, so only upright items share their original gap axes.
+    fn gap_geometry(item: &ProjectedTextItem) -> (f32, f32) {
+        if item.rotated {
+            (item.item.x, item.item.width)
+        } else {
+            (item.orig_x, item.orig_width)
+        }
+    }
+
     fn can_merge(
         prev: &ProjectedTextItem,
         cur: &ProjectedTextItem,
@@ -577,7 +587,9 @@ fn form_lines(
         if (cur.item.y - prev.item.y).abs() <= y_tolerance
             && (cur.item.height - prev.item.height).abs() <= h_tolerance
         {
-            let delta_x = cur.item.x - (prev.item.x + prev.item.width);
+            let (prev_x, prev_width) = gap_geometry(prev);
+            let (cur_x, _) = gap_geometry(cur);
+            let delta_x = cur_x - (prev_x + prev_width);
             return (-0.5..0.0).contains(&delta_x) || (0.0..0.1).contains(&delta_x);
         }
 
@@ -795,7 +807,9 @@ fn form_lines(
                 let both_are_numbers = looks_like_table_number(&prev.item.text)
                     && looks_like_table_number(&item.item.text);
 
-                let delta_x = item.item.x - prev.item.x - prev.item.width;
+                let (prev_x, prev_width) = gap_geometry(prev);
+                let (item_x, _) = gap_geometry(&item);
+                let delta_x = item_x - (prev_x + prev_width);
                 // Don't merge items with noticeably different y positions (>1.5px).
                 // Items on the same baseline typically differ by <0.5px.
                 let y_diff = (item.item.y - prev.item.y).abs();
@@ -874,7 +888,7 @@ fn form_lines(
                 }
 
                 let prev_len = prev.item.text.chars().count().max(1) as f32;
-                let avg_char_width = prev.item.width / prev_len;
+                let avg_char_width = prev_width / prev_len;
                 if y_compatible && !both_are_numbers && delta_x < avg_char_width {
                     if keep_pieces {
                         record_style_piece(&mut prev.item, &item.item);
@@ -6096,13 +6110,54 @@ mod tests {
         let item = parsed[0]
             .text_items
             .iter()
-            .find(|item| item.text == "ab cd")
+            .find(|item| item.text == "abcd")
             .expect("merged continuous text item");
 
         assert!((item.x - 40.0).abs() < 0.001);
         assert!((item.y - 100.0).abs() < 0.001);
         assert!((item.width - 22.5).abs() < 0.01);
         assert!((item.height - 9.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn projection_joins_glyph_residuals_and_preserves_word_gaps() {
+        let mut page = Page {
+            page_number: 1,
+            page_width: 612.0,
+            page_height: 792.0,
+            ocr_deskew: None,
+            page_label: None,
+            content_bounds: None,
+            text_items: Vec::new(),
+            graphics: Vec::new(),
+            vector_graphics: None,
+            struct_nodes: Vec::new(),
+            image_refs: Vec::new(),
+            annotations: None,
+            form_fields: None,
+            structure_tree: None,
+        };
+        let mut x = 40.0;
+        for (text, width, gap) in [
+            ("F", 4.26848, 0.006),
+            ("inancials", 28.2, 1.95),
+            ("Sector", 20.4, 0.0),
+        ] {
+            page.text_items.push(TextItem {
+                text: text.into(),
+                x,
+                y: 100.0,
+                width,
+                height: 6.9975,
+                ..Default::default()
+            });
+            x += width + gap;
+        }
+        let parsed = project_pages_to_grid(vec![page]);
+        assert_eq!(
+            parsed[0].text.split_whitespace().collect::<Vec<_>>(),
+            ["Financials", "Sector"]
+        );
     }
 
     #[test]
