@@ -460,7 +460,7 @@ mod tests {
         let mut pages: Vec<_> = (1..=3)
             .map(|n| header_footer_page(n, "", &n.to_string(), "Body text."))
             .collect();
-        let mut axis = line("20", 350.0, 80.0, 5.0, 36.0);
+        let mut axis = line("20", 350.0, 10.0, 5.0, 36.0);
         axis.in_figure = true;
         pages[2].projected_lines.push(axis);
         let set = compute_header_footer_set(&pages);
