@@ -260,6 +260,13 @@ pub fn classify_page_with_filters(
         &filtered_owned
     };
 
+    // Detached footer numbers do not participate in body table reconstruction.
+    let (footer_lines, body_lines): (Vec<_>, Vec<_>) = lines
+        .iter()
+        .cloned()
+        .partition(|line| line.region_path == crate::projection::NUMERIC_FOOTER_PATH);
+    let lines = body_lines.as_slice();
+
     // Global ruled-table pass. `detect_ruled_tables` is otherwise called per
     // xy_cut leaf, but a ruled table whose rows scatter across several leaves
     // never has its full text in any single leaf and gets rejected as
@@ -496,7 +503,18 @@ pub fn classify_page_with_filters(
         interrupt_cursor += 1;
     }
 
-    stitch_regions(blocks, &region_boundaries)
+    let mut blocks = stitch_regions(blocks, &region_boundaries);
+    blocks.extend(footer_lines.into_iter().map(|line| {
+        PositionedBlock::new(
+            Block::Paragraph {
+                text: line.text,
+                bold: false,
+                italic: false,
+            },
+            Some(line.bbox),
+        )
+    }));
+    blocks
 }
 
 /// Turn an interruption into a positioned block. Both the page-level walker

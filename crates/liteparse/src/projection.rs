@@ -3429,12 +3429,18 @@ fn xy_item_weight(it: &TextItem) -> f32 {
     it.text.chars().count().max(1) as f32
 }
 
-fn xy_root_bbox(items: &[ProjectedTextItem], page_width: f32, page_height: f32) -> Rect {
+fn xy_root_bbox(
+    items: &[ProjectedTextItem],
+    indices: &[usize],
+    page_width: f32,
+    page_height: f32,
+) -> Rect {
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;
     let mut max_x = f32::NEG_INFINITY;
     let mut max_y = f32::NEG_INFINITY;
-    for it in items {
+    for &idx in indices {
+        let it = &items[idx];
         if it.item.text.is_empty() {
             continue;
         }
@@ -4879,6 +4885,34 @@ fn xy_cut_rec(
     }
 }
 
+// Numeric footer lines are detached from the body region tree and emitted last.
+pub(crate) const NUMERIC_FOOTER_PATH: &[u16] = &[u16::MAX];
+
+fn isolated_numeric_footer(
+    items: &[ProjectedTextItem],
+    idx: usize,
+    page_width: f32,
+    page_height: f32,
+) -> bool {
+    let item = &items[idx];
+    let text = item.item.text.trim();
+    let center = item.orig_x + item.orig_width * 0.5;
+    if item.is_margin_line_number
+        || !(1..=2).contains(&text.len())
+        || !text.bytes().all(|b| b.is_ascii_digit())
+        || item.orig_y < page_height * 0.9
+        || center <= page_width * 0.5 - 5.0
+        || center >= page_width * 0.5 + 20.0
+    {
+        return false;
+    }
+    items.iter().enumerate().all(|(other_idx, other)| {
+        other_idx == idx
+            || other.item.text.trim().is_empty()
+            || other.orig_y + item.orig_height.min(other.orig_height) * 0.5 < item.orig_y
+    })
+}
+
 /// Build the page's XY-cut region tree.
 ///
 /// `figures` is an optional set of figure-region bounding rectangles (from
@@ -4893,7 +4927,9 @@ pub(crate) fn xy_cut(
     let all: Vec<usize> = items
         .iter()
         .enumerate()
-        .filter(|(_, it)| !it.item.text.is_empty())
+        .filter(|(i, it)| {
+            !it.item.text.is_empty() && !isolated_numeric_footer(items, *i, page_width, page_height)
+        })
         .map(|(i, _)| i)
         .collect();
     if all.is_empty() {
@@ -4909,7 +4945,7 @@ pub(crate) fn xy_cut(
             },
         };
     }
-    let bbox = xy_root_bbox(items, page_width, page_height);
+    let bbox = xy_root_bbox(items, &all, page_width, page_height);
     let median_h = xy_median_line_height(items, &all);
     xy_cut_rec(items, all, bbox, 0, false, median_h, figures)
 }
@@ -5049,6 +5085,18 @@ pub(crate) fn build_projected_lines(
                 items,
                 &current,
                 path.clone(),
+                &heading_excl_figures,
+                page_has_native_text,
+            ));
+        }
+    }
+
+    for idx in 0..items.len() {
+        if isolated_numeric_footer(items, idx, page_width, page_height) {
+            out.push(build_one_line(
+                items,
+                &[idx],
+                NUMERIC_FOOTER_PATH.to_vec(),
                 &heading_excl_figures,
                 page_has_native_text,
             ));
@@ -5576,6 +5624,42 @@ mod tests {
     }
 
     #[test]
+    fn isolated_footer_preserves_body_regions_and_lines() {
+        let mut items = Vec::new();
+        for row in 0..5 {
+            let y = 100.0 + row as f32 * 14.0;
+            items.push(item_at("left column", 50.0, y, 200.0, 10.0));
+            items.push(item_at("right column", 350.0, y, 200.0, 10.0));
+        }
+        let (body_lines, body_regions) = build_projected_lines(&items, 612.0, 792.0, &[]);
+        let mut footer_item = item_at("12", 304.0, 760.0, 8.0, 10.0);
+        footer_item.item.words.push(WordBox {
+            text: "12".into(),
+            x: 304.0,
+            y: 760.0,
+            width: 8.0,
+            height: 10.0,
+        });
+        items.push(footer_item);
+        let (lines, regions) = build_projected_lines(&items, 612.0, 792.0, &[]);
+        assert_eq!(
+            serde_json::to_value(regions).unwrap(),
+            serde_json::to_value(body_regions).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&lines[..body_lines.len()]).unwrap(),
+            serde_json::to_value(body_lines).unwrap()
+        );
+        let footer = lines.last().unwrap();
+        assert_eq!(footer.text, "12");
+        assert_eq!(footer.region_path, NUMERIC_FOOTER_PATH);
+        assert_eq!(
+            serde_json::to_value(&footer.spans[0]).unwrap(),
+            serde_json::to_value(&items.last().unwrap().item).unwrap()
+        );
+    }
+
+    #[test]
     fn xy_cut_returns_leaf_on_single_column_prose() {
         // Tight single-column text — no valley wide enough to cut.
         let items: Vec<_> = (0..8)
@@ -5830,7 +5914,7 @@ mod tests {
         }
 
         let all: Vec<usize> = (0..items.len()).collect();
-        let bbox = xy_root_bbox(&items, 612.0, 792.0);
+        let bbox = xy_root_bbox(&items, &all, 612.0, 792.0);
         let median_h = xy_median_line_height(&items, &all);
         let mut root_tabular = false;
         assert!(xy_find_column_cut(&items, &all, &bbox, median_h, &mut root_tabular).is_none());
