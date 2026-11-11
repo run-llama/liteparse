@@ -563,30 +563,30 @@ fn form_lines(
         ya.cmp(&yb).then_with(|| a.item.x.total_cmp(&b.item.x))
     });
 
-    // Original boxes share gap axes for runs with the same size and baseline.
-    // Script runs carry their host's band, so their own geometry stays separate.
-    fn gap_geometry(item: &ProjectedTextItem, other: &ProjectedTextItem) -> (f32, f32) {
-        let a = &item.item;
-        let b = &other.item;
-        let native_mismatch = a.confidence.is_none()
-            && b.confidence.is_none()
-            && (a.font_size != b.font_size
-                || a.font_height != b.font_height
-                || (item.orig_y - other.orig_y).abs() > 0.1
-                || (item.orig_height - other.orig_height).abs() > 0.1);
-        if item.rotated
-            || other.rotated
-            || native_mismatch
-            || a.script_geom.is_some()
-            || b.script_geom.is_some()
-            || a.sup
-            || b.sup
-            || a.sub
-            || b.sub
-        {
-            (a.x, a.width)
+    // Allow small baseline and box-height drift within the same native text run.
+    const WORD_GAP_ALIGNMENT_TOLERANCE: f32 = 0.1;
+
+    /// Select original geometry for aligned native runs and unscripted OCR detections.
+    /// Scripts use host bands; OCR's separate rounded-gap guard preserves its boundaries.
+    fn measures_unrounded(a: &ProjectedTextItem, b: &ProjectedTextItem) -> bool {
+        [a, b]
+            .into_iter()
+            .all(|p| !p.rotated && !(p.item.sup || p.item.sub || p.item.script_geom.is_some()))
+            && (a.item.confidence.is_some()
+                || b.item.confidence.is_some()
+                || (a.item.font_size == b.item.font_size
+                    && a.item.font_height == b.item.font_height
+                    && (a.orig_y - b.orig_y).abs() <= WORD_GAP_ALIGNMENT_TOLERANCE
+                    && (a.orig_height - b.orig_height).abs() <= WORD_GAP_ALIGNMENT_TOLERANCE))
+    }
+
+    /// Measure the gap to the next item using the selected geometry.
+    /// Script and rotated runs keep grid coordinates; OCR keeps its rounded boundary guard.
+    fn word_gap(prev: &ProjectedTextItem, cur: &ProjectedTextItem) -> f32 {
+        if measures_unrounded(prev, cur) {
+            cur.orig_x - (prev.orig_x + prev.orig_width)
         } else {
-            (item.orig_x, item.orig_width)
+            cur.item.x - (prev.item.x + prev.item.width)
         }
     }
 
@@ -604,9 +604,7 @@ fn form_lines(
         if (cur.item.y - prev.item.y).abs() <= y_tolerance
             && (cur.item.height - prev.item.height).abs() <= h_tolerance
         {
-            let (prev_x, prev_width) = gap_geometry(prev, cur);
-            let (cur_x, _) = gap_geometry(cur, prev);
-            let delta_x = cur_x - (prev_x + prev_width);
+            let delta_x = word_gap(prev, cur);
             return (-0.5..0.0).contains(&delta_x) || (0.0..0.1).contains(&delta_x);
         }
 
@@ -868,13 +866,12 @@ fn form_lines(
                 // builder inserts a space based on `gap > space_threshold`.
                 // Punctuation joins (`Standards`+`.`, `width`+`)`, etc.)
                 // and overlapping/negative-gap merges still go through.
-                let (prev_x, prev_width) = gap_geometry(prev, &item);
-                let (item_x, _) = gap_geometry(&item, prev);
+                let gap = word_gap(prev, &item);
                 // OCR detections can overlap after a prior merge. Preserve a
                 // rounded positive gap as a word boundary for OCR pairs.
                 let ocr_gap = (prev.item.confidence.is_some() || item.item.confidence.is_some())
                     && delta_x > 0.0;
-                let alpha_alpha_gap = (item_x - (prev_x + prev_width) > 0.0 || ocr_gap)
+                let alpha_alpha_gap = (gap > 0.0 || ocr_gap)
                     && prev
                         .item
                         .text
