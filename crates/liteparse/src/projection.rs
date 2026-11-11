@@ -807,9 +807,7 @@ fn form_lines(
                 let both_are_numbers = looks_like_table_number(&prev.item.text)
                     && looks_like_table_number(&item.item.text);
 
-                let (prev_x, prev_width) = gap_geometry(prev);
-                let (item_x, _) = gap_geometry(&item);
-                let delta_x = item_x - (prev_x + prev_width);
+                let delta_x = item.item.x - prev.item.x - prev.item.width;
                 // Don't merge items with noticeably different y positions (>1.5px).
                 // Items on the same baseline typically differ by <0.5px.
                 let y_diff = (item.item.y - prev.item.y).abs();
@@ -853,7 +851,9 @@ fn form_lines(
                 // builder inserts a space based on `gap > space_threshold`.
                 // Punctuation joins (`Standards`+`.`, `width`+`)`, etc.)
                 // and overlapping/negative-gap merges still go through.
-                let alpha_alpha_gap = delta_x > 0.0
+                let (prev_x, prev_width) = gap_geometry(prev);
+                let (item_x, _) = gap_geometry(&item);
+                let alpha_alpha_gap = item_x - (prev_x + prev_width) > 0.0
                     && prev
                         .item
                         .text
@@ -888,7 +888,7 @@ fn form_lines(
                 }
 
                 let prev_len = prev.item.text.chars().count().max(1) as f32;
-                let avg_char_width = prev_width / prev_len;
+                let avg_char_width = prev.item.width / prev_len;
                 if y_compatible && !both_are_numbers && delta_x < avg_char_width {
                     if keep_pieces {
                         record_style_piece(&mut prev.item, &item.item);
