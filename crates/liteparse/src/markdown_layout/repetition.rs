@@ -50,7 +50,8 @@ pub(super) fn normalize_for_repetition(s: &str) -> String {
     out
 }
 
-/// Cross-page repetition detector. Returns the set of normalized strings that
+/// Cross-page repetition detector. Returns normalized strings prefixed with
+/// `h:` or `f:` to retain their margin band. Each key must
 /// appear in the top or bottom band of ≥ `HEADER_FOOTER_MIN_FRACTION` of
 /// pages (capped below by `HEADER_FOOTER_MIN_PAGES`). The caller uses this to
 /// filter `ProjectedLine`s before classification.
@@ -83,9 +84,6 @@ pub fn compute_header_footer_set(pages: &[ParsedPage]) -> std::collections::Hash
         let header_cutoff = page.page_height * HEADER_BAND_FRACTION;
         let footer_cutoff = page.page_height * (1.0 - FOOTER_BAND_FRACTION);
         for line in &page.projected_lines {
-            if line.in_figure {
-                continue;
-            }
             let text = line.text.trim();
             if text.is_empty() {
                 continue;
@@ -127,12 +125,12 @@ pub fn compute_header_footer_set(pages: &[ParsedPage]) -> std::collections::Hash
                 .push((norm, stats.is_chrome_pattern));
         }
     }
-    for keys in qualified.into_values() {
+    for (band, keys) in qualified {
         let non_pattern = keys.iter().filter(|(_, pat)| !pat).count();
         let letterhead = non_pattern > MAX_REPEATED_LINES_PER_BAND;
         for (norm, is_pattern) in keys {
             if is_pattern || !letterhead {
-                set.insert(norm);
+                set.insert(format!("{band}:{norm}"));
             }
         }
     }
@@ -422,17 +420,15 @@ pub(super) fn is_header_or_footer(
     page: &ParsedPage,
     header_footer: &std::collections::HashSet<String>,
 ) -> bool {
-    if header_footer.is_empty() || line.in_figure {
+    if header_footer.is_empty() {
         return false;
     }
     let header_cutoff = page.page_height * HEADER_BAND_FRACTION;
     let footer_cutoff = page.page_height * (1.0 - FOOTER_BAND_FRACTION);
-    let in_band = line.bbox.y <= header_cutoff || line.bbox.y + line.bbox.height >= footer_cutoff;
-    if !in_band {
-        return false;
-    }
     let norm = normalize_for_repetition(line.text.trim());
-    header_footer.contains(&norm)
+    (line.bbox.y <= header_cutoff && header_footer.contains(&format!("h:{norm}")))
+        || (line.bbox.y + line.bbox.height >= footer_cutoff
+            && header_footer.contains(&format!("f:{norm}")))
 }
 
 #[cfg(test)]
@@ -455,12 +451,12 @@ mod tests {
             header_footer_page(3, "Acme Confidential", "Page 3 of 3", "Body three."),
         ];
         let set = compute_header_footer_set(&pages);
-        assert!(set.contains("acme confidential"));
-        assert!(set.contains("page # of #"));
+        assert!(set.contains("h:acme confidential"));
+        assert!(set.contains("f:page # of #"));
     }
 
     #[test]
-    fn repeating_page_numbers_do_not_remove_plot_axis_labels() {
+    fn footer_repetition_does_not_remove_a_top_band_axis_label() {
         let mut pages: Vec<_> = (1..=3)
             .map(|n| header_footer_page(n, "", &n.to_string(), "Body text."))
             .collect();
@@ -468,7 +464,7 @@ mod tests {
         axis.in_figure = true;
         pages[2].projected_lines.push(axis);
         let set = compute_header_footer_set(&pages);
-        assert!(set.contains("#"));
+        assert!(set.contains("f:#"));
         assert!(!is_header_or_footer(
             pages[2].projected_lines.last().unwrap(),
             &pages[2],
@@ -477,6 +473,22 @@ mod tests {
         assert!(is_header_or_footer(
             &pages[2].projected_lines[2],
             &pages[2],
+            &set
+        ));
+    }
+
+    #[test]
+    fn repeating_headers_inside_graphic_bounds_are_still_removed() {
+        let mut pages: Vec<_> = (1..=3)
+            .map(|n| header_footer_page(n, "Quarterly summary", "", "Body text."))
+            .collect();
+        for page in &mut pages {
+            page.projected_lines[0].in_figure = true;
+        }
+        let set = compute_header_footer_set(&pages);
+        assert!(is_header_or_footer(
+            &pages[0].projected_lines[0],
+            &pages[0],
             &set
         ));
     }
@@ -503,7 +515,7 @@ mod tests {
         }
         let set = compute_header_footer_set(&pages);
         // "shared body text" sits mid-page — never matched.
-        assert!(!set.contains("shared body text"));
+        assert!(!set.contains("h:shared body text"));
     }
 
     use super::super::test_helpers::{line, page};
@@ -555,9 +567,9 @@ mod tests {
         ];
         let pages = vec![letterhead_page(1, &head), letterhead_page(2, &head)];
         let set = compute_header_footer_set(&pages);
-        assert!(set.contains("page # of #"));
-        assert!(!set.contains("acme supply co"));
-        assert!(!set.contains("terms net #"));
+        assert!(set.contains("h:page # of #"));
+        assert!(!set.contains("h:acme supply co"));
+        assert!(!set.contains("h:terms net #"));
     }
 
     #[test]
@@ -567,9 +579,9 @@ mod tests {
         let head = ["Acme Corp", "Quarterly Report", "Confidential"];
         let pages = vec![letterhead_page(1, &head), letterhead_page(2, &head)];
         let set = compute_header_footer_set(&pages);
-        assert!(set.contains("acme corp"));
-        assert!(set.contains("quarterly report"));
-        assert!(set.contains("confidential"));
+        assert!(set.contains("h:acme corp"));
+        assert!(set.contains("h:quarterly report"));
+        assert!(set.contains("h:confidential"));
     }
 
     // ----- single-page chrome detector tests -----
