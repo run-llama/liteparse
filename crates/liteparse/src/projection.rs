@@ -567,7 +567,7 @@ fn form_lines(
     // This is an alignment limit, separate from the horizontal gap threshold below.
     const WORD_GAP_ALIGNMENT_TOLERANCE: f32 = 0.1;
 
-    /// Grid rounding can make touching glyphs look 0.2-0.5 pt apart and insert a space.
+    /// Rounding widths to whole points inserts spaces at touching glyphs (apparent gaps 0.2-0.5 pt).
     /// Use original boxes only for upright native items with matching font size/height
     /// and original y/height within the same 0.1 pt allowance as the continuous merge.
     ///
@@ -608,8 +608,8 @@ fn form_lines(
         y_tolerance: f32,
         h_tolerance: f32,
     ) -> bool {
-        // a super/subscript run shares its host's band (`TextItem::script_geom`) but must reach
-        // script flagging on its own; the later word merge joins it, keeping it as a piece
+        // A script run shares its host's line band. Keep it separate until script flagging
+        // can preserve it as a styled piece, even when its grid gap is zero.
         if prev.item.script_geom.is_some() || cur.item.script_geom.is_some() {
             return false;
         }
