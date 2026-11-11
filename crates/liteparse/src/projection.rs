@@ -563,25 +563,37 @@ fn form_lines(
         ya.cmp(&yb).then_with(|| a.item.x.total_cmp(&b.item.x))
     });
 
-    // Allow small baseline and box-height drift within the same native text run.
+    // Reuse the continuous merge's existing 0.1 pt y/height allowance to identify one run.
+    // This is an alignment limit, separate from the horizontal gap threshold below.
     const WORD_GAP_ALIGNMENT_TOLERANCE: f32 = 0.1;
 
-    /// Select original geometry for aligned native runs and unscripted OCR detections.
-    /// Scripts use host bands; OCR's separate rounded-gap guard preserves its boundaries.
+    /// Grid rounding can make touching glyphs look 0.2-0.5 pt apart and insert a space.
+    /// Use original boxes only for upright native items with matching font size/height
+    /// and original y/height within the same 0.1 pt allowance as the continuous merge.
+    ///
+    /// Rotated items need their restacked coordinates: at 90 degrees, page x is across
+    /// the text, not along it. Scripts need their separate runs and host line bands.
+    /// For example, a footnote "a" after "pregnancy" has an original gap of -0.14 pt
+    /// but a rounded gap of +0.27 pt. Using its original box would swallow the marker.
+    ///
+    /// OCR boxes describe detections, not adjacent glyphs. Overlapping detections can
+    /// leave an original overlap of -0.72 pt but a rounded gap of +0.56 pt after merging.
+    /// Keep grid geometry whenever either item is OCR, including mixed native/OCR pairs,
+    /// so both merge checks preserve existing OCR boundaries without a separate guard.
     fn measures_unrounded(a: &ProjectedTextItem, b: &ProjectedTextItem) -> bool {
-        [a, b]
-            .into_iter()
-            .all(|p| !p.rotated && !(p.item.sup || p.item.sub || p.item.script_geom.is_some()))
-            && (a.item.confidence.is_some()
-                || b.item.confidence.is_some()
-                || (a.item.font_size == b.item.font_size
-                    && a.item.font_height == b.item.font_height
-                    && (a.orig_y - b.orig_y).abs() <= WORD_GAP_ALIGNMENT_TOLERANCE
-                    && (a.orig_height - b.orig_height).abs() <= WORD_GAP_ALIGNMENT_TOLERANCE))
+        [a, b].into_iter().all(|p| {
+            !p.rotated
+                && p.item.confidence.is_none()
+                && !(p.item.sup || p.item.sub || p.item.script_geom.is_some())
+        }) && a.item.font_size == b.item.font_size
+            && a.item.font_height == b.item.font_height
+            && (a.orig_y - b.orig_y).abs() <= WORD_GAP_ALIGNMENT_TOLERANCE
+            && (a.orig_height - b.orig_height).abs() <= WORD_GAP_ALIGNMENT_TOLERANCE
     }
 
-    /// Measure the gap to the next item using the selected geometry.
-    /// Script and rotated runs keep grid coordinates; OCR keeps its rounded boundary guard.
+    /// Measure the horizontal gap before whole-point rounding for compatible native runs.
+    /// OCR, rotated text, scripts and mismatched runs keep the existing grid gap for the
+    /// detection boundaries, reading direction and marker separation explained above.
     fn word_gap(prev: &ProjectedTextItem, cur: &ProjectedTextItem) -> f32 {
         if measures_unrounded(prev, cur) {
             cur.orig_x - (prev.orig_x + prev.orig_width)
@@ -605,6 +617,9 @@ fn form_lines(
             && (cur.item.height - prev.item.height).abs() <= h_tolerance
         {
             let delta_x = word_gap(prev, cur);
+            // These overlap/gap limits predate the unrounded gap check. The 0.1 pt
+            // positive limit admits measured glyph residuals up to 0.007 pt while
+            // leaving measured word gaps of at least 1.3 pt separate.
             return (-0.5..0.0).contains(&delta_x) || (0.0..0.1).contains(&delta_x);
         }
 
@@ -867,11 +882,7 @@ fn form_lines(
                 // Punctuation joins (`Standards`+`.`, `width`+`)`, etc.)
                 // and overlapping/negative-gap merges still go through.
                 let gap = word_gap(prev, &item);
-                // OCR detections can overlap after a prior merge. Preserve a
-                // rounded positive gap as a word boundary for OCR pairs.
-                let ocr_gap = (prev.item.confidence.is_some() || item.item.confidence.is_some())
-                    && delta_x > 0.0;
-                let alpha_alpha_gap = (gap > 0.0 || ocr_gap)
+                let alpha_alpha_gap = gap > 0.0
                     && prev
                         .item
                         .text
@@ -6199,6 +6210,29 @@ mod tests {
             .map(|item| item.item.text.as_str())
             .collect();
         assert_eq!(text, ["bh Label"]);
+    }
+
+    #[test]
+    fn ocr_and_mixed_pairs_keep_rounded_gaps_in_both_merge_checks() {
+        for confidences in [
+            (Some(0.98), Some(0.98)),
+            (Some(0.98), None),
+            (None, Some(0.98)),
+        ] {
+            let mut items = vec![
+                item_at("first", 40.0, 100.0, 10.4, 9.0),
+                item_at("second", 50.2, 100.0, 12.3, 9.0),
+            ];
+            items[0].item.confidence = confidences.0;
+            items[1].item.confidence = confidences.1;
+            for item in &mut items {
+                item.item.width = item.item.width.round();
+            }
+            let lines = form_lines(&mut items, 5.0, 9.0, 500.0, true);
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0].len(), 1);
+            assert_eq!(lines[0][0].item.text, "first second");
+        }
     }
 
     #[test]
