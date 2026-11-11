@@ -83,6 +83,9 @@ pub fn compute_header_footer_set(pages: &[ParsedPage]) -> std::collections::Hash
         let header_cutoff = page.page_height * HEADER_BAND_FRACTION;
         let footer_cutoff = page.page_height * (1.0 - FOOTER_BAND_FRACTION);
         for line in &page.projected_lines {
+            if line.in_figure {
+                continue;
+            }
             let text = line.text.trim();
             if text.is_empty() {
                 continue;
@@ -419,7 +422,7 @@ pub(super) fn is_header_or_footer(
     page: &ParsedPage,
     header_footer: &std::collections::HashSet<String>,
 ) -> bool {
-    if header_footer.is_empty() {
+    if header_footer.is_empty() || line.in_figure {
         return false;
     }
     let header_cutoff = page.page_height * HEADER_BAND_FRACTION;
@@ -454,6 +457,28 @@ mod tests {
         let set = compute_header_footer_set(&pages);
         assert!(set.contains("acme confidential"));
         assert!(set.contains("page # of #"));
+    }
+
+    #[test]
+    fn repeating_page_numbers_do_not_remove_plot_axis_labels() {
+        let mut pages: Vec<_> = (1..=3)
+            .map(|n| header_footer_page(n, "", &n.to_string(), "Body text."))
+            .collect();
+        let mut axis = line("20", 350.0, 80.0, 5.0, 36.0);
+        axis.in_figure = true;
+        pages[2].projected_lines.push(axis);
+        let set = compute_header_footer_set(&pages);
+        assert!(set.contains("#"));
+        assert!(!is_header_or_footer(
+            pages[2].projected_lines.last().unwrap(),
+            &pages[2],
+            &set
+        ));
+        assert!(is_header_or_footer(
+            &pages[2].projected_lines[2],
+            &pages[2],
+            &set
+        ));
     }
 
     #[test]
