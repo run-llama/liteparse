@@ -6294,8 +6294,8 @@ mod tests {
     fn decimal_continuation_preserves_styled_text() {
         let mut items = vec![
             item_at("Reference", 10.0, 100.0, 29.8, 9.0),
-            item_at("doi.org/10", 40.0, 100.0, 39.8, 9.0),
-            item_at(".1234/example", 80.0, 100.0, 40.0, 9.0),
+            item_at("doi.org/10", 40.2, 100.0, 39.8, 9.0),
+            item_at(".1234/example", 80.4, 100.0, 40.0, 9.0),
         ];
         items[1].item.underline = true;
         items[2].item.underline = true;
