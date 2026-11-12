@@ -3271,8 +3271,8 @@ fn mark_script_items(line: &mut [ProjectedTextItem]) {
     }
 }
 
-/// Keep every merged character in the pieces Markdown renders. A silent LTR
-/// continuation with the same style stays in one piece, preserving URLs and numbers.
+/// Keep every merged character in the pieces Markdown renders. Leading-dot
+/// continuations with the same style stay in one piece, preserving URLs and numbers.
 fn record_style_piece(prev: &mut TextItem, next: &TextItem, sep: &str) {
     if prev.style_pieces.is_empty() {
         let mut first = prev.clone();
@@ -3288,6 +3288,7 @@ fn record_style_piece(prev: &mut TextItem, next: &TextItem, sep: &str) {
     };
     if let (Some(last), Some(first)) = (prev.style_pieces.last_mut(), pieces.first())
         && sep.is_empty()
+        && first.text.starts_with('.')
         && same_emphasis(last, first)
         && last.link == first.link
         && !crate::bidi::is_rtl_pieces([last.text.as_str(), first.text.as_str()])
