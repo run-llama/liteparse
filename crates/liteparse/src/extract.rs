@@ -3751,10 +3751,11 @@ impl SegmentBuilder {
             self.rtl_spans
                 .push((self.text.len(), vp_loose.left, vp_loose.right));
         }
-        // Clamp pathological loose vertical extent (e.g. Cambria Math tall
-        // metrics) to the ink box so one glyph doesn't stretch the item
-        // over adjacent lines (#486).
-        let (eff_top, eff_bottom) = clamped_vertical_bounds(vp_loose, vp_strict);
+        // A run's first glyph keeps its loose box even when its metrics are
+        // pathological: clamped to ink, a lone period or math mark would drop
+        // out of the line its neighbours' (equally tall) boxes define. Glyphs
+        // joining a run are clamped in `push_char` (#486).
+        let (eff_top, eff_bottom) = (vp_loose.top, vp_loose.bottom);
         self.vp_left = vp_loose.left;
         self.vp_right = vp_loose.right;
         self.vp_top = eff_top;
