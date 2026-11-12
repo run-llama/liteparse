@@ -242,22 +242,7 @@ pub fn classify_page_with_filters(
     // table detection (a repeating two-column footer would otherwise look
     // like a 2-row table) or paragraph grouping.
 
-    // A footer can extend a candidate table region and reduce the fraction of
-    // lines that look tabular, rejecting an otherwise valid table. Classify the
-    // body first, then append the detached footer after paragraph stitching.
-    let footer_lines: Vec<_> = page
-        .projected_lines
-        .iter()
-        .enumerate()
-        .filter(|(idx, line)| {
-            !chrome_indices.contains(idx)
-                && line.region_path == crate::projection::NUMERIC_FOOTER_PATH
-                && !is_header_or_footer(line, page, header_footer)
-        })
-        .map(|(_, line)| line)
-        .collect();
-    let need_filter =
-        !header_footer.is_empty() || !chrome_indices.is_empty() || !footer_lines.is_empty();
+    let need_filter = !header_footer.is_empty() || !chrome_indices.is_empty();
     let filtered_owned: Vec<ProjectedLine> = if !need_filter {
         Vec::new()
     } else {
@@ -265,9 +250,7 @@ pub fn classify_page_with_filters(
             .iter()
             .enumerate()
             .filter(|(idx, l)| {
-                !chrome_indices.contains(idx)
-                    && !is_header_or_footer(l, page, header_footer)
-                    && l.region_path != crate::projection::NUMERIC_FOOTER_PATH
+                !chrome_indices.contains(idx) && !is_header_or_footer(l, page, header_footer)
             })
             .map(|(_, l)| l.clone())
             .collect()
@@ -277,6 +260,16 @@ pub fn classify_page_with_filters(
     } else {
         &filtered_owned
     };
+
+    // Projection appends detached footers after all body lines. Filtering keeps
+    // that order, so both slices can borrow their lines without a partition copy.
+    // Keep footers outside table detection: extending a table region can lower
+    // its validated coverage enough to reject the table.
+    let footer_start = lines
+        .iter()
+        .position(|line| line.region_path == crate::projection::NUMERIC_FOOTER_PATH)
+        .unwrap_or(lines.len());
+    let (lines, footer_lines) = lines.split_at(footer_start);
 
     // Global ruled-table pass. `detect_ruled_tables` is otherwise called per
     // xy_cut leaf, but a ruled table whose rows scatter across several leaves
@@ -517,7 +510,7 @@ pub fn classify_page_with_filters(
     // Appending here gives the footer its own final paragraph, outside table
     // detection and cross-column paragraph continuation.
     let mut blocks = stitch_regions(blocks, &region_boundaries);
-    blocks.extend(footer_lines.into_iter().map(|line| {
+    blocks.extend(footer_lines.iter().map(|line| {
         PositionedBlock::new(
             Block::Paragraph {
                 text: line.text.clone(),

@@ -388,8 +388,8 @@ fn handle_rotation_reading_order(items: &mut [ProjectedTextItem], page_height: f
     items.sort_by(|a, b| a.item.y.total_cmp(&b.item.y));
 }
 
-// Three distinct baselines establish a repeated column. One or two isolated
-// numeric rows can instead be page numbers or table values.
+// Three distinct baselines support native gutter numbering. This recurrence
+// threshold is a layout heuristic. Isolated footers are exempted independently.
 const MIN_GUTTER_ROWS: usize = 3;
 
 /// Candidate numbers use the existing two-column gutter tolerances: their center
@@ -444,8 +444,8 @@ fn between_text_on_baseline(items: &[ProjectedTextItem], idx: usize) -> bool {
 }
 
 fn clean_projected_items(items: &mut Vec<ProjectedTextItem>, page_width: f32, page_height: f32) {
-    // Apply the same column requirement after grid rendering. Preserve the
-    // earlier baseline-context flag and the existing same-line body-text guard.
+    // Apply the native recurrence requirement after grid rendering. Preserve
+    // the earlier OCR/baseline flags and the existing same-line body-text guard.
 
     let mut has_non_margin_by_line: HashMap<i32, bool> = HashMap::new();
     for item in items.iter() {
@@ -563,7 +563,7 @@ fn form_lines(
         for i in margin_idxs {
             // Exempt the footer before flagging. Preserve existing OCR gutter
             // filtering: short OCR numerals may be recognition noise. Native
-            // digits need a repeated column or text on both sides.
+            // digits need repeated rows or text on both sides.
             if !isolated_numeric_footer(items, i, page_width, page_height)
                 && (items[i].item.confidence.is_some()
                     || rows.len() >= MIN_GUTTER_ROWS
