@@ -579,7 +579,7 @@ fn form_lines(
         height(a).min(height(b)).max(0.0)
     }
 
-    /// Measure aligned native Latin letter boundaries before width rounding.
+    /// Measure aligned native Latin runs before whole-point width rounding.
     /// OCR, scripts and unreliable font mappings retain their grid checks.
     fn native_gap(a: &ProjectedTextItem, b: &ProjectedTextItem) -> Option<f32> {
         let latin = |p: &ProjectedTextItem| {
@@ -594,8 +594,6 @@ fn form_lines(
         };
         if !latin(a)
             || !latin(b)
-            || !a.item.text.chars().last().is_some_and(char::is_alphabetic)
-            || !b.item.text.chars().next().is_some_and(char::is_alphabetic)
             || a.item.font_size != b.item.font_size
             || a.item.font_height != b.item.font_height
             || (a.orig_y - b.orig_y).abs() > WORD_GAP_ALIGNMENT_TOLERANCE
@@ -631,7 +629,10 @@ fn form_lines(
         if (cur.item.y - prev.item.y).abs() <= y_tolerance
             && (cur.item.height - prev.item.height).abs() <= h_tolerance
         {
-            let measured = use_native_gaps.then(|| native_gap(prev, cur)).flatten();
+            // This early merge keeps one style. Preserve its grid behavior across style changes.
+            let measured = (use_native_gaps && same_emphasis(&prev.item, &cur.item))
+                .then(|| native_gap(prev, cur))
+                .flatten();
             let delta_x = measured.unwrap_or(cur.item.x - (prev.item.x + prev.item.width));
             let max_gap = if measured.is_some() {
                 (gap_height(prev, cur) * GLYPH_GAP_HEIGHT_RATIO).min(0.1)
