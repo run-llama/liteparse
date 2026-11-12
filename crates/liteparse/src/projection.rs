@@ -393,12 +393,64 @@ fn handle_rotation_reading_order(items: &mut [ProjectedTextItem], page_height: f
     items.sort_by(|a, b| a.item.y.total_cmp(&b.item.y));
 }
 
-fn clean_projected_items(items: &mut Vec<ProjectedTextItem>, page_width: f32) {
-    // Rust equivalent of cleanRawText margin cleanup.
-    // Keep this conservative: only remove likely margin line numbers when they appear isolated.
-    let midpoint = page_width * 0.5;
-    let margin_left = midpoint - 5.0;
-    let margin_right = midpoint + 20.0;
+// Three distinct baselines support native gutter numbering. This recurrence
+// threshold is a layout heuristic. Isolated footers are exempted independently.
+const MIN_GUTTER_ROWS: usize = 3;
+
+/// Candidate numbers use the existing two-column gutter tolerances: their center
+/// is strictly between 5 pt left and 20 pt right of the page midpoint, and their
+/// width is below 15 pt. These are layout heuristics, not PDF format limits.
+///
+/// Keep one or two ASCII digits, optionally followed by an OCR `O` for zero.
+/// The three-character limit allows that suffix after two digits. Footer
+/// detection below uses the same horizontal band but requires actual digits.
+fn is_gutter_number_candidate(item: &ProjectedTextItem, page_width: f32) -> bool {
+    let center = item.item.x + item.item.width * 0.5;
+    let chars: Vec<_> = item.item.text.trim().chars().collect();
+    if !(center > page_width * 0.5 - 5.0
+        && center < page_width * 0.5 + 20.0
+        && item.item.width < 15.0)
+        || chars.is_empty()
+        || chars.len() > 3
+    {
+        return false;
+    }
+    let mut digits = 0;
+    for (idx, c) in chars.iter().enumerate() {
+        if c.is_ascii_digit() {
+            digits += 1;
+        } else if *c != 'O' || idx != chars.len() - 1 {
+            return false;
+        }
+    }
+    (1..=2).contains(&digits)
+}
+
+/// Text on both sides of a separated number is direct evidence that it occupies
+/// the space between columns, even without a repeated vertical sequence.
+/// Half the smaller glyph height is the existing same-baseline tolerance; using
+/// the smaller height prevents a tall font box from spanning adjacent rows.
+fn between_text_on_baseline(items: &[ProjectedTextItem], idx: usize) -> bool {
+    let number = &items[idx].item;
+    let mut left = false;
+    let mut right = false;
+    for (j, other) in items.iter().enumerate() {
+        let text = &other.item;
+        if j == idx
+            || text.text.trim().is_empty()
+            || (text.y - number.y).abs() > number.height.min(text.height) * 0.5
+        {
+            continue;
+        }
+        left |= text.x + text.width <= number.x;
+        right |= text.x >= number.x + number.width;
+    }
+    left && right
+}
+
+fn clean_projected_items(items: &mut Vec<ProjectedTextItem>, page_width: f32, page_height: f32) {
+    // Apply the native recurrence requirement after grid rendering. Preserve
+    // the earlier OCR/baseline flags and the existing same-line body-text guard.
 
     let mut has_non_margin_by_line: HashMap<i32, bool> = HashMap::new();
     for item in items.iter() {
@@ -408,42 +460,31 @@ fn clean_projected_items(items: &mut Vec<ProjectedTextItem>, page_width: f32) {
         }
     }
 
+    let likely_margin = |item: &ProjectedTextItem| {
+        item.is_margin_line_number || is_gutter_number_candidate(item, page_width)
+    };
+    // Keep the gutter heuristic's row count unchanged for body numbers.
+    // Isolated footers are exempted at removal, regardless of that count.
+    let rows: HashSet<_> = items
+        .iter()
+        .filter(|item| likely_margin(item))
+        .map(|item| item.item.y.round() as i32)
+        .collect();
+    let footers: HashSet<_> = (0..items.len())
+        .filter(|&i| isolated_numeric_footer(items, i, page_width, page_height))
+        .collect();
+    let mut idx = 0;
     items.retain(|item| {
-        let line_key = item.item.y.round() as i32;
+        let footer = footers.contains(&idx);
+        idx += 1;
         let line_has_content = has_non_margin_by_line
-            .get(&line_key)
+            .get(&(item.item.y.round() as i32))
             .copied()
             .unwrap_or(false);
-        let center = item.item.x + item.item.width * 0.5;
-        let text = item.item.text.trim();
-        let looks_like_line_number = {
-            let chars: Vec<char> = text.chars().collect();
-            if chars.is_empty() || chars.len() > 3 {
-                false
-            } else {
-                let mut digit_count = 0usize;
-                let mut valid = true;
-                for (idx, c) in chars.iter().enumerate() {
-                    if c.is_ascii_digit() {
-                        digit_count += 1;
-                    } else if *c == 'O' && idx == chars.len() - 1 {
-                        // OCR confusion 0->O
-                    } else {
-                        valid = false;
-                        break;
-                    }
-                }
-                valid && (1..=2).contains(&digit_count)
-            }
-        };
-
-        let likely_margin = item.is_margin_line_number
-            || (center > margin_left
-                && center < margin_right
-                && looks_like_line_number
-                && item.item.width < 15.0);
-
-        !likely_margin || line_has_content
+        footer
+            || (rows.len() < MIN_GUTTER_ROWS && !item.is_margin_line_number)
+            || !likely_margin(item)
+            || line_has_content
     });
 }
 
@@ -452,6 +493,7 @@ fn form_lines(
     median_width: f32,
     median_height: f32,
     page_width: f32,
+    page_height: f32,
     style_runs: bool,
 ) -> Vec<Vec<ProjectedTextItem>> {
     // Y-tolerance for sorting: items within this threshold are considered same line
@@ -488,38 +530,15 @@ fn form_lines(
         }
     };
 
-    // For two-column documents, detect and mark margin line numbers
+    // A lone centered footer has the same shape as a gutter number. Require
+    // a repeated column or text on both sides before marking it for removal.
     if page_width > 0.0 {
-        let midpoint = page_width / 2.0;
-        let margin_left = midpoint - 5.0;
-        let margin_right = midpoint + 20.0;
-
-        fn is_margin_line_number_text(text: &str) -> bool {
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
-                return false;
-            }
-            let chars: Vec<char> = trimmed.chars().collect();
-            if chars.len() > 3 {
-                return false;
-            }
-
-            let mut digit_count = 0usize;
-            for (idx, c) in chars.iter().enumerate() {
-                if c.is_ascii_digit() {
-                    digit_count += 1;
-                } else if *c == 'O' && idx == chars.len() - 1 {
-                    // OCR confusion: 0 -> O
-                } else {
-                    return false;
-                }
-            }
-            (1..=2).contains(&digit_count)
-        }
-
         // A real gutter line number is isolated on its baseline. An item that
         // abuts a neighbour is a fragment of a larger token, e.g. the "7" of a
         // table cell PDFium emits as "7" + ".7" (issue #465).
+        /// Preserve the existing token-fragment guard: a quarter glyph height
+        /// admits a tight join, and half a height restricts it to one baseline.
+        /// The 0.5 pt overlap tolerance accommodates rounded box widths.
         fn abuts_neighbour(items: &[ProjectedTextItem], idx: usize) -> bool {
             let it = &items[idx].item;
             let max_gap = it.height * 0.25;
@@ -539,17 +558,24 @@ fn form_lines(
 
         let margin_idxs: Vec<usize> = (0..items.len())
             .filter(|&i| {
-                let item = &items[i];
-                let center = item.item.x + item.item.width / 2.0;
-                center > margin_left
-                    && center < margin_right
-                    && is_margin_line_number_text(&item.item.text)
-                    && item.item.width < 15.0
-                    && !abuts_neighbour(items, i)
+                is_gutter_number_candidate(&items[i], page_width) && !abuts_neighbour(items, i)
             })
             .collect();
+        let rows: HashSet<_> = margin_idxs
+            .iter()
+            .map(|&i| items[i].item.y.round() as i32)
+            .collect();
         for i in margin_idxs {
-            items[i].is_margin_line_number = true;
+            // Exempt the footer before flagging. Preserve existing OCR gutter
+            // filtering: short OCR numerals may be recognition noise. Native
+            // digits need repeated rows or text on both sides.
+            if !isolated_numeric_footer(items, i, page_width, page_height)
+                && (items[i].item.confidence.is_some()
+                    || rows.len() >= MIN_GUTTER_ROWS
+                    || between_text_on_baseline(items, i))
+            {
+                items[i].is_margin_line_number = true;
+            }
         }
     }
 
@@ -1842,6 +1868,7 @@ fn project_to_grid(
         median_width,
         median_height,
         page.page_width,
+        page.page_height,
         style_runs,
     );
     if lines.is_empty() {
@@ -2864,7 +2891,7 @@ fn project_to_grid(
         }
     }
 
-    clean_projected_items(&mut flattened, page.page_width);
+    clean_projected_items(&mut flattened, page.page_width, page.page_height);
 
     let text = raw_lines
         .into_iter()
@@ -3403,12 +3430,18 @@ fn xy_item_weight(it: &TextItem) -> f32 {
     it.text.chars().count().max(1) as f32
 }
 
-fn xy_root_bbox(items: &[ProjectedTextItem], page_width: f32, page_height: f32) -> Rect {
+fn xy_root_bbox(
+    items: &[ProjectedTextItem],
+    indices: &[usize],
+    page_width: f32,
+    page_height: f32,
+) -> Rect {
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;
     let mut max_x = f32::NEG_INFINITY;
     let mut max_y = f32::NEG_INFINITY;
-    for it in items {
+    for &idx in indices {
+        let it = &items[idx];
         if it.item.text.is_empty() {
             continue;
         }
@@ -4530,6 +4563,7 @@ fn xy_cut_rec(
     let banner = xy_find_banner_cut(items, &idxs, &bbox, median_h);
     let h = xy_find_best_cut(items, &idxs, &bbox, CutAxis::Horizontal, median_h, figures);
     let v = xy_find_best_cut(items, &idxs, &bbox, CutAxis::Vertical, median_h, figures);
+
     // Fallback column-start histogram. Only consulted when BOTH density
     // cuts returned None — those are the cases (wide-heading filled gutter,
     // figure-straddle layouts) where the column structure is real but the
@@ -4852,7 +4886,54 @@ fn xy_cut_rec(
     }
 }
 
-/// Build the page's XY-cut region tree.
+/// Reserved path for footer lines outside the XY-cut tree. Normal paths contain
+/// child indices; `u16::MAX` marks a detached line while preserving every body
+/// path. Markdown classification recognizes this marker and emits the line last.
+pub(crate) const NUMERIC_FOOTER_PATH: &[u16] = &[u16::MAX];
+
+/// A footer is a centered one- to three-digit item below every other text item.
+/// Use original glyph geometry so grid snapping cannot change this decision.
+///
+/// The lower half limits the search to the page end. In the bottom tenth, the
+/// half-height gap only requires a distinct baseline. Above that band, require
+/// two smaller-glyph heights, leaving a blank line between body and footer.
+/// This stronger gap handles large blank bottom margins without detaching a
+/// nearby numeric table value. These fractions are conservative layout rules.
+fn isolated_numeric_footer(
+    items: &[ProjectedTextItem],
+    idx: usize,
+    page_width: f32,
+    page_height: f32,
+) -> bool {
+    let item = &items[idx];
+    let text = item.item.text.trim();
+    let center = item.orig_x + item.orig_width * 0.5;
+    if item.is_margin_line_number
+        || !(1..=3).contains(&text.len())
+        || !text.bytes().all(|b| b.is_ascii_digit())
+        || item.orig_y < page_height * 0.5
+        || center <= page_width * 0.5 - 5.0
+        || center >= page_width * 0.5 + 20.0
+    {
+        return false;
+    }
+    let gap_ratio = if item.orig_y < page_height * 0.9 {
+        2.0
+    } else {
+        0.5
+    };
+    items.iter().enumerate().all(|(other_idx, other)| {
+        other_idx == idx
+            || other.item.text.trim().is_empty()
+            || other.orig_y + item.orig_height.min(other.orig_height) * gap_ratio < item.orig_y
+    })
+}
+
+/// Build the page's XY-cut body region tree.
+///
+/// Exclude isolated footer numbers from both density/banner cuts and the root
+/// bounds. One extra bottom line can change which column split is accepted and
+/// alter reading order. Retain the original items for a detached footer line.
 ///
 /// `figures` is an optional set of figure-region bounding rectangles (from
 /// `figure_cluster::detect_figure_rects`); pass `&[]` to disable obstacle
@@ -4866,7 +4947,9 @@ pub(crate) fn xy_cut(
     let all: Vec<usize> = items
         .iter()
         .enumerate()
-        .filter(|(_, it)| !it.item.text.is_empty())
+        .filter(|(i, it)| {
+            !it.item.text.is_empty() && !isolated_numeric_footer(items, *i, page_width, page_height)
+        })
         .map(|(i, _)| i)
         .collect();
     if all.is_empty() {
@@ -4882,7 +4965,7 @@ pub(crate) fn xy_cut(
             },
         };
     }
-    let bbox = xy_root_bbox(items, page_width, page_height);
+    let bbox = xy_root_bbox(items, &all, page_width, page_height);
     let median_h = xy_median_line_height(items, &all);
     xy_cut_rec(items, all, bbox, 0, false, median_h, figures)
 }
@@ -5022,6 +5105,20 @@ pub(crate) fn build_projected_lines(
                 items,
                 &current,
                 path.clone(),
+                &heading_excl_figures,
+                page_has_native_text,
+            ));
+        }
+    }
+
+    // Reuse the original item to preserve its text and word boxes. Its detached
+    // path lets Markdown keep it outside global and cross-region table passes.
+    for idx in 0..items.len() {
+        if isolated_numeric_footer(items, idx, page_width, page_height) {
+            out.push(build_one_line(
+                items,
+                &[idx],
+                NUMERIC_FOOTER_PATH.to_vec(),
                 &heading_excl_figures,
                 page_has_native_text,
             ));
@@ -5467,7 +5564,7 @@ mod tests {
             item_at(".7", 316.478, 149.76, 4.66, 8.42),
             item_at("2.3", 370.9, 149.76, 10.6, 8.42),
         ];
-        let lines = form_lines(&mut items, 10.0, 8.42, 612.0, true);
+        let lines = form_lines(&mut items, 10.0, 8.42, 612.0, 792.0, true);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].iter().any(|i| i.item.text == "7.7"));
         assert!(lines[0].iter().all(|i| !i.is_margin_line_number));
@@ -5482,7 +5579,7 @@ mod tests {
             item_at("12", 310.0, 100.0, 8.0, 10.0),
             item_at("right column text", 330.0, 100.0, 230.0, 10.0),
         ];
-        let lines = form_lines(&mut items, 10.0, 10.0, 612.0, true);
+        let lines = form_lines(&mut items, 10.0, 10.0, 612.0, 792.0, true);
         let flagged: Vec<_> = lines
             .iter()
             .flatten()
@@ -5490,6 +5587,105 @@ mod tests {
             .map(|i| i.item.text.as_str())
             .collect();
         assert_eq!(flagged, vec!["12"]);
+    }
+
+    #[test]
+    fn lone_footer_number_survives_but_gutter_number_column_is_removed() {
+        for positions in [vec![760.0], vec![100.0, 120.0, 140.0]] {
+            let column = positions.len() >= 3;
+            let mut items = positions
+                .into_iter()
+                .map(|y| item_at("12", 310.0, y, 8.0, 10.0))
+                .collect();
+            let lines = form_lines(&mut items, 10.0, 10.0, 612.0, 792.0, true);
+            let mut projected: Vec<_> = lines.into_iter().flatten().collect();
+            assert!(
+                projected
+                    .iter()
+                    .all(|item| item.is_margin_line_number == column)
+            );
+            clean_projected_items(&mut projected, 612.0, 792.0);
+            if column {
+                assert!(projected.is_empty());
+            } else {
+                assert_eq!(projected.len(), 1);
+                assert_eq!(projected[0].item.text, "12");
+            }
+        }
+    }
+
+    #[test]
+    fn unrelated_centered_numbers_do_not_turn_a_footer_into_gutter_numbering() {
+        // Cover both aligned chart ticks and numbers spread across the gutter band.
+        for xs in [[310.0, 310.0], [299.0, 321.0]] {
+            let mut items = vec![
+                item_at("10", xs[0], 100.0, 8.0, 10.0),
+                item_at("20", xs[1], 120.0, 8.0, 10.0),
+                item_at("body text", 50.0, 600.0, 200.0, 10.0),
+                item_at("12", 310.0, 760.0, 8.0, 10.0),
+            ];
+            let lines = form_lines(&mut items, 10.0, 10.0, 612.0, 792.0, true);
+            let mut projected: Vec<_> = lines.into_iter().flatten().collect();
+            assert!(
+                !projected
+                    .iter()
+                    .find(|item| item.item.text == "12")
+                    .unwrap()
+                    .is_margin_line_number
+            );
+            clean_projected_items(&mut projected, 612.0, 792.0);
+            assert!(projected.iter().any(|item| item.item.text == "12"));
+        }
+    }
+
+    #[test]
+    fn ocr_gutter_filtering_keeps_its_footer_exception() {
+        let mut items = vec![
+            item_at("body text", 50.0, 100.0, 200.0, 10.0),
+            item_at("12", 310.0, 120.0, 8.0, 10.0),
+            item_at("34", 310.0, 760.0, 8.0, 10.0),
+        ];
+        for item in &mut items {
+            item.item.confidence = Some(0.4);
+        }
+        let lines = form_lines(&mut items, 10.0, 10.0, 612.0, 792.0, true);
+        let mut projected: Vec<_> = lines.into_iter().flatten().collect();
+        assert!(
+            projected
+                .iter()
+                .find(|item| item.item.text == "12")
+                .unwrap()
+                .is_margin_line_number
+        );
+        assert!(
+            !projected
+                .iter()
+                .find(|item| item.item.text == "34")
+                .unwrap()
+                .is_margin_line_number
+        );
+        clean_projected_items(&mut projected, 612.0, 792.0);
+        assert!(!projected.iter().any(|item| item.item.text == "12"));
+        assert!(projected.iter().any(|item| item.item.text == "34"));
+    }
+
+    #[test]
+    fn three_digit_footer_preserves_body_layout() {
+        let mut items = vec![item_at("body text", 50.0, 600.0, 200.0, 10.0)];
+        let (body, regions) = build_projected_lines(&items, 612.0, 792.0, &[]);
+        items.push(item_at("100", 300.0, 760.0, 18.0, 10.0));
+        assert!(!is_gutter_number_candidate(&items[1], 612.0));
+        let (lines, with_footer) = build_projected_lines(&items, 612.0, 792.0, &[]);
+        assert_eq!(
+            serde_json::to_value(regions).unwrap(),
+            serde_json::to_value(with_footer).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(body).unwrap(),
+            serde_json::to_value(&lines[..1]).unwrap()
+        );
+        assert_eq!(lines[1].text, "100");
+        assert_eq!(lines[1].region_path, NUMERIC_FOOTER_PATH);
     }
 
     #[test]
@@ -5521,6 +5717,56 @@ mod tests {
             }
             _ => panic!("expected a vertical split, got {:?}", region.kind),
         }
+    }
+
+    #[test]
+    fn footer_above_blank_bottom_margin_is_detached_but_table_value_is_not() {
+        let mut items = vec![
+            item_at("description", 50.0, 560.0, 200.0, 10.0),
+            item_at("67", 294.0, 605.0, 8.0, 10.0),
+        ];
+        let (lines, _) = build_projected_lines(&items, 595.0, 842.0, &[]);
+        assert_eq!(lines.last().unwrap().region_path, NUMERIC_FOOTER_PATH);
+        items[1].orig_y = 575.0;
+        items[1].item.y = 575.0;
+        let (lines, _) = build_projected_lines(&items, 595.0, 842.0, &[]);
+        assert!(lines.iter().all(|l| l.region_path != NUMERIC_FOOTER_PATH));
+    }
+
+    #[test]
+    fn isolated_footer_preserves_body_regions_and_lines() {
+        let mut items = Vec::new();
+        for row in 0..5 {
+            let y = 100.0 + row as f32 * 14.0;
+            items.push(item_at("left column", 50.0, y, 200.0, 10.0));
+            items.push(item_at("right column", 350.0, y, 200.0, 10.0));
+        }
+        let (body_lines, body_regions) = build_projected_lines(&items, 612.0, 792.0, &[]);
+        let mut footer_item = item_at("12", 304.0, 760.0, 8.0, 10.0);
+        footer_item.item.words.push(WordBox {
+            text: "12".into(),
+            x: 304.0,
+            y: 760.0,
+            width: 8.0,
+            height: 10.0,
+        });
+        items.push(footer_item);
+        let (lines, regions) = build_projected_lines(&items, 612.0, 792.0, &[]);
+        assert_eq!(
+            serde_json::to_value(regions).unwrap(),
+            serde_json::to_value(body_regions).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&lines[..body_lines.len()]).unwrap(),
+            serde_json::to_value(body_lines).unwrap()
+        );
+        let footer = lines.last().unwrap();
+        assert_eq!(footer.text, "12");
+        assert_eq!(footer.region_path, NUMERIC_FOOTER_PATH);
+        assert_eq!(
+            serde_json::to_value(&footer.spans[0]).unwrap(),
+            serde_json::to_value(&items.last().unwrap().item).unwrap()
+        );
     }
 
     #[test]
@@ -5778,7 +6024,7 @@ mod tests {
         }
 
         let all: Vec<usize> = (0..items.len()).collect();
-        let bbox = xy_root_bbox(&items, 612.0, 792.0);
+        let bbox = xy_root_bbox(&items, &all, 612.0, 792.0);
         let median_h = xy_median_line_height(&items, &all);
         let mut root_tabular = false;
         assert!(xy_find_column_cut(&items, &all, &bbox, median_h, &mut root_tabular).is_none());

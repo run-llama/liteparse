@@ -241,6 +241,7 @@ pub fn classify_page_with_filters(
     // Strip running header/footer lines up-front so they don't leak into
     // table detection (a repeating two-column footer would otherwise look
     // like a 2-row table) or paragraph grouping.
+
     let need_filter = !header_footer.is_empty() || !chrome_indices.is_empty();
     let filtered_owned: Vec<ProjectedLine> = if !need_filter {
         Vec::new()
@@ -259,6 +260,16 @@ pub fn classify_page_with_filters(
     } else {
         &filtered_owned
     };
+
+    // Projection appends detached footers after all body lines. Filtering keeps
+    // that order, so both slices can borrow their lines without a partition copy.
+    // Keep footers outside table detection: extending a table region can lower
+    // its validated coverage enough to reject the table.
+    let footer_start = lines
+        .iter()
+        .position(|line| line.region_path == crate::projection::NUMERIC_FOOTER_PATH)
+        .unwrap_or(lines.len());
+    let (lines, footer_lines) = lines.split_at(footer_start);
 
     // Global ruled-table pass. `detect_ruled_tables` is otherwise called per
     // xy_cut leaf, but a ruled table whose rows scatter across several leaves
@@ -496,7 +507,20 @@ pub fn classify_page_with_filters(
         interrupt_cursor += 1;
     }
 
-    stitch_regions(blocks, &region_boundaries)
+    // Appending here gives the footer its own final paragraph, outside table
+    // detection and cross-column paragraph continuation.
+    let mut blocks = stitch_regions(blocks, &region_boundaries);
+    blocks.extend(footer_lines.iter().map(|line| {
+        PositionedBlock::new(
+            Block::Paragraph {
+                text: line.text.clone(),
+                bold: false,
+                italic: false,
+            },
+            Some(line.bbox.clone()),
+        )
+    }));
+    blocks
 }
 
 /// Turn an interruption into a positioned block. Both the page-level walker

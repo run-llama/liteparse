@@ -481,8 +481,8 @@ pub struct ParsedPage {
     /// the public JSON/text outputs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub projected_lines: Vec<ProjectedLine>,
-    /// Root of the XY-cut region tree for this page. Leaves correspond to the
-    /// `region_path` on each `ProjectedLine`. Internal-only.
+    /// Body XY-cut region tree. Isolated numeric footer lines are detached
+    /// from this tree; other lines use its leaves as their `region_path`. Internal-only.
     #[serde(default)]
     pub regions: Region,
     /// Vector graphics on the page (decomposed paths) used by the markdown
