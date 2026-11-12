@@ -678,16 +678,31 @@ packages/
 
 ### Building
 
+Install the [development prerequisites](CONTRIBUTING.md#development-prerequisites)
+before building from source. All builds need the Rust toolchain; the bindings
+also need their language-specific tools. The Python build needs an active
+virtual environment, and the WASM build needs `wasm-pack`.
+
+Run each example below from the repository root.
+
 ```bash
 # Build the CLI
 cargo build --release -p liteparse
+```
 
+```bash
 # Build Node.js bindings
-cd packages/node && npm run build
+cd packages/node
+npm install
+npm run build
+```
 
+```bash
 # Build Python bindings
 cd packages/python && maturin develop --release
+```
 
+```bash
 # Build WASM
 cd packages/wasm && npm run build
 ```
