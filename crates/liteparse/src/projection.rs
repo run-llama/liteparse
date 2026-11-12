@@ -388,10 +388,6 @@ fn handle_rotation_reading_order(items: &mut [ProjectedTextItem], page_height: f
     items.sort_by(|a, b| a.item.y.total_cmp(&b.item.y));
 }
 
-// Three distinct baselines establish a repeated column. One or two isolated
-// numeric rows can instead be page numbers or table values.
-const MIN_GUTTER_ROWS: usize = 3;
-
 /// Candidate numbers use the existing two-column gutter tolerances: their center
 /// is strictly between 5 pt left and 20 pt right of the page midpoint, and their
 /// width is below 15 pt. These are layout heuristics, not PDF format limits.
@@ -421,31 +417,9 @@ fn is_gutter_number_candidate(item: &ProjectedTextItem, page_width: f32) -> bool
     (1..=2).contains(&digits)
 }
 
-/// Text on both sides of a separated number is direct evidence that it occupies
-/// the space between columns, even without a repeated vertical sequence.
-/// Half the smaller glyph height is the existing same-baseline tolerance; using
-/// the smaller height prevents a tall font box from spanning adjacent rows.
-fn between_text_on_baseline(items: &[ProjectedTextItem], idx: usize) -> bool {
-    let number = &items[idx].item;
-    let mut left = false;
-    let mut right = false;
-    for (j, other) in items.iter().enumerate() {
-        let text = &other.item;
-        if j == idx
-            || text.text.trim().is_empty()
-            || (text.y - number.y).abs() > number.height.min(text.height) * 0.5
-        {
-            continue;
-        }
-        left |= text.x + text.width <= number.x;
-        right |= text.x >= number.x + number.width;
-    }
-    left && right
-}
-
 fn clean_projected_items(items: &mut Vec<ProjectedTextItem>, page_width: f32, page_height: f32) {
-    // Apply the same column requirement after grid rendering. Preserve the
-    // earlier baseline-context flag and the existing same-line body-text guard.
+    // Preserve the same-line body-text guard after grid rendering. Isolated
+    // footer numbers remain content even when they resemble gutter numbering.
 
     let mut has_non_margin_by_line: HashMap<i32, bool> = HashMap::new();
     for item in items.iter() {
@@ -458,13 +432,6 @@ fn clean_projected_items(items: &mut Vec<ProjectedTextItem>, page_width: f32, pa
     let likely_margin = |item: &ProjectedTextItem| {
         item.is_margin_line_number || is_gutter_number_candidate(item, page_width)
     };
-    // Keep the gutter heuristic's row count unchanged for body numbers.
-    // Isolated footers are exempted at removal, regardless of that count.
-    let rows: HashSet<_> = items
-        .iter()
-        .filter(|item| likely_margin(item))
-        .map(|item| item.item.y.round() as i32)
-        .collect();
     let footers: HashSet<_> = (0..items.len())
         .filter(|&i| isolated_numeric_footer(items, i, page_width, page_height))
         .collect();
@@ -476,10 +443,7 @@ fn clean_projected_items(items: &mut Vec<ProjectedTextItem>, page_width: f32, pa
             .get(&(item.item.y.round() as i32))
             .copied()
             .unwrap_or(false);
-        footer
-            || (rows.len() < MIN_GUTTER_ROWS && !item.is_margin_line_number)
-            || !likely_margin(item)
-            || line_has_content
+        footer || !likely_margin(item) || line_has_content
     });
 }
 
@@ -525,8 +489,8 @@ fn form_lines(
         }
     };
 
-    // A lone centered footer has the same shape as a gutter number. Require
-    // a repeated column or text on both sides before marking it for removal.
+    // A centered footer resembles a gutter number. Exempt it before flagging,
+    // using the same isolation test that later detaches it from body layout.
     if page_width > 0.0 {
         // A real gutter line number is isolated on its baseline. An item that
         // abuts a neighbour is a fragment of a larger token, e.g. the "7" of a
@@ -556,16 +520,8 @@ fn form_lines(
                 is_gutter_number_candidate(&items[i], page_width) && !abuts_neighbour(items, i)
             })
             .collect();
-        let rows: HashSet<_> = margin_idxs
-            .iter()
-            .map(|&i| items[i].item.y.round() as i32)
-            .collect();
         for i in margin_idxs {
-            // Test the footer before setting the flag, which footer isolation
-            // treats as evidence that an item belongs to gutter numbering.
-            if !isolated_numeric_footer(items, i, page_width, page_height)
-                && (rows.len() >= MIN_GUTTER_ROWS || between_text_on_baseline(items, i))
-            {
+            if !isolated_numeric_footer(items, i, page_width, page_height) {
                 items[i].is_margin_line_number = true;
             }
         }
