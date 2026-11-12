@@ -6408,6 +6408,7 @@ mod tests {
                 .collect();
             assert_eq!(text, ["word a"], "case {case}");
         }
+    }
 
     #[test]
     fn tied_rotated_groups_follow_spatial_then_input_order() {
