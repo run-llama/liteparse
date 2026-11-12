@@ -569,8 +569,8 @@ fn form_lines(
         .any(|p| p.item.text.chars().any(crate::bidi::is_rtl_char));
 
     const WORD_GAP_ALIGNMENT_TOLERANCE: f32 = 0.1;
-    // Only subpixel glyph residuals may bridge a positive gap. Larger overlaps can
-    // be word spaces hidden by loose font boxes, so those retain the grid check.
+    // Sheared boxes can hide small word spaces. Only subpixel residuals bridge
+    // those gaps, while upright text keeps the existing 0.1 pt merge allowance.
     const GLYPH_GAP_HEIGHT_RATIO: f32 = 0.001;
     const GLYPH_OVERLAP_HEIGHT_RATIO: f32 = 0.04;
 
@@ -634,7 +634,10 @@ fn form_lines(
                 .then(|| native_gap(prev, cur))
                 .flatten();
             let delta_x = measured.unwrap_or(cur.item.x - (prev.item.x + prev.item.width));
-            let max_gap = if measured.is_some() {
+            let max_gap = if measured.is_some()
+                && (canonical_rotation(prev.item.rotation) != 0
+                    || canonical_rotation(cur.item.rotation) != 0)
+            {
                 (gap_height(prev, cur) * GLYPH_GAP_HEIGHT_RATIO).min(0.1)
             } else {
                 0.1
@@ -6260,6 +6263,16 @@ mod tests {
             ),
             ("r", "e", 6.9975, 2.4281, -0.0979, 0.0, false, "re"),
             ("W", "ord", 6.9975, 6.602, -0.2537, 0.0, false, "Word"),
+            (
+                "acti viti",
+                "es",
+                16.0,
+                49.7824,
+                0.0960,
+                0.0,
+                false,
+                "acti vities",
+            ),
             (
                 "Operati",
                 "ng",
