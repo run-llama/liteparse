@@ -563,43 +563,46 @@ fn form_lines(
         ya.cmp(&yb).then_with(|| a.item.x.total_cmp(&b.item.x))
     });
 
-    // Reuse the continuous merge's existing 0.1 pt y/height allowance to identify one run.
-    // This is an alignment limit, separate from the horizontal gap threshold below.
-    const WORD_GAP_ALIGNMENT_TOLERANCE: f32 = 0.1;
+    // Keep bidirectional ordering and punctuation on the established grid path.
+    let use_native_gaps = !items
+        .iter()
+        .any(|p| p.item.text.chars().any(crate::bidi::is_rtl_char));
 
-    /// Rounding widths to whole points inserts spaces at touching glyphs (apparent gaps 0.2-0.5 pt).
-    /// Use original boxes only for upright native items with matching `font_size` and
-    /// `font_height`, and original y/height within the continuous merge's 0.1 pt allowance.
-    ///
-    /// Rotated items need their restacked coordinates: at 90 degrees, page x is across
-    /// the text, not along it. Scripts need their separate runs and host line bands.
-    /// For example, a footnote "a" after "pregnancy" has an original gap of -0.14 pt
-    /// but a rounded gap of +0.27 pt. Its original box would merge it into "pregnancya".
-    ///
-    /// OCR boxes describe detections, not adjacent glyphs. Overlapping detections can
-    /// leave an original overlap of -0.72 pt but a rounded gap of +0.56 pt after merging.
-    /// Keep grid geometry whenever either item is OCR, including mixed native/OCR pairs,
-    /// so both merge checks preserve existing OCR boundaries without a separate guard.
-    fn measures_unrounded(a: &ProjectedTextItem, b: &ProjectedTextItem) -> bool {
-        [a, b].into_iter().all(|p| {
-            !p.rotated
-                && p.item.confidence.is_none()
-                && !(p.item.sup || p.item.sub || p.item.script_geom.is_some())
-        }) && a.item.font_size == b.item.font_size
-            && a.item.font_height == b.item.font_height
-            && (a.orig_y - b.orig_y).abs() <= WORD_GAP_ALIGNMENT_TOLERANCE
-            && (a.orig_height - b.orig_height).abs() <= WORD_GAP_ALIGNMENT_TOLERANCE
+    const WORD_GAP_ALIGNMENT_TOLERANCE: f32 = 0.1;
+    // Only subpixel glyph residuals may bridge a positive gap. Larger overlaps can
+    // be word spaces hidden by loose font boxes, so those retain the grid check.
+    const GLYPH_GAP_HEIGHT_RATIO: f32 = 0.001;
+    const GLYPH_OVERLAP_HEIGHT_RATIO: f32 = 0.01;
+
+    fn gap_height(a: &ProjectedTextItem, b: &ProjectedTextItem) -> f32 {
+        let height = |p: &ProjectedTextItem| p.item.font_height.unwrap_or(p.orig_height);
+        height(a).min(height(b)).max(0.0)
     }
 
-    /// Measure the horizontal gap before whole-point rounding for compatible native runs.
-    /// OCR, rotated text, scripts and mismatched runs keep the existing grid gap for the
-    /// detection boundaries, reading direction and marker separation explained above.
-    fn word_gap(prev: &ProjectedTextItem, cur: &ProjectedTextItem) -> f32 {
-        if measures_unrounded(prev, cur) {
-            cur.orig_x - (prev.orig_x + prev.orig_width)
-        } else {
-            cur.item.x - (prev.item.x + prev.item.width)
+    /// Measure aligned native Latin runs before whole-point width rounding.
+    /// OCR, scripts and unreliable font mappings retain their grid checks.
+    fn native_gap(a: &ProjectedTextItem, b: &ProjectedTextItem) -> Option<f32> {
+        let latin = |p: &ProjectedTextItem| {
+            !p.rotated
+                && p.item.confidence.is_none()
+                && !p.item.font_is_buggy
+                && !p.item.has_unicode_map_error
+                && !(p.item.sup || p.item.sub || p.item.script_geom.is_some())
+                && p.item.text.chars().filter(|c| c.is_alphabetic()).all(
+                    |c| matches!(c as u32, 0x0000..=0x024F | 0x1E00..=0x1EFF | 0xFB00..=0xFB06),
+                )
+        };
+        if !latin(a)
+            || !latin(b)
+            || a.item.font_size != b.item.font_size
+            || a.item.font_height != b.item.font_height
+            || (a.orig_y - b.orig_y).abs() > WORD_GAP_ALIGNMENT_TOLERANCE
+            || (a.orig_height - b.orig_height).abs() > WORD_GAP_ALIGNMENT_TOLERANCE
+        {
+            return None;
         }
+        let gap = b.orig_x - (a.orig_x + a.orig_width);
+        (gap >= -(gap_height(a, b) * GLYPH_OVERLAP_HEIGHT_RATIO).min(0.5)).then_some(gap)
     }
 
     fn can_merge(
@@ -607,6 +610,7 @@ fn form_lines(
         cur: &ProjectedTextItem,
         y_tolerance: f32,
         h_tolerance: f32,
+        use_native_gaps: bool,
     ) -> bool {
         // A script run shares its host's line band. Keep it separate until script flagging
         // can preserve it as a styled piece, even when its grid gap is zero.
@@ -616,11 +620,14 @@ fn form_lines(
         if (cur.item.y - prev.item.y).abs() <= y_tolerance
             && (cur.item.height - prev.item.height).abs() <= h_tolerance
         {
-            let delta_x = word_gap(prev, cur);
-            // These overlap/gap limits predate the unrounded gap check. The 0.1 pt
-            // positive limit admits measured glyph residuals up to 0.007 pt while
-            // leaving measured word gaps of at least 1.3 pt separate.
-            return (-0.5..0.0).contains(&delta_x) || (0.0..0.1).contains(&delta_x);
+            let measured = use_native_gaps.then(|| native_gap(prev, cur)).flatten();
+            let delta_x = measured.unwrap_or(cur.item.x - (prev.item.x + prev.item.width));
+            let max_gap = if measured.is_some() {
+                (gap_height(prev, cur) * GLYPH_GAP_HEIGHT_RATIO).min(0.1)
+            } else {
+                0.1
+            };
+            return (-0.5..0.0).contains(&delta_x) || (0.0..max_gap).contains(&delta_x);
         }
 
         false
@@ -654,7 +661,15 @@ fn form_lines(
     for mut cur in items.drain(..) {
         let should_merge = merged_items
             .last()
-            .map(|prev| can_merge(prev, &cur, merge_y_tolerance, merge_h_tolerance))
+            .map(|prev| {
+                can_merge(
+                    prev,
+                    &cur,
+                    merge_y_tolerance,
+                    merge_h_tolerance,
+                    use_native_gaps,
+                )
+            })
             .unwrap_or(false);
 
         if should_merge {
@@ -888,7 +903,10 @@ fn form_lines(
                 // builder inserts a space based on `gap > space_threshold`.
                 // Punctuation joins (`Standards`+`.`, `width`+`)`, etc.)
                 // and overlapping/negative-gap merges still go through.
-                let gap = word_gap(prev, &item);
+                let gap = use_native_gaps
+                    .then(|| native_gap(prev, &item))
+                    .flatten()
+                    .unwrap_or(delta_x);
                 let alpha_alpha_gap = gap > 0.0
                     && prev
                         .item
@@ -6210,6 +6228,28 @@ mod tests {
             parsed[0].text.split_whitespace().collect::<Vec<_>>(),
             ["Financials", "Sector"]
         );
+    }
+
+    #[test]
+    fn font_scaled_gap_checks_preserve_word_spaces_and_kerning() {
+        for (left, right, height, width, gap, expected) in [
+            ("word", "next", 12.75, 35.4, -0.222, "word next"),
+            ("word", "next", 8.0, 15.885, 0.063, "word next"),
+            ("Operati", "ng", 27.0, 86.5485, -0.2592, "Operating"),
+        ] {
+            let mut items = vec![
+                item_at(left, 40.0, 100.0, width, height),
+                item_at(right, 40.0 + width + gap, 100.0, 20.0, height),
+            ];
+            for item in &mut items {
+                item.item.font_height = Some(height);
+                item.item.width = item.item.width.round();
+                item.item.height = item.item.height.round();
+            }
+            let lines = form_lines(&mut items, 5.0, height, 500.0, true);
+            let text: String = lines[0].iter().map(|p| p.item.text.as_str()).collect();
+            assert_eq!(text, expected);
+        }
     }
 
     #[test]
