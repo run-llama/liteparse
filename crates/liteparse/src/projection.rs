@@ -6548,7 +6548,7 @@ mod tests {
                 item.item.width = item.item.width.round();
                 item.item.height = item.item.height.round();
             }
-            let lines = form_lines(&mut items, 5.0, height, 500.0, true);
+            let lines = form_lines(&mut items, 5.0, height, 500.0, 800.0, true);
             let text: String = lines[0].iter().map(|p| p.item.text.as_str()).collect();
             assert_eq!(text, expected);
         }
@@ -6566,7 +6566,7 @@ mod tests {
         for item in &mut items {
             item.item.width = item.item.width.round();
         }
-        let lines = form_lines(&mut items, 5.0, 9.0, 500.0, true);
+        let lines = form_lines(&mut items, 5.0, 9.0, 500.0, 800.0, true);
         let merged = &lines[0][0].item;
         assert!(merged.text.contains("doi.org/10.1234/example"));
         let pieces: String = merged
@@ -6591,7 +6591,7 @@ mod tests {
             item.item.width = item.item.width.round();
             item.item.height = item.item.height.round();
         }
-        let lines = form_lines(&mut items, 5.0, 5.0, 500.0, true);
+        let lines = form_lines(&mut items, 5.0, 5.0, 500.0, 800.0, true);
         let text: Vec<_> = lines
             .iter()
             .flatten()
@@ -6616,7 +6616,7 @@ mod tests {
             for item in &mut items {
                 item.item.width = item.item.width.round();
             }
-            let lines = form_lines(&mut items, 5.0, 9.0, 500.0, true);
+            let lines = form_lines(&mut items, 5.0, 9.0, 500.0, 800.0, true);
             assert_eq!(lines.len(), 1);
             assert_eq!(lines[0].len(), 1);
             assert_eq!(lines[0][0].item.text, "first second");
@@ -6646,7 +6646,7 @@ mod tests {
                 item.item.width = item.item.width.round();
                 item.item.height = item.item.height.round();
             }
-            let lines = form_lines(&mut items, 5.0, 9.0, 500.0, true);
+            let lines = form_lines(&mut items, 5.0, 9.0, 500.0, 800.0, true);
             let text: Vec<_> = lines
                 .iter()
                 .flatten()
