@@ -127,6 +127,11 @@ export interface JsLiteParseConfig {
    */
   ocrFailureFatal?: boolean
   /**
+   * Remove dot-screen specks from OCR rasters of speckled 1-bit full-page
+   * scans rendered at 200 dpi or more. Default true.
+   */
+  ocrDespeckleScans?: boolean
+  /**
    * OCR request-hedging schedule (ms). Empty/unset = no hedging. Multiple
    * delays (e.g. `[0, 5000, 10000]`) fire duplicate requests per attempt and
    * take the first success — lower tail latency at the cost of extra load.

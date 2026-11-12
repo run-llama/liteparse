@@ -53,6 +53,7 @@ export interface LiteParseNativeConfig {
   quiet?: boolean;
   numWorkers?: number;
   ocrFailureFatal?: boolean;
+  ocrDespeckleScans?: boolean;
   ocrHedgeDelaysMs?: number[];
   emitWordBoxes?: boolean;
   extractTextMetadata?: boolean;

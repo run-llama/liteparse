@@ -109,6 +109,9 @@ pub struct JsLiteParseConfig {
     /// Set false to keep already-recovered native text and return partial
     /// results when OCR is unavailable, instead of rejecting.
     pub ocr_failure_fatal: Option<bool>,
+    /// Remove dot-screen specks from OCR rasters of speckled 1-bit full-page
+    /// scans rendered at 200 dpi or more. Default true.
+    pub ocr_despeckle_scans: Option<bool>,
     /// OCR request-hedging schedule (ms). Empty/unset = no hedging. Multiple
     /// delays (e.g. `[0, 5000, 10000]`) fire duplicate requests per attempt and
     /// take the first success — lower tail latency at the cost of extra load.
@@ -274,6 +277,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.ocr_failure_fatal {
             cfg.ocr_failure_fatal = v;
         }
+        if let Some(v) = self.ocr_despeckle_scans {
+            cfg.ocr_despeckle_scans = v;
+        }
         if let Some(v) = self.ocr_hedge_delays_ms {
             cfg.ocr_hedge_delays_ms = v.into_iter().map(u64::from).collect();
         }
@@ -364,6 +370,7 @@ impl JsLiteParseConfig {
             detect_screenshot_rects: Some(cfg.detect_screenshot_rects),
             render_form_fields: Some(cfg.render_form_fields),
             ocr_failure_fatal: Some(cfg.ocr_failure_fatal),
+            ocr_despeckle_scans: Some(cfg.ocr_despeckle_scans),
             ocr_hedge_delays_ms: Some(
                 cfg.ocr_hedge_delays_ms
                     .iter()

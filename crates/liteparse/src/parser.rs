@@ -367,6 +367,7 @@ impl LiteParse {
             continue_on_page_error: self.config.continue_on_page_error,
             reflatten_pages,
             selection: None,
+            despeckle_scans: self.config.ocr_despeckle_scans,
             request_fields: self.config.ocr_request_fields.clone(),
             page_request_fields: self.config.ocr_page_request_fields.clone(),
         }
