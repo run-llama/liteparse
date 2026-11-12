@@ -216,3 +216,36 @@ These days, its common to apply the term "OCR" to both traditional approaches an
 The LiteParse OCR API is designed specifically for approaches that return text with bounding boxes.
 
 If you are trying to integrate a method that doesn't return bounding boxes, you will have to generate dummy bounding boxes.
+
+## Reusing page images in Rust
+
+Supply existing full-page images to skip rendering them for OCR. Native PDF
+text extraction still runs. This option is available only in Rust.
+
+```rust
+use std::collections::HashMap;
+use liteparse::{LiteParse, LiteParseConfig};
+
+let parser = LiteParse::new(LiteParseConfig {
+    ocr_enabled: true,
+    ocr_page_images: HashMap::from([
+        (1, "/path/to/page-1.png".into()),
+        (3, "/path/to/page-3.jpg".into()),
+    ]),
+    ..Default::default()
+});
+```
+
+- Keys are **1-based source page numbers**, including selected-page and batch
+  parses. DPI is inferred from image dimensions and PDF page size.
+- Images must match the PDF's full page, content and orientation after `/Rotate`
+  and `page_orientation_corrections`. Cropped, stretched or deskewed images are
+  unsupported. Keep files available until parsing finishes.
+- Missing entries render normally. Supplying an image does not force OCR.
+  Invalid images are page errors; `continue_on_page_error` applies.
+- Supplied images keep their dimensions; render DPI and `max_long_edge` affect
+  only newly rendered pages. Requested screenshots are generated separately.
+
+For staged pipelines, set `OcrRenderOptions::page_images`. Access raster data
+through `OcrRaster::image`, using `dimensions()` or `pixels(grayscale)`.
+Existing OCR engine implementations need no changes.

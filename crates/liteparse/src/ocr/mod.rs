@@ -43,6 +43,22 @@ pub struct OcrWord {
     pub bbox: [f32; 4],
 }
 
+mod image;
+pub use image::{EncodedOcrImage, OcrImage, OcrImageFormat};
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type OcrFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
+            + Send
+            + 'a,
+    >,
+>;
+#[cfg(target_arch = "wasm32")]
+pub type OcrFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>> + 'a>,
+>;
+
 pub struct OcrOptions {
     pub language: String,
     /// Resolution (pixels per inch) the page image was rendered at. OCR engines
@@ -63,6 +79,19 @@ pub struct OcrOptions {
 #[cfg(not(target_arch = "wasm32"))]
 pub trait OcrEngine: Send + Sync {
     fn name(&self) -> &str;
+    /// Unified image entry point. The default adapter preserves existing OCR
+    /// engines by supplying pixels in their preferred format to `recognize`.
+    fn recognize_image<'a>(
+        &'a self,
+        image: &'a OcrImage,
+        options: &'a OcrOptions,
+    ) -> OcrFuture<'a> {
+        Box::pin(async move {
+            let (width, height) = image.dimensions();
+            let pixels = image.pixels(self.prefers_grayscale())?;
+            self.recognize(&pixels, width, height, options).await
+        })
+    }
     /// Whether this engine prefers a single-channel grayscale buffer: engines
     /// that binarize internally (Tesseract) do; color-trained engines want RGB.
     fn prefers_grayscale(&self) -> bool {
@@ -74,18 +103,25 @@ pub trait OcrEngine: Send + Sync {
         width: u32,
         height: u32,
         options: &'b OcrOptions,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
-                + Send
-                + '_,
-        >,
-    >;
+    ) -> OcrFuture<'a>;
 }
 
 #[cfg(target_arch = "wasm32")]
 pub trait OcrEngine: Send + Sync {
     fn name(&self) -> &str;
+    /// Unified image entry point. The default adapter preserves existing OCR
+    /// engines by supplying pixels in their preferred format to `recognize`.
+    fn recognize_image<'a>(
+        &'a self,
+        image: &'a OcrImage,
+        options: &'a OcrOptions,
+    ) -> OcrFuture<'a> {
+        Box::pin(async move {
+            let (width, height) = image.dimensions();
+            let pixels = image.pixels(self.prefers_grayscale())?;
+            self.recognize(&pixels, width, height, options).await
+        })
+    }
     /// Whether this engine prefers a single-channel grayscale buffer: engines
     /// that binarize internally (Tesseract) do; color-trained engines want RGB.
     fn prefers_grayscale(&self) -> bool {
@@ -97,12 +133,7 @@ pub trait OcrEngine: Send + Sync {
         width: u32,
         height: u32,
         options: &'b OcrOptions,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
-                + '_,
-        >,
-    >;
+    ) -> OcrFuture<'a>;
 }
 
 #[cfg(test)]

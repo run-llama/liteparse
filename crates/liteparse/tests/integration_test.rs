@@ -1632,7 +1632,7 @@ fn test_render_for_ocr_max_long_edge_fits_each_page() {
 
     let (capped, next) = render(Some(1600), 0);
     assert_eq!(next, 3);
-    let sizes: Vec<_> = capped.iter().map(|r| (r.width, r.height)).collect();
+    let sizes: Vec<_> = capped.iter().map(|r| r.image.dimensions()).collect();
     assert_eq!(sizes, [(1236, 1600), (1600, 900), (833, 833)]);
     assert!((capped[0].dpi - 1600.0 * 72.0 / 792.0).abs() < 1e-3);
     assert!((capped[1].dpi - 120.0).abs() < 1e-3);
@@ -1645,6 +1645,6 @@ fn test_render_for_ocr_max_long_edge_fits_each_page() {
     for off in [None, Some(0)] {
         let (uncapped, _) = render(off, 0);
         assert!(uncapped.iter().all(|r| r.dpi == 300.0), "{off:?}");
-        assert_eq!((uncapped[0].width, uncapped[0].height), (2550, 3300));
+        assert_eq!(uncapped[0].image.dimensions(), (2550, 3300));
     }
 }
