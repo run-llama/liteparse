@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 fn default_true() -> bool {
@@ -17,6 +19,16 @@ pub struct LiteParseConfig {
     /// `(name, value)` pairs. Use for auth, e.g. `("Authorization", "Bearer …")`.
     /// Ignored when `ocr_server_url` is None.
     pub ocr_server_headers: Vec<(String, String)>,
+    /// Form fields sent as-is with every request to `ocr_server_url`, next to
+    /// `file` and `language` (a `language` entry here replaces it). LiteParse
+    /// adds no other field, so the caller owns flags such as
+    /// `correct_rotation` or `return_word_boxes`. Default empty.
+    #[serde(default)]
+    pub ocr_request_fields: HashMap<String, String>,
+    /// Per-page form fields, keyed by 1-based page number, merged over
+    /// `ocr_request_fields` for that page's request. Default empty.
+    #[serde(default)]
+    pub ocr_page_request_fields: HashMap<u32, HashMap<String, String>>,
     /// Path to tessdata directory. Falls back to TESSDATA_PREFIX env var if not set.
     pub tessdata_path: Option<String>,
     /// Maximum number of pages to parse.
@@ -67,6 +79,13 @@ pub struct LiteParseConfig {
     /// downstream than risk losing content. Only affects Markdown output.
     #[serde(default)]
     pub keep_headers_footers: bool,
+    /// Keep native text hidden by rectangular clips. By default a word that
+    /// lies entirely outside its clip (e.g. overflow from a fixed-height
+    /// table cell, which would otherwise land in the next row) is dropped;
+    /// a partly visible word is always kept whole. Set `true` to keep all
+    /// text the PDF contains, visible or not.
+    #[serde(default)]
+    pub keep_clipped_text: bool,
     /// Extract all PDF annotations into each parsed page. Default `false`.
     /// This is independent of `extract_links`, which only controls Markdown
     /// link reconstruction.
@@ -303,6 +322,8 @@ impl Default for LiteParseConfig {
             ocr_enabled: cfg!(feature = "tesseract"),
             ocr_server_url: None,
             ocr_server_headers: Vec::new(),
+            ocr_request_fields: HashMap::new(),
+            ocr_page_request_fields: HashMap::new(),
             tessdata_path: None,
             max_pages: 1000,
             target_pages: None,
@@ -319,6 +340,7 @@ impl Default for LiteParseConfig {
             image_output_dir: None,
             extract_links: true,
             keep_headers_footers: false,
+            keep_clipped_text: false,
             extract_annotations: false,
             extract_form_fields: false,
             extract_structure_tree: false,

@@ -4,10 +4,9 @@
 //! [`crate::extract`]. It applies no layout heuristics — no gap-based line or word
 //! merging, no invisible-text skip, no ligature expansion, no punctuation
 //! normalisation, no dedup — so its output is a stable function of what pdfium
-//! reports and a consumer can build its own segmentation on top. Glyphs hidden by
-//! known rectangular clips are omitted before grouping; partially clipped glyphs
-//! are kept in full whenever their loose box intersects the clip. Unknown clips
-//! preserve text.
+//! reports and a consumer can build its own segmentation on top. Words hidden by
+//! known rectangular clips are omitted before grouping; a word with any glyph
+//! inside its clip is kept whole. Unknown clips preserve text.
 //!
 //! Rules:
 //!
@@ -199,7 +198,7 @@ fn extract(
     let char_count = text_page.char_count();
     let page_rotation = page.rotation();
     let mut chunks = CharInfoChunks::new(text_page);
-    let clips = crate::text_clip::TextClip::new(page);
+    let clips = crate::text_clip::TextClip::new(page, text_page, false);
     let mut items = Vec::new();
     let mut run: Vec<Glyph> = Vec::new();
     // Outline shapes repeat across a page (the same glyph at the same size and
@@ -230,7 +229,7 @@ fn extract(
             ch: &ch,
             rec: chunks.as_mut().and_then(|chunks| chunks.record(i)),
         };
-        if clips.hides(&cv) {
+        if clips.hides(i) {
             flush(&mut run, &mut items);
             continue;
         }

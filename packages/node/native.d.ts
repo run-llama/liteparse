@@ -15,6 +15,17 @@ export interface JsLiteParseConfig {
    * (e.g. `{ Authorization: "Bearer <token>" }`).
    */
   ocrServerHeaders?: Record<string, string>
+  /**
+   * Form fields sent as-is with every request to `ocrServerUrl`, next to
+   * `file` and `language` (a `language` entry replaces it). LiteParse adds
+   * no other field.
+   */
+  ocrRequestFields?: Record<string, string>
+  /**
+   * Per-page form fields, keyed by 1-based page number, merged over
+   * `ocrRequestFields` for that page's request.
+   */
+  ocrPageRequestFields?: Record<string, Record<string, string>>
   /** Path to tessdata directory for Tesseract. */
   tessdataPath?: string
   /** Maximum number of pages to parse. */
@@ -66,6 +77,11 @@ export interface JsLiteParseConfig {
    * repeated page-band lines and page chrome (default false).
    */
   keepHeadersFooters?: boolean
+  /**
+   * Keep text hidden by rectangular clips (e.g. overflow from a
+   * fixed-height table cell) instead of dropping it. Default false.
+   */
+  keepClippedText?: boolean
   /** Extract all PDF annotations as page-scoped structured data. */
   extractAnnotations?: boolean
   /**

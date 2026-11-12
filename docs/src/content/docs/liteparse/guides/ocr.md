@@ -113,6 +113,27 @@ lit parse document.pdf \
 
 In the libraries this is `ocr_server_headers` / `ocrServerHeaders`, taking a map of header name to value. It has no effect unless an OCR server URL is set.
 
+### Request fields
+
+Each OCR request sends the page image as `file` and the language as `language`. Add any other form field your server understands with `ocr_request_fields` / `ocrRequestFields`, a map of field name to value sent as-is on every request. `ocr_page_request_fields` / `ocrPageRequestFields` maps a 1-based page number to more fields, merged over the base map for that page only. LiteParse adds no field of its own, and a `language` entry replaces the default. Neither option has a CLI flag.
+
+```typescript
+const parser = new LiteParse({
+  ocrServerUrl: "https://ocr.internal/ocr",
+  // Ask for measured word boxes and line angles on every page.
+  ocrRequestFields: {
+    correct_rotation: "true",
+    return_word_boxes: "true",
+    dense_ocr_detection: "true",
+    return_bbox_angles: "true",
+  },
+  // Page 3 is already upright: read it as sent.
+  ocrPageRequestFields: { 3: { correct_rotation: "false" } },
+});
+```
+
+When the response carries measured words, they become `TextItem.words` when word boxes are on (`emit_word_boxes`) and their count matches the words of the line's text. Otherwise, and for a line with no measured words, the line keeps one box, so output without the word-box fields is unchanged. A line's rotation comes from the server's angle when the response has one, and otherwise from the order of its quad's points.
+
 ### Parallel OCR workers
 
 LiteParse OCRs multiple pages in parallel. By default, it uses one fewer worker than your CPU core count. Override this with:

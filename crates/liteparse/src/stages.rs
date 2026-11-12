@@ -591,9 +591,11 @@ fn dedupe_rules(blocks: &mut Vec<PositionedBlock>) {
 /// page centre (`Page::ocr_deskew`) so lines group into rows. Projection,
 /// block classification and markdown all run on those upright items, and
 /// [`project`] carries the angle onto [`ParsedPage::ocr_deskew`]. This stage
-/// undoes the rotation on the output geometry: each OCR item box, its word
-/// boxes, and every layout block and table-cell box becomes the axis-aligned
-/// bound of itself rotated back about the page centre. Native items were
+/// undoes the rotation on the output geometry: each OCR item box and every
+/// layout block and table-cell box becomes the axis-aligned bound of itself
+/// rotated back about the page centre. A word box, which the merge moved by
+/// its centre at its measured size, moves its centre back and keeps its size,
+/// so it comes back as the rect the OCR engine measured. Native items were
 /// never rotated and stay put. Text and markdown do not change.
 ///
 /// Run it last, after [`layout_blocks`] (whose boxes it moves) and after
@@ -629,7 +631,9 @@ fn rotate_back_page(page: &mut ParsedPage, deg: f32) {
     {
         (item.x, item.y, item.width, item.height) = back(item.x, item.y, item.width, item.height);
         for w in &mut item.words {
-            (w.x, w.y, w.width, w.height) = back(w.x, w.y, w.width, w.height);
+            let (mx, my) =
+                ocr_merge::rotate_about(w.x + w.width / 2.0, w.y + w.height / 2.0, cx, cy, deg);
+            (w.x, w.y) = (mx - w.width / 2.0, my - w.height / 2.0);
         }
     }
     for block in page.blocks.iter_mut().flatten() {

@@ -468,6 +468,8 @@ class LiteParse:
         ocr_enabled: Optional[bool] = None,
         ocr_server_url: Optional[str] = None,
         ocr_server_headers: Optional[Dict[str, str]] = None,
+        ocr_request_fields: Optional[Dict[str, str]] = None,
+        ocr_page_request_fields: Optional[Dict[int, Dict[str, str]]] = None,
         ocr_language: Optional[str] = None,
         tessdata_path: Optional[str] = None,
         max_pages: Optional[int] = None,
@@ -485,6 +487,7 @@ class LiteParse:
         image_output_dir: Optional[Union[str, Path]] = None,
         extract_links: Optional[bool] = None,
         keep_headers_footers: Optional[bool] = None,
+        keep_clipped_text: Optional[bool] = None,
         extract_annotations: Optional[bool] = None,
         extract_form_fields: Optional[bool] = None,
         extract_structure_tree: Optional[bool] = None,
@@ -515,6 +518,13 @@ class LiteParse:
             ocr_server_url: URL of HTTP OCR server (uses Tesseract if not provided)
             ocr_server_headers: Extra HTTP headers sent with every request to
                 ``ocr_server_url`` (e.g. ``{"Authorization": "Bearer <token>"}``)
+            ocr_request_fields: Form fields sent as-is with every request to
+                ``ocr_server_url``, next to ``file`` and ``language`` (a
+                ``language`` entry replaces it). LiteParse adds no other field
+                (default: none)
+            ocr_page_request_fields: Per-page form fields, keyed by 1-based
+                page number, merged over ``ocr_request_fields`` for that page
+                (default: none)
             ocr_language: Language code for OCR (e.g., "eng", "fra")
             tessdata_path: Path to tessdata directory for Tesseract
             max_pages: Maximum number of pages to parse
@@ -535,6 +545,9 @@ class LiteParse:
             keep_headers_footers: Keep running headers/footers in markdown
                 output instead of stripping repeated page-band lines and page
                 chrome (default: False).
+            keep_clipped_text: Keep text hidden by rectangular clips (e.g.
+                overflow from a fixed-height table cell) instead of dropping it
+                (default: False).
             image_output_dir: Directory where extracted embedded images are
                 written. Requires ``extract_images=True`` and returns file
                 names/paths in each ``ExtractedImage``.
@@ -611,6 +624,10 @@ class LiteParse:
             kwargs["ocr_server_url"] = ocr_server_url
         if ocr_server_headers is not None:
             kwargs["ocr_server_headers"] = ocr_server_headers
+        if ocr_request_fields is not None:
+            kwargs["ocr_request_fields"] = ocr_request_fields
+        if ocr_page_request_fields is not None:
+            kwargs["ocr_page_request_fields"] = ocr_page_request_fields
         if ocr_language is not None:
             kwargs["ocr_language"] = ocr_language
         if tessdata_path is not None:
@@ -645,6 +662,8 @@ class LiteParse:
             kwargs["extract_links"] = extract_links
         if keep_headers_footers is not None:
             kwargs["keep_headers_footers"] = keep_headers_footers
+        if keep_clipped_text is not None:
+            kwargs["keep_clipped_text"] = keep_clipped_text
         if extract_annotations is not None:
             kwargs["extract_annotations"] = extract_annotations
         if extract_form_fields is not None:
@@ -971,6 +990,8 @@ class LiteParse:
             ocr_enabled=cfg.ocr_enabled,
             ocr_server_url=cfg.ocr_server_url,
             ocr_server_headers=cfg.ocr_server_headers,
+            ocr_request_fields=cfg.ocr_request_fields,
+            ocr_page_request_fields=cfg.ocr_page_request_fields,
             tessdata_path=cfg.tessdata_path,
             max_pages=cfg.max_pages,
             target_pages=cfg.target_pages,
@@ -986,6 +1007,7 @@ class LiteParse:
             image_output_dir=cfg.image_output_dir,
             extract_links=cfg.extract_links,
             keep_headers_footers=cfg.keep_headers_footers,
+            keep_clipped_text=cfg.keep_clipped_text,
             extract_annotations=cfg.extract_annotations,
             extract_form_fields=cfg.extract_form_fields,
             extract_structure_tree=cfg.extract_structure_tree,
