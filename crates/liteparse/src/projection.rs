@@ -572,7 +572,7 @@ fn form_lines(
     // Only subpixel glyph residuals may bridge a positive gap. Larger overlaps can
     // be word spaces hidden by loose font boxes, so those retain the grid check.
     const GLYPH_GAP_HEIGHT_RATIO: f32 = 0.001;
-    const GLYPH_OVERLAP_HEIGHT_RATIO: f32 = 0.015;
+    const GLYPH_OVERLAP_HEIGHT_RATIO: f32 = 0.04;
 
     fn gap_height(a: &ProjectedTextItem, b: &ProjectedTextItem) -> f32 {
         let height = |p: &ProjectedTextItem| p.item.font_height.unwrap_or(p.orig_height);
@@ -602,9 +602,11 @@ fn form_lines(
             return None;
         }
         let gap = b.orig_x - (a.orig_x + a.orig_width);
-        // Sheared font boxes can overlap across genuine word spaces.
+        // Monospace and sheared boxes can overlap across genuine word spaces.
         if gap < 0.0
-            && (canonical_rotation(a.item.rotation) != 0
+            && (is_mono_item(&a.item)
+                || is_mono_item(&b.item)
+                || canonical_rotation(a.item.rotation) != 0
                 || canonical_rotation(b.item.rotation) != 0)
         {
             return None;
@@ -6239,12 +6241,31 @@ mod tests {
 
     #[test]
     fn font_scaled_gap_checks_preserve_word_spaces_and_kerning() {
-        for (left, right, height, width, gap, rotation, expected) in [
-            ("word", "next", 12.75, 35.4, -0.222, 0.0, "word next"),
-            ("word", "next", 8.0, 15.885, 0.063, 10.0, "word next"),
-            ("word", "next", 6.745, 38.1856, -0.0706, 12.0, "word next"),
-            ("r", "e", 6.9975, 2.4281, -0.0979, 0.0, "re"),
-            ("Operati", "ng", 27.0, 86.5485, -0.2592, 0.0, "Operating"),
+        for (left, right, height, width, gap, rotation, mono, expected) in [
+            ("word", "next", 12.75, 35.4, -0.222, 0.0, true, "word next"),
+            ("word", "next", 8.0, 15.885, 0.063, 10.0, false, "word next"),
+            (
+                "word",
+                "next",
+                6.745,
+                38.1856,
+                -0.0706,
+                12.0,
+                false,
+                "word next",
+            ),
+            ("r", "e", 6.9975, 2.4281, -0.0979, 0.0, false, "re"),
+            ("W", "ord", 6.9975, 6.602, -0.2537, 0.0, false, "Word"),
+            (
+                "Operati",
+                "ng",
+                27.0,
+                86.5485,
+                -0.2592,
+                0.0,
+                false,
+                "Operating",
+            ),
         ] {
             let mut items = vec![
                 item_at(left, 40.0, 100.0, width, height),
@@ -6253,6 +6274,9 @@ mod tests {
             for item in &mut items {
                 item.item.font_height = Some(height);
                 item.item.rotation = rotation;
+                if mono {
+                    item.item.font_name = Some("Courier".into());
+                }
                 item.item.width = item.item.width.round();
                 item.item.height = item.item.height.round();
             }
