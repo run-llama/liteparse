@@ -31,7 +31,7 @@ lit parse [options] <file>
 | `--image-output-dir <dir>` | Directory to write extracted images to. Requires `--extract-images` (or `--image-mode embed`, which implies it) | — |
 | `--no-links` | Emit link anchor text as plain text (no `[text](url)`) in markdown | — |
 | `--keep-headers-footers` | Keep running header/footer chrome in markdown instead of stripping it | — |
-| `--keep-clipped-text` | Keep text hidden by clips (e.g. overflow from fixed-height table cells) | — |
+| `--keep-clipped-text` | Keep text hidden by clips (e.g. overflow from fixed-height table cells). Requires a source build; not available in the npm or Python 2.18.0 packages. | — |
 | `--no-ocr` | Disable OCR entirely | — |
 | `--ocr-language <lang>` | OCR language code (Tesseract format) | `eng` |
 | `--ocr-server-url <url>` | HTTP OCR server URL | — (uses Tesseract) |
