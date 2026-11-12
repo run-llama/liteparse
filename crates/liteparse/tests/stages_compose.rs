@@ -1048,3 +1048,106 @@ async fn widget_text_survives_extracting_an_earlier_page_first() {
     assert!(texts[0].contains("Running header"), "page 1: {}", texts[0]);
     assert!(texts[1].contains("Running header"), "page 2: {}", texts[1]);
 }
+
+/// A 24x24 pt page filled by a synthetic 100x100 px (300 dpi) dot-screen image
+/// (2x2 px dots every 6 px), stored at `bits` per pixel.
+fn dot_screen_pdf(bits: u8) -> Vec<u8> {
+    let (w, h) = (100usize, 100usize);
+    let ink = |x: usize, y: usize| x % 6 < 2 && y % 6 < 2;
+    let mut data = Vec::new();
+    for y in 0..h {
+        if bits == 1 {
+            // DeviceGray 1 bpc: 0 = black, rows padded to a byte.
+            let mut row = vec![0xFFu8; w.div_ceil(8)];
+            for x in (0..w).filter(|&x| ink(x, y)) {
+                row[x / 8] &= !(0x80 >> (x % 8));
+            }
+            data.extend(row);
+        } else {
+            data.extend((0..w).map(|x| if ink(x, y) { 0u8 } else { 255 }));
+        }
+    }
+    let content = b"q 24 0 0 24 0 0 cm /Im1 Do Q";
+    let objects: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 24 24] /Resources << /XObject << /Im1 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        [format!("<< /Length {} >>\nstream\n", content.len()).as_bytes(), content, b"\nendstream"].concat(),
+        [
+            format!(
+                "<< /Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceGray /BitsPerComponent {bits} /Length {} >>\nstream\n",
+                data.len()
+            )
+            .as_bytes(),
+            &data,
+            b"\nendstream",
+        ]
+        .concat(),
+    ];
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        pdf.extend_from_slice(object);
+        pdf.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    pdf
+}
+
+/// Count of dark raster pixels after rendering the dot screen for OCR at 300 dpi.
+fn dark_pixels(bits: u8, despeckle: bool) -> usize {
+    let lib = Library::init();
+    // pdfium reads the bytes in place, so they must outlive `document`.
+    let input = PdfInput::Bytes(dot_screen_pdf(bits));
+    let document = stages::open(&lib, &input, None, &[]).unwrap();
+    let parser = LiteParse::new(LiteParseConfig::default());
+    let pages = stages::extract(&document, &parser.extract_request(None, usize::MAX))
+        .unwrap()
+        .pages;
+    let options = stages::OcrRenderOptions {
+        dpi: 300.0, // 1 image px per raster px
+        grayscale: true,
+        despeckle_scans: despeckle,
+        ..stages::OcrRenderOptions::default()
+    };
+    let (rasters, _) = stages::render_for_ocr(&document, &pages, 0, &options).unwrap();
+    assert_eq!(rasters.len(), 1, "an image-only page needs OCR");
+    rasters[0]
+        .image
+        .pixels(true)
+        .unwrap()
+        .iter()
+        .filter(|&&p| p < 128)
+        .count()
+}
+
+/// Only 1-bit full-page scans get despeckled, and only with the option on.
+#[test]
+#[serial]
+fn despeckle_scans_only_touches_one_bit_scans() {
+    assert!(dark_pixels(1, false) > 0);
+    assert!(
+        dark_pixels(8, true) > 0,
+        "8-bit scan must not be despeckled"
+    );
+    assert_eq!(
+        dark_pixels(1, true),
+        0,
+        "1-bit dot screen should be despeckled"
+    );
+}

@@ -77,6 +77,11 @@ export interface JsLiteParseConfig {
    * repeated page-band lines and page chrome (default false).
    */
   keepHeadersFooters?: boolean
+  /**
+   * Keep text hidden by rectangular clips (e.g. overflow from a
+   * fixed-height table cell) instead of dropping it. Default false.
+   */
+  keepClippedText?: boolean
   /** Extract all PDF annotations as page-scoped structured data. */
   extractAnnotations?: boolean
   /**
@@ -121,6 +126,11 @@ export interface JsLiteParseConfig {
    * results when OCR is unavailable, instead of rejecting.
    */
   ocrFailureFatal?: boolean
+  /**
+   * Remove dot-screen specks from OCR rasters of speckled 1-bit full-page
+   * scans rendered at 200 dpi or more. Default true.
+   */
+  ocrDespeckleScans?: boolean
   /**
    * OCR request-hedging schedule (ms). Empty/unset = no hedging. Multiple
    * delays (e.g. `[0, 5000, 10000]`) fire duplicate requests per attempt and

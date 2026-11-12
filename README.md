@@ -518,6 +518,7 @@ Options:
       --extract-vector-graphics Include page vector shapes and merged H/V lines
       --no-links               Emit link anchor text as plain text (no [text](url)) in markdown
       --keep-headers-footers   Keep running headers/footers in markdown (skip repeated-line stripping)
+      --keep-clipped-text      Keep text hidden by clips (e.g. overflow from fixed-height table cells)
       --extract-annotations    Include PDF annotations in page output
       --extract-form-fields    Include AcroForm widget fields and values
       --preserve-small-text    Keep very small text
@@ -678,16 +679,31 @@ packages/
 
 ### Building
 
+Install the [development prerequisites](CONTRIBUTING.md#development-prerequisites)
+before building from source. All builds need the Rust toolchain; the bindings
+also need their language-specific tools. The Python build needs an active
+virtual environment, and the WASM build needs `wasm-pack`.
+
+Run each example below from the repository root.
+
 ```bash
 # Build the CLI
 cargo build --release -p liteparse
+```
 
+```bash
 # Build Node.js bindings
-cd packages/node && npm run build
+cd packages/node
+npm install
+npm run build
+```
 
+```bash
 # Build Python bindings
 cd packages/python && maturin develop --release
+```
 
+```bash
 # Build WASM
 cd packages/wasm && npm run build
 ```
