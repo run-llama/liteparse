@@ -117,7 +117,7 @@ All optional, camelCase:
 | `imageMode` | `"off" \| "placeholder" \| "embed"` | `"placeholder"` | How image references appear in markdown. Also accepts `"none"` for `off` |
 | `extractLinks` | `boolean` | `true` | Render `[text](url)` in markdown |
 | `keepHeadersFooters` | `boolean` | `false` | Keep running header/footer chrome in markdown |
-| `keepClippedText` | `boolean` | `false` | Keep text hidden by clips (e.g. overflow from fixed-height table cells) |
+| `keepClippedText` | `boolean` | `false` | Keep text hidden by clips (e.g. overflow from fixed-height table cells). Requires a source build; not available in WASM 2.18.0. |
 | `emitWordBoxes` | `boolean` | `false` | Per-word sub-boxes on each text item |
 
 The [extraction options](/liteparse/guides/extraction/) — `extractImages`, `extractVectorGraphics`, `extractAnnotations`, `extractFormFields`, `extractStructureTree`, `extractContentBounds`, `extractXfaPackets`, `extractTextMetadata`, `includeComplexity`, and `renderFormFields` — are all available here too, with the same camelCase names and the same `false` defaults.
