@@ -487,6 +487,7 @@ class LiteParse:
         image_output_dir: Optional[Union[str, Path]] = None,
         extract_links: Optional[bool] = None,
         keep_headers_footers: Optional[bool] = None,
+        keep_clipped_text: Optional[bool] = None,
         extract_annotations: Optional[bool] = None,
         extract_form_fields: Optional[bool] = None,
         extract_structure_tree: Optional[bool] = None,
@@ -543,6 +544,9 @@ class LiteParse:
             keep_headers_footers: Keep running headers/footers in markdown
                 output instead of stripping repeated page-band lines and page
                 chrome (default: False).
+            keep_clipped_text: Keep text hidden by rectangular clips (e.g.
+                overflow from a fixed-height table cell) instead of dropping it
+                (default: False).
             image_output_dir: Directory where extracted embedded images are
                 written. Requires ``extract_images=True`` and returns file
                 names/paths in each ``ExtractedImage``.
@@ -653,6 +657,8 @@ class LiteParse:
             kwargs["extract_links"] = extract_links
         if keep_headers_footers is not None:
             kwargs["keep_headers_footers"] = keep_headers_footers
+        if keep_clipped_text is not None:
+            kwargs["keep_clipped_text"] = keep_clipped_text
         if extract_annotations is not None:
             kwargs["extract_annotations"] = extract_annotations
         if extract_form_fields is not None:
@@ -994,6 +1000,7 @@ class LiteParse:
             image_output_dir=cfg.image_output_dir,
             extract_links=cfg.extract_links,
             keep_headers_footers=cfg.keep_headers_footers,
+            keep_clipped_text=cfg.keep_clipped_text,
             extract_annotations=cfg.extract_annotations,
             extract_form_fields=cfg.extract_form_fields,
             extract_structure_tree=cfg.extract_structure_tree,

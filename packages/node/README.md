@@ -98,6 +98,7 @@ const parser = new LiteParse({
   imageOutputDir: './images',    // Write images and return name/path metadata (optional)
   extractLinks: true,            // Render [text](url) links in markdown output
   keepHeadersFooters: false,     // Keep running headers/footers in markdown output
+  keepClippedText: false,        // Keep text hidden by clips (e.g. table-cell overflow)
   extractVectorGraphics: false,  // Opt-in shapes + merged H/V lines per page
   extractAnnotations: false,     // Include page annotations in structured output
   extractFormFields: false,      // Include AcroForm widget fields and values

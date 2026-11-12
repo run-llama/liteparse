@@ -77,6 +77,11 @@ export interface JsLiteParseConfig {
    * repeated page-band lines and page chrome (default false).
    */
   keepHeadersFooters?: boolean
+  /**
+   * Keep text hidden by rectangular clips (e.g. overflow from a
+   * fixed-height table cell) instead of dropping it. Default false.
+   */
+  keepClippedText?: boolean
   /** Extract all PDF annotations as page-scoped structured data. */
   extractAnnotations?: boolean
   /**

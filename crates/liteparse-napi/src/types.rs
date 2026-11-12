@@ -76,6 +76,9 @@ pub struct JsLiteParseConfig {
     /// Keep running headers/footers in markdown output instead of stripping
     /// repeated page-band lines and page chrome (default false).
     pub keep_headers_footers: Option<bool>,
+    /// Keep text hidden by rectangular clips (e.g. overflow from a
+    /// fixed-height table cell) instead of dropping it. Default false.
+    pub keep_clipped_text: Option<bool>,
     /// Extract all PDF annotations as page-scoped structured data.
     pub extract_annotations: Option<bool>,
     /// Emit each page's classified layout blocks (headings, paragraphs, list
@@ -238,6 +241,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.keep_headers_footers {
             cfg.keep_headers_footers = v;
         }
+        if let Some(v) = self.keep_clipped_text {
+            cfg.keep_clipped_text = v;
+        }
         if let Some(v) = self.extract_annotations {
             cfg.extract_annotations = v;
         }
@@ -347,6 +353,7 @@ impl JsLiteParseConfig {
             image_output_dir: cfg.image_output_dir.clone(),
             extract_links: Some(cfg.extract_links),
             keep_headers_footers: Some(cfg.keep_headers_footers),
+            keep_clipped_text: Some(cfg.keep_clipped_text),
             extract_annotations: Some(cfg.extract_annotations),
             extract_blocks: Some(cfg.extract_blocks),
             extract_form_fields: Some(cfg.extract_form_fields),

@@ -352,8 +352,15 @@ fn extract_single_page(
     // walk — so the whole path costs one `form_type()` call for most files.
     let extract_text = |page: &Page| -> Result<Vec<TextItem>, LiteParseError> {
         let text_page = page.text()?;
-        let spans = page_math_spans(page, &text_page, &view_box, &paths, glyph_resolver)
-            .unwrap_or_default();
+        let spans = page_math_spans(
+            page,
+            &text_page,
+            &view_box,
+            &paths,
+            glyph_resolver,
+            output_options.keep_clipped_text,
+        )
+        .unwrap_or_default();
         let (emitted, consumed) = crate::tex_math::emitted(&spans);
         let mut items = extract_page_text_items(
             page,
@@ -508,6 +515,8 @@ pub struct ExtractionOutputOptions {
     /// Split items at a superscript / subscript run (a size step with a baseline shift), so
     /// markdown can mark it. Plain text keeps such runs in their word.
     pub split_scripts: bool,
+    /// Keep native text hidden by rectangular clips (e.g. overflow in a fixed-height cell).
+    pub keep_clipped_text: bool,
 }
 
 fn non_empty(value: &Option<String>) -> Option<String> {
@@ -1593,6 +1602,7 @@ fn extract_page_text_items(
         emit_word_boxes,
         extract_text_metadata,
         split_scripts,
+        keep_clipped_text,
         ..
     } = *output_options;
     let char_count = text_page.char_count();
@@ -1630,7 +1640,7 @@ fn extract_page_text_items(
         eprintln!("[extract-debug] char_count={char_count}, skip_invisible={skip_invisible}");
     }
 
-    let clips = crate::text_clip::TextClip::new(page);
+    let clips = crate::text_clip::TextClip::new(page, text_page, keep_clipped_text);
     let page_rotation = page.rotation();
     let vp_xform = page.viewport_transform(view_box);
     let mut items: Vec<TextItem> = Vec::new();
@@ -1648,7 +1658,7 @@ fn extract_page_text_items(
             ch: &ch,
             rec: char_chunks.as_mut().and_then(|chunks| chunks.record(i)),
         };
-        if clips.hides(&cv) || math_chars.contains(&i) {
+        if clips.hides(i) || math_chars.contains(&i) {
             seg.flush(&mut items);
             continue;
         }
@@ -2089,6 +2099,7 @@ fn page_math_spans(
     view_box: &RectF,
     paths: &[PathObject],
     glyph_resolver: Option<&dyn crate::GlyphResolver>,
+    keep_clipped_text: bool,
 ) -> Option<Vec<crate::tex_math::MathSpan>> {
     use crate::tex_math::{RawChar, RawText, Rule};
     let char_count = text_page.char_count();
@@ -2112,7 +2123,7 @@ fn page_math_spans(
     if !has_tex_font {
         return None;
     }
-    let clips = crate::text_clip::TextClip::new(page);
+    let clips = crate::text_clip::TextClip::new(page, text_page, keep_clipped_text);
     let page_rotation = page.rotation();
     let vp_xform = page.viewport_transform(view_box);
     let (_, page_h) = page.viewport_size(view_box);
@@ -2135,7 +2146,7 @@ fn page_math_spans(
             ch: &ch,
             rec: char_chunks.as_mut().and_then(|chunks| chunks.record(i)),
         };
-        if cv.is_generated() || cv.text_render_mode() == Some(3) || clips.hides(&cv) {
+        if cv.is_generated() || cv.text_render_mode() == Some(3) || clips.hides(i) {
             continue;
         }
         // Upright glyphs only.
