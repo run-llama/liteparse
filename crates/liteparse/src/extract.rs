@@ -1791,6 +1791,9 @@ fn extract_page_text_items(
             continue;
         };
         let vp_strict = vp_xform.transform_bounds(&strict_rect);
+        let baseline = ch
+            .origin()
+            .map(|(ox, oy)| vp_xform.transform_point(ox as f32, oy as f32).1);
 
         if seg.has_content {
             // Use viewport-space coordinates for gap/overlap checks
@@ -1838,9 +1841,25 @@ fn extract_page_text_items(
             let backward_jump = char_w > 0.0 && gap < -(char_w * 3.0) && !is_combining_mark(c);
             let very_large_backward_jump =
                 (seg_width > 20.0 && gap < -(seg_width * 0.5)) || backward_jump;
+            // 4. Baseline step: the glyph sits on a baseline well above or below the
+            //    previous glyph's, at a size the strict boxes still overlap (a line set
+            //    a few points above the run's own, right after it). Only upright
+            //    horizontal runs at the run's own size: raised / lowered smaller
+            //    type (footnote markers, CO2, 10th) stays put or goes to `size_break`.
+            let cur_h = (vp_loose.bottom - vp_loose.top).abs();
+            let last_h = seg.last_char_loose_height;
+            let same_size = last_h > 0.0 && cur_h > last_h * 0.9 && last_h > cur_h * 0.9;
+            let baseline_step = seg.rotation_deg.abs() < 1.0
+                && same_size
+                && !is_combining_mark(c)
+                && match (baseline, seg.last_char_baseline) {
+                    (Some(b), Some(last)) => (b - last).abs() > 0.4 * cur_h.min(last_h),
+                    _ => false,
+                };
             let line_changed = vp_strict.top > seg.last_char_bottom + y_tolerance
                 || (strict_below && large_backward_jump)
-                || very_large_backward_jump;
+                || very_large_backward_jump
+                || baseline_step;
 
             // Dot leader detection: break at the boundary between dots and non-dots.
             // This prevents items like "Total . . . . 330,100" from merging.
@@ -1935,6 +1954,7 @@ fn extract_page_text_items(
                     c,
                     &vp_loose,
                     &vp_strict,
+                    baseline,
                     &cv,
                     recovered,
                     page_rotation,
@@ -1951,6 +1971,7 @@ fn extract_page_text_items(
                         c,
                         &vp_loose,
                         &vp_strict,
+                        baseline,
                         &cv,
                         recovered,
                         page_rotation,
@@ -1979,7 +2000,7 @@ fn extract_page_text_items(
                         }
                     }
                     seg.commit_pending_space();
-                    seg.push_char(c, &vp_loose, &vp_strict, &cv, recovered);
+                    seg.push_char(c, &vp_loose, &vp_strict, baseline, &cv, recovered);
                     seg.append_ligature_tail(ligature_tail);
                 }
             } else {
@@ -2026,7 +2047,7 @@ fn extract_page_text_items(
                     seg.text.push(' ');
                     seg.break_word();
                 }
-                seg.push_char(c, &vp_loose, &vp_strict, &cv, recovered);
+                seg.push_char(c, &vp_loose, &vp_strict, baseline, &cv, recovered);
                 seg.append_ligature_tail(ligature_tail);
             }
         } else {
@@ -2035,6 +2056,7 @@ fn extract_page_text_items(
                 c,
                 &vp_loose,
                 &vp_strict,
+                baseline,
                 &cv,
                 recovered,
                 page_rotation,
@@ -3481,6 +3503,10 @@ struct SegmentBuilder {
     dir_rtl: Option<bool>,
     // Bottom of last char strict bounds (for line-change detection)
     last_char_bottom: f32,
+    // Viewport-space baseline (glyph origin y) of the last char, when PDFium reports one.
+    last_char_baseline: Option<f32>,
+    // Loose-box height of the last char (its line height at its own size).
+    last_char_loose_height: f32,
     // Count of non-space characters (for avg width calculation)
     char_count: usize,
     // Count of characters whose Unicode came from PDFium's char-code fallback
@@ -3546,6 +3572,8 @@ impl SegmentBuilder {
             last_char_loose_left: f32::MAX,
             dir_rtl: None,
             last_char_bottom: f32::MIN,
+            last_char_baseline: None,
+            last_char_loose_height: 0.0,
             char_count: 0,
             unmapped_char_count: 0,
             font_name: None,
@@ -3690,6 +3718,7 @@ impl SegmentBuilder {
         c: char,
         vp_loose: &RectF,
         vp_strict: &RectF,
+        baseline: Option<f32>,
         cv: &CharView<'_, '_>,
         recovered: bool,
         page_rotation: i32,
@@ -3735,6 +3764,8 @@ impl SegmentBuilder {
         self.last_char_left = vp_strict.left;
         self.last_char_loose_left = vp_loose.left;
         self.last_char_bottom = vp_strict.bottom;
+        self.last_char_baseline = baseline;
+        self.last_char_loose_height = (vp_loose.bottom - vp_loose.top).abs();
         self.dir_rtl = None;
         self.note_direction(c);
         self.char_count = 1;
@@ -3852,6 +3883,7 @@ impl SegmentBuilder {
         c: char,
         vp_loose: &RectF,
         vp_strict: &RectF,
+        baseline: Option<f32>,
         cv: &CharView<'_, '_>,
         recovered: bool,
     ) {
@@ -3888,6 +3920,8 @@ impl SegmentBuilder {
         self.last_char_left = vp_strict.left;
         self.last_char_loose_left = vp_loose.left;
         self.last_char_bottom = vp_strict.bottom;
+        self.last_char_baseline = baseline;
+        self.last_char_loose_height = (vp_loose.bottom - vp_loose.top).abs();
         self.note_direction(c);
         self.char_count += 1;
         if self.extract_text_metadata {
