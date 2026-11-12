@@ -241,22 +241,28 @@ fn copy_dylib_to_target_deps(lib_dir: &Path) {
         return;
     }
 
-    // OUT_DIR is typically target/<profile>/build/<pkg>-<hash>/out
-    // We want target/<profile>/deps which is 3 levels up then into deps
+    // OUT_DIR is target/<profile>/build/<pkg>-<hash>/out (cargo < 1.100) or
+    // target/<profile>/build/<pkg>/<hash>/out (cargo >= 1.100). Walk up to the
+    // `build` dir; its parent is target/<profile>. Cargo >= 1.100 no longer
+    // creates target/<profile>/deps, so create it for the CI copy scripts.
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    if let Some(build_dir) = out_dir
-        .parent()
+    let Some(profile_dir) = out_dir
+        .ancestors()
+        .find(|p| p.file_name().is_some_and(|n| n == "build"))
         .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-    {
-        let deps_dir = build_dir.join("deps");
-        if deps_dir.is_dir() {
-            let dst = deps_dir.join(dylib_name);
-            fs::copy(&src, &dst).unwrap_or_else(|e| {
-                panic!("failed to copy {} to {}: {e}", src.display(), dst.display())
-            });
-        }
-    }
+    else {
+        println!(
+            "cargo:warning=pdfium-sys: unrecognized OUT_DIR layout ({}); {dylib_name} not copied into target/<profile>/deps",
+            out_dir.display()
+        );
+        return;
+    };
+    let deps_dir = profile_dir.join("deps");
+    fs::create_dir_all(&deps_dir)
+        .unwrap_or_else(|e| panic!("failed to create {}: {e}", deps_dir.display()));
+    let dst = deps_dir.join(dylib_name);
+    fs::copy(&src, &dst)
+        .unwrap_or_else(|e| panic!("failed to copy {} to {}: {e}", src.display(), dst.display()));
 }
 
 fn run_bindgen(include_dir: &Path) {
