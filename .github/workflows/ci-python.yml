@@ -91,6 +91,13 @@ jobs:
             target
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-python-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Stage pdfium for wheel inclusion
+        if: ${{ !matrix.musl }}
+        shell: bash
+        # Stage the library before maturin builds the wheel so packaging does
+        # not depend on Cargo's internal build directory layout.
+        run: bash packages/python/scripts/download-pdfium.sh ${{ matrix.target }}
+
       - name: Build wheels (glibc)
         if: ${{ !matrix.musl }}
         uses: PyO3/maturin-action@v1
@@ -127,71 +134,6 @@ jobs:
           # The container runs as root; fix perms so subsequent steps can
           # read/upload the produced wheel.
           sudo chmod -R a+rw packages/python/dist/ || true
-
-      - name: Copy pdfium dylib into wheel (Unix)
-        if: runner.os != 'Windows' && !matrix.musl
-        working-directory: packages/python
-        run: |
-          # Fix permissions from Docker/maturin build
-          sudo chmod -R a+rw dist/ || true
-          # Find pdfium in target/ (mounted from Docker) or cache
-          PDFIUM_LIB=$(find ../../target -name "libpdfium.so" -type f 2>/dev/null | head -1 || true)
-          if [ -z "$PDFIUM_LIB" ]; then
-            PDFIUM_LIB=$(find ~/.cache/pdfium-rs -name "libpdfium.so" -type f 2>/dev/null | head -1 || true)
-          fi
-          if [ -n "$PDFIUM_LIB" ]; then
-            export PDFIUM_LIB_PATH="$(dirname "$PDFIUM_LIB")"
-          fi
-          bash scripts/copy-pdfium.sh
-          for whl in dist/*.whl; do
-            python -c "
-          import zipfile, os, sys
-          whl = sys.argv[1]
-          if sys.platform == 'darwin':
-              dylib = 'libpdfium.dylib'
-          else:
-              dylib = 'libpdfium.so'
-          dylib_path = os.path.join('liteparse', dylib)
-          if not os.path.exists(dylib_path):
-              print(f'Warning: {dylib_path} not found, skipping')
-              sys.exit(0)
-          with zipfile.ZipFile(whl, 'a') as z:
-              z.write(dylib_path, f'liteparse/{dylib}')
-          print(f'Added {dylib} to {whl}')
-          " "$whl"
-          done
-
-      - name: Copy pdfium dylib into wheel (Windows)
-        if: runner.os == 'Windows'
-        working-directory: packages/python
-        shell: pwsh
-        run: |
-          $cacheBase = "$env:LOCALAPPDATA\pdfium-rs"
-          if (-not (Test-Path $cacheBase)) {
-            $cacheBase = "$env:USERPROFILE\.cache\pdfium-rs"
-          }
-          $dll = Get-ChildItem -Path $cacheBase -Recurse -Filter "pdfium.dll" | Select-Object -First 1
-          if (-not $dll) {
-            $dll = Get-ChildItem -Path "..\..\target" -Recurse -Filter "pdfium.dll" | Select-Object -First 1
-          }
-          if ($dll) {
-            Copy-Item $dll.FullName -Destination "liteparse\pdfium.dll"
-            Write-Host "Copied $($dll.FullName) -> liteparse\pdfium.dll"
-            foreach ($whl in Get-ChildItem dist\*.whl) {
-              python -c @"
-          import zipfile, sys, os
-          whl = sys.argv[1]
-          dll = os.path.join('liteparse', 'pdfium.dll')
-          if os.path.exists(dll):
-              with zipfile.ZipFile(whl, 'a') as z:
-                  z.write(dll, 'liteparse/pdfium.dll')
-              print(f'Added pdfium.dll to {whl}')
-          "@ $whl.FullName
-            }
-          } else {
-            Write-Error "Could not find pdfium.dll"
-            exit 1
-          }
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
