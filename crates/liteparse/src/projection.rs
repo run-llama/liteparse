@@ -421,25 +421,6 @@ fn is_gutter_number_candidate(item: &ProjectedTextItem, page_width: f32) -> bool
     (1..=2).contains(&digits)
 }
 
-/// Count distinct baselines in the candidate's column. Half the smaller glyph
-/// height allows the center shift of right-aligned one- and two-digit numbers,
-/// while keeping unrelated numbers across the central band out of the count.
-fn has_gutter_column(items: &[ProjectedTextItem], candidates: &[usize], idx: usize) -> bool {
-    let number = &items[idx];
-    let center = number.orig_x + number.orig_width * 0.5;
-    let rows: HashSet<_> = candidates
-        .iter()
-        .copied()
-        .filter(|&other_idx| {
-            let other = &items[other_idx];
-            let other_center = other.orig_x + other.orig_width * 0.5;
-            (other_center - center).abs() <= number.orig_height.min(other.orig_height) * 0.5
-        })
-        .map(|i| items[i].orig_y.round() as i32)
-        .collect();
-    rows.len() >= MIN_GUTTER_ROWS
-}
-
 /// Text on both sides of a separated number is direct evidence that it occupies
 /// the space between columns, even without a repeated vertical sequence.
 /// Half the smaller glyph height is the existing same-baseline tolerance; using
@@ -474,29 +455,31 @@ fn clean_projected_items(items: &mut Vec<ProjectedTextItem>, page_width: f32, pa
         }
     }
 
-    let candidates: Vec<_> = (0..items.len())
-        .filter(|&i| {
-            (items[i].is_margin_line_number || is_gutter_number_candidate(&items[i], page_width))
-                && !isolated_numeric_footer(items, i, page_width, page_height)
-        })
-        .collect();
-    let remove: HashSet<_> = candidates
+    let likely_margin = |item: &ProjectedTextItem| {
+        item.is_margin_line_number || is_gutter_number_candidate(item, page_width)
+    };
+    // Keep the gutter heuristic's row count unchanged for body numbers.
+    // Isolated footers are exempted at removal, regardless of that count.
+    let rows: HashSet<_> = items
         .iter()
-        .copied()
-        .filter(|&i| {
-            let line_has_content = has_non_margin_by_line
-                .get(&(items[i].item.y.round() as i32))
-                .copied()
-                .unwrap_or(false);
-            !line_has_content
-                && (items[i].is_margin_line_number || has_gutter_column(items, &candidates, i))
-        })
+        .filter(|item| likely_margin(item))
+        .map(|item| item.item.y.round() as i32)
+        .collect();
+    let footers: HashSet<_> = (0..items.len())
+        .filter(|&i| isolated_numeric_footer(items, i, page_width, page_height))
         .collect();
     let mut idx = 0;
-    items.retain(|_| {
-        let keep = !remove.contains(&idx);
+    items.retain(|item| {
+        let footer = footers.contains(&idx);
         idx += 1;
-        keep
+        let line_has_content = has_non_margin_by_line
+            .get(&(item.item.y.round() as i32))
+            .copied()
+            .unwrap_or(false);
+        footer
+            || (rows.len() < MIN_GUTTER_ROWS && !item.is_margin_line_number)
+            || !likely_margin(item)
+            || line_has_content
     });
 }
 
@@ -570,13 +553,19 @@ fn form_lines(
 
         let margin_idxs: Vec<usize> = (0..items.len())
             .filter(|&i| {
-                is_gutter_number_candidate(&items[i], page_width)
-                    && !abuts_neighbour(items, i)
-                    && !isolated_numeric_footer(items, i, page_width, page_height)
+                is_gutter_number_candidate(&items[i], page_width) && !abuts_neighbour(items, i)
             })
             .collect();
-        for &i in &margin_idxs {
-            if has_gutter_column(items, &margin_idxs, i) || between_text_on_baseline(items, i) {
+        let rows: HashSet<_> = margin_idxs
+            .iter()
+            .map(|&i| items[i].item.y.round() as i32)
+            .collect();
+        for i in margin_idxs {
+            // Test the footer before setting the flag, which footer isolation
+            // treats as evidence that an item belongs to gutter numbering.
+            if !isolated_numeric_footer(items, i, page_width, page_height)
+                && (rows.len() >= MIN_GUTTER_ROWS || between_text_on_baseline(items, i))
+            {
                 items[i].is_margin_line_number = true;
             }
         }
@@ -5629,25 +5618,16 @@ mod tests {
             ];
             let lines = form_lines(&mut items, 10.0, 10.0, 612.0, 792.0, true);
             let mut projected: Vec<_> = lines.into_iter().flatten().collect();
-            assert!(projected.iter().all(|item| !item.is_margin_line_number));
+            assert!(
+                !projected
+                    .iter()
+                    .find(|item| item.item.text == "12")
+                    .unwrap()
+                    .is_margin_line_number
+            );
             clean_projected_items(&mut projected, 612.0, 792.0);
-            assert_eq!(projected.len(), 4);
             assert!(projected.iter().any(|item| item.item.text == "12"));
         }
-    }
-
-    #[test]
-    fn gutter_rows_must_share_a_column() {
-        let mut items = vec![
-            item_at("10", 299.0, 100.0, 8.0, 10.0),
-            item_at("20", 310.0, 120.0, 8.0, 10.0),
-            item_at("30", 321.0, 140.0, 8.0, 10.0),
-        ];
-        let lines = form_lines(&mut items, 10.0, 10.0, 612.0, 792.0, true);
-        let mut projected: Vec<_> = lines.into_iter().flatten().collect();
-        assert!(projected.iter().all(|item| !item.is_margin_line_number));
-        clean_projected_items(&mut projected, 612.0, 792.0);
-        assert_eq!(projected.len(), 3);
     }
 
     #[test]

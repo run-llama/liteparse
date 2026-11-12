@@ -241,6 +241,7 @@ pub fn classify_page_with_filters(
     // Strip running header/footer lines up-front so they don't leak into
     // table detection (a repeating two-column footer would otherwise look
     // like a 2-row table) or paragraph grouping.
+
     // A footer can extend a candidate table region and reduce the fraction of
     // lines that look tabular, rejecting an otherwise valid table. Classify the
     // body first, then append the detached footer after paragraph stitching.
