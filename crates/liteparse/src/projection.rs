@@ -865,6 +865,13 @@ fn form_lines(
                         cs.next() == Some('.') && cs.next().is_some_and(|c| c.is_ascii_digit())
                     };
                 if is_decimal_continuation {
+                    // Markdown renders the pieces, so a numeric suffix must join both views.
+                    if style_runs
+                        && (!prev.item.style_pieces.is_empty()
+                            || !same_emphasis(&prev.item, &item.item))
+                    {
+                        record_style_piece(&mut prev.item, &item.item, "");
+                    }
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
                     prev.item.text.push_str(&item.item.text);
                     prev.item.words.append(&mut item.item.words);
@@ -907,7 +914,7 @@ fn form_lines(
                     && delta_x <= MERGE_THRESHOLD
                 {
                     if keep_pieces {
-                        record_style_piece(&mut prev.item, &item.item);
+                        record_style_piece(&mut prev.item, &item.item, "");
                     }
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
                     join_in_reading_order(&mut prev.item.text, &item.item.text, "");
@@ -920,7 +927,7 @@ fn form_lines(
                 let avg_char_width = prev.item.width / prev_len;
                 if y_compatible && !both_are_numbers && delta_x < avg_char_width {
                     if keep_pieces {
-                        record_style_piece(&mut prev.item, &item.item);
+                        record_style_piece(&mut prev.item, &item.item, " ");
                     }
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
                     join_in_reading_order(&mut prev.item.text, &item.item.text, " ");
@@ -3237,21 +3244,37 @@ fn mark_script_items(line: &mut [ProjectedTextItem]) {
     }
 }
 
-/// Before `next` merges into `prev`: keep both as styled pieces (`TextItem::style_pieces`), `prev`
-/// as it was before any merge and `next` with its own pieces flattened in.
-fn record_style_piece(prev: &mut TextItem, next: &TextItem) {
+/// Keep every merged character in the pieces Markdown renders. A silent LTR
+/// continuation with the same style stays in one piece, preserving URLs and numbers.
+fn record_style_piece(prev: &mut TextItem, next: &TextItem, sep: &str) {
     if prev.style_pieces.is_empty() {
         let mut first = prev.clone();
         first.words.clear();
         prev.style_pieces.push(first);
     }
-    if next.style_pieces.is_empty() {
+    let mut pieces = if next.style_pieces.is_empty() {
         let mut piece = next.clone();
         piece.words.clear();
-        prev.style_pieces.push(piece);
+        vec![piece]
     } else {
-        prev.style_pieces.extend(next.style_pieces.iter().cloned());
+        next.style_pieces.clone()
+    };
+    if let (Some(last), Some(first)) = (prev.style_pieces.last_mut(), pieces.first())
+        && sep.is_empty()
+        && same_emphasis(last, first)
+        && last.link == first.link
+        && !crate::bidi::is_rtl_pieces([last.text.as_str(), first.text.as_str()])
+    {
+        let right = (last.x + last.width).max(first.x + first.width);
+        let bottom = (last.y + last.height).max(first.y + first.height);
+        last.x = last.x.min(first.x);
+        last.y = last.y.min(first.y);
+        last.width = right - last.x;
+        last.height = bottom - last.y;
+        last.text.push_str(&first.text);
+        pieces.remove(0);
     }
+    prev.style_pieces.extend(pieces);
 }
 
 /// Whether two items render with the same inline emphasis.
@@ -6187,6 +6210,29 @@ mod tests {
             parsed[0].text.split_whitespace().collect::<Vec<_>>(),
             ["Financials", "Sector"]
         );
+    }
+
+    #[test]
+    fn decimal_continuation_preserves_styled_text() {
+        let mut items = vec![
+            item_at("Reference", 10.0, 100.0, 29.8, 9.0),
+            item_at("doi.org/10", 40.0, 100.0, 39.8, 9.0),
+            item_at(".1234/example", 80.0, 100.0, 40.0, 9.0),
+        ];
+        items[1].item.underline = true;
+        items[2].item.underline = true;
+        for item in &mut items {
+            item.item.width = item.item.width.round();
+        }
+        let lines = form_lines(&mut items, 5.0, 9.0, 500.0, true);
+        let merged = &lines[0][0].item;
+        assert!(merged.text.contains("doi.org/10.1234/example"));
+        let pieces: String = merged
+            .style_pieces
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect();
+        assert!(pieces.contains("doi.org/10.1234/example"));
     }
 
     #[test]
