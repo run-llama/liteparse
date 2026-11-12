@@ -187,6 +187,8 @@ fn handle_rotation_reading_order(items: &mut [ProjectedTextItem], page_height: f
         group.sort_by(|a, b| items[*a].item.y.total_cmp(&items[*b].item.y));
     }
 
+    // Groups are already y-sorted. Break x ties by their topmost item,
+    // then by that item's input index for coincident groups.
     bbox_groups.sort_by(|a, b| {
         let min_x_a = a
             .iter()
@@ -196,7 +198,10 @@ fn handle_rotation_reading_order(items: &mut [ProjectedTextItem], page_height: f
             .iter()
             .map(|idx| items[*idx].item.x)
             .fold(f32::INFINITY, |acc, v| acc.min(v));
-        min_x_a.total_cmp(&min_x_b)
+        min_x_a
+            .total_cmp(&min_x_b)
+            .then_with(|| items[a[0]].item.y.total_cmp(&items[b[0]].item.y))
+            .then_with(|| a[0].cmp(&b[0]))
     });
 
     for group_idx in 0..bbox_groups.len() {
@@ -6403,6 +6408,31 @@ mod tests {
                 .collect();
             assert_eq!(text, ["word a"], "case {case}");
         }
+
+    #[test]
+    fn tied_rotated_groups_follow_spatial_then_input_order() {
+        // Both rotations have top and bottom clusters at the same x.
+        // Clusters at the same y retain the order of their first input item.
+        let mut items = Vec::new();
+        for (text, y, rotation) in [
+            ("bottom-first", 300.0, 90.0),
+            ("top-first", 20.0, 270.0),
+            ("top-second", 20.0, 90.0),
+            ("bottom-second", 300.0, 270.0),
+        ] {
+            let mut item = item_at(text, 500.0, y, 5.0, 50.0);
+            item.item.rotation = rotation;
+            items.push(item);
+        }
+
+        handle_rotation_reading_order(&mut items, 100.0);
+        items.sort_by(|a, b| a.item.y.total_cmp(&b.item.y));
+
+        let order: Vec<_> = items.iter().map(|p| p.item.text.as_str()).collect();
+        assert_eq!(
+            order,
+            ["top-first", "top-second", "bottom-first", "bottom-second"]
+        );
     }
 
     #[test]

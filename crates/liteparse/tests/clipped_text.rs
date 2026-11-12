@@ -49,14 +49,24 @@ fn extract(bytes: &[u8]) -> (Vec<RawTextItem>, String) {
     let page = doc.page(0).unwrap();
     let text = page.text().unwrap();
     let raw = extract_raw_text_items(&page, &text, &page.view_box().unwrap(), None);
-    let standard = stages::extract(&doc, &stages::ExtractRequest::default()).unwrap();
-    let standard = standard.pages[0]
+    (raw, standard_text(&doc, false))
+}
+
+fn standard_text(doc: &pdfium::Document, keep_clipped_text: bool) -> String {
+    let request = stages::ExtractRequest {
+        output: stages::ExtractionOutputOptions {
+            keep_clipped_text,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let standard = stages::extract(doc, &request).unwrap();
+    standard.pages[0]
         .text_items
         .iter()
         .map(|i| i.text.as_str())
         .collect::<Vec<_>>()
-        .join(" ");
-    (raw, standard)
+        .join(" ")
 }
 
 fn assert_text(bytes: &[u8], expected: &str) {
@@ -79,19 +89,57 @@ fn clipped_overflow_does_not_leak_into_next_row() {
 }
 
 #[test]
+fn keep_clipped_text_keeps_hidden_overflow() {
+    let content = "q 100 200 70 8 re W* n BT /F1 6 Tf 105 201 Td (VISIBLE) Tj 0 -7 Td (42) Tj ET Q BT /F1 6 Tf 105 194 Td (NEXT) Tj ET";
+    let lib = Library::init();
+    let doc = lib
+        .load_document_from_bytes(&pdf(content, &[], 0), None)
+        .unwrap();
+    let compact: String = standard_text(&doc, true).split_whitespace().collect();
+    assert_eq!(compact, "VISIBLE42NEXT");
+}
+
+#[test]
+fn a_partly_visible_word_keeps_its_low_punctuation() {
+    // Issue #544: a clip shows only the top ~1.6 pt of a 10 pt Courier line. The caps
+    // and digits reach into it; ".", ":" and "-" do not, but belong to visible words.
+    let content =
+        "q 0 25.4 600 20 re W n BT /F1 10 Tf 10 20 Td (ITEM# 1234.56 DATE: 7-JAN-25) Tj ET Q";
+    assert_text(&pdf(content, &[], 0), "ITEM# 1234.56 DATE: 7-JAN-25");
+}
+
+#[test]
+fn dot_leaders_are_trimmed_at_the_clip() {
+    // A leader has no value to keep whole: its hidden dots go, as before #544, while
+    // the rest of the word stays whole. Courier advances 6 pt from x = 10, so the clip
+    // edge at x = 52 shows "AB" and five dots; "CD" is kept with its word, the
+    // trailing leader is not.
+    let content = "q 0 0 52 100 re W n BT /F1 10 Tf 10 20 Td (AB.....CD.......) Tj ET Q";
+    assert_text(&pdf(content, &[], 0), "AB.....CD");
+}
+
+#[test]
+fn words_are_judged_separately() {
+    // The clip shows only the first word; the second is wholly outside it.
+    let content = "q 0 0 42 100 re W n BT /F1 10 Tf 10 20 Td (SHOWN HIDDEN) Tj ET Q";
+    assert_text(&pdf(content, &[], 0), "SHOWN");
+}
+
+#[test]
 fn horizontal_partial_glyphs_survive_in_full_at_every_page_rotation() {
-    // Courier advances 6 pt, so C's advance starts at x = 22 and its ink a little after.
-    // A clip edge at 22 touches the advance but shows none of C's ink.
+    // Visibility is per word, so the letters are spaced to judge each glyph.
+    // Courier advances 6 pt, so C's advance starts at x = 34 and its ink a little after.
+    // A clip edge at 34 touches the advance but shows none of C's ink.
     for rotation in [0, 90, 180, 270] {
         for (edge, expected) in [
-            (26, "ABC"),
-            (24, "ABC"),
-            (23, "ABC"),
-            (22, "AB"),
-            (21, "AB"),
+            (38, "ABC"),
+            (36, "ABC"),
+            (35, "ABC"),
+            (34, "AB"),
+            (33, "AB"),
         ] {
             let content = format!(
-                "q 10 10 {} 30 re W n BT /F1 10 Tf 10 20 Td (ABCDE) Tj ET Q",
+                "q 10 10 {} 30 re W n BT /F1 10 Tf 10 20 Td (A B C D E) Tj ET Q",
                 edge - 10
             );
             assert_text(&pdf(&content, &[], rotation), expected);
@@ -103,29 +151,29 @@ fn horizontal_partial_glyphs_survive_in_full_at_every_page_rotation() {
 fn nested_forms_compose_transforms_and_inherit_outer_clips() {
     let inner = stream(
         "/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << /Font << /F1 4 0 R >> >>",
-        "0 0 25 80 re W n BT /F1 10 Tf 5 20 Td (ABCDE) Tj ET",
+        "0 0 25 80 re W n BT /F1 10 Tf 5 20 Td (A B C D E) Tj ET",
     );
     let outer = stream(
         "/Type /XObject /Subtype /Form /BBox [0 0 200 200] /Resources << /XObject << /Inner 7 0 R >> >>",
         "2 0 0 2 10 15 cm /Inner Do",
     );
     let content = "q 100 100 35 300 re W n 1 0 0 1 100 100 cm /Outer Do Q";
-    assert_text(&pdf(content, &[&outer, &inner], 0), "AB");
+    assert_text(&pdf(content, &[&outer, &inner], 0), "A");
 }
 
 #[test]
 fn form_bbox_clips_text_without_explicit_clip_operator() {
     let form = stream(
         "/Type /XObject /Subtype /Form /BBox [0 0 17 100] /Resources << /Font << /F1 4 0 R >> >>",
-        "BT /F1 10 Tf 0 20 Td (ABCDE) Tj ET",
+        "BT /F1 10 Tf 0 20 Td (A B C D E) Tj ET",
     );
-    assert_text(&pdf("1 0 0 1 100 100 cm /Outer Do", &[&form], 0), "ABC");
+    assert_text(&pdf("1 0 0 1 100 100 cm /Outer Do", &[&form], 0), "AB");
 }
 
 #[test]
 fn stacked_clips_intersect_and_restore_does_not_leak() {
-    let content = "q 0 0 100 100 re W n 10 10 14 30 re W* n BT /F1 10 Tf 10 20 Td (ABCDE) Tj ET Q BT /F1 10 Tf 100 100 Td (RESTORED) Tj ET";
-    assert_text(&pdf(content, &[], 0), "ABC RESTORED");
+    let content = "q 0 0 100 100 re W n 10 10 14 30 re W* n BT /F1 10 Tf 10 20 Td (A B C D E) Tj ET Q BT /F1 10 Tf 100 100 Td (RESTORED) Tj ET";
+    assert_text(&pdf(content, &[], 0), "AB RESTORED");
 }
 
 #[test]
@@ -172,11 +220,11 @@ fn disjoint_clips_hide_all_glyphs() {
 fn content_matrix_is_not_applied_to_clip_twice() {
     assert_text(
         &pdf(
-            "q 2 0 0 2 100 100 cm 0 0 14 40 re W n BT /F1 10 Tf 0 20 Td (ABCDE) Tj ET Q",
+            "q 2 0 0 2 100 100 cm 0 0 14 40 re W n BT /F1 10 Tf 0 20 Td (A B C D E) Tj ET Q",
             &[],
             0,
         ),
-        "ABC",
+        "AB",
     );
 }
 

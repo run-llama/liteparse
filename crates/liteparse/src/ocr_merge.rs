@@ -118,6 +118,9 @@ pub struct OcrRenderOptions {
     /// `Some` renders exactly these pages, whatever the scoring says, so a
     /// caller with its own routing can override it.
     pub selection: Option<HashSet<u32>>,
+    /// Remove dot-screen specks from rasters of speckled 1-bit full-page scans
+    /// (see `LiteParseConfig::ocr_despeckle_scans`).
+    pub despeckle_scans: bool,
     /// Form fields every raster's OCR request carries
     /// (`LiteParseConfig::ocr_request_fields`).
     pub request_fields: HashMap<String, String>,
@@ -137,6 +140,7 @@ impl Default for OcrRenderOptions {
             continue_on_page_error: false,
             reflatten_pages: HashSet::new(),
             selection: None,
+            despeckle_scans: true,
             request_fields: HashMap::new(),
             page_request_fields: HashMap::new(),
         }
@@ -973,6 +977,142 @@ fn count_columns(region: &Region, total_items: usize) -> usize {
 /// to avoid excessive memory usage.
 pub(crate) const MAX_OCR_RENDER_LONG_EDGE_PX: f32 = 4096.0;
 
+/// Despeckle thresholds for [`OcrRenderOptions::despeckle_scans`], in pixels at
+/// [`DESPECKLE_REF_DPI`] and scaled with the render dpi. Dot-screen backgrounds on
+/// 300 dpi 1-bit scans are blobs of 1 to 10 px area and at most 3 px across;
+/// periods, colon dots and decimal points start around 40 px area and 6 px across.
+const DESPECKLE_REF_DPI: f32 = 300.0;
+const DESPECKLE_MAX_AREA_PX: f32 = 10.0;
+const DESPECKLE_MAX_SIDE_PX: f32 = 5.0;
+/// Below this render dpi pdfium's downsampling already averages the dots into
+/// grey, and punctuation shrinks towards dot size, so the page is left alone.
+const DESPECKLE_MIN_DPI: f32 = 200.0;
+/// Speckles per square inch of page before a page counts as speckled. Dotted
+/// backgrounds run in the hundreds; a clean scan has a handful.
+const DESPECKLE_MIN_DENSITY_PER_SQ_IN: f32 = 50.0;
+
+/// True if a top-level 1-bpp image covers the page. Checks both orientations
+/// because object bounds ignore `/Rotate`.
+fn is_bilevel_scan(page_obj: &pdfium::Page) -> bool {
+    let (pw, ph) = (page_obj.width(), page_obj.height());
+    let covers = |w: f32, h: f32| {
+        (w > pw * MAX_IMAGE_PAGE_COVERAGE && h > ph * MAX_IMAGE_PAGE_COVERAGE)
+            || (w > ph * MAX_IMAGE_PAGE_COVERAGE && h > pw * MAX_IMAGE_PAGE_COVERAGE)
+    };
+    (0..page_obj.object_count()).any(|i| {
+        let Some(obj) = page_obj.object(i) else {
+            return false;
+        };
+        if !matches!(obj.kind(), pdfium::PageObjectKind::Image) {
+            return false;
+        }
+        let Some(b) = obj.bounds() else {
+            return false;
+        };
+        covers(b.right - b.left, (b.top - b.bottom).abs())
+            && obj.image_metadata().is_some_and(|m| m.bits_per_pixel == 1)
+    })
+}
+
+/// Remove the isolated specks of a dotted or dithered scan background from an
+/// interleaved 8-bit raster rendered at `dpi`, in place. A speck is an
+/// 8-connected blob of dark (mean < 128) pixels at most `DESPECKLE_MAX_AREA_PX`
+/// in area and `DESPECKLE_MAX_SIDE_PX` on each side, both scaled to `dpi`. Specks
+/// are painted white only when the page holds at least
+/// `DESPECKLE_MIN_DENSITY_PER_SQ_IN` of them, so a clean page, and the
+/// punctuation on it, is never touched. Returns how many specks were removed.
+fn despeckle(pixels: &mut [u8], width: usize, height: usize, channels: usize, dpi: f32) -> usize {
+    if width == 0 || height == 0 || dpi < DESPECKLE_MIN_DPI {
+        return 0;
+    }
+    let scale = dpi / DESPECKLE_REF_DPI;
+    let max_area = (DESPECKLE_MAX_AREA_PX * scale * scale).round() as usize;
+    let max_side = (DESPECKLE_MAX_SIDE_PX * scale).round() as usize;
+    let row = width * channels;
+    let dark = |y: usize, x: usize| {
+        let px = &pixels[y * row + x * channels..y * row + (x + 1) * channels];
+        px.iter().map(|&v| v as usize).sum::<usize>() < 128 * channels
+    };
+
+    // Runs of dark pixels, row by row: (y, x0, x1) inclusive.
+    let mut runs: Vec<(usize, usize, usize)> = Vec::new();
+    let mut row_start = Vec::with_capacity(height + 1);
+    for y in 0..height {
+        row_start.push(runs.len());
+        let mut x = 0;
+        while x < width {
+            if dark(y, x) {
+                let x0 = x;
+                while x < width && dark(y, x) {
+                    x += 1;
+                }
+                runs.push((y, x0, x - 1));
+            } else {
+                x += 1;
+            }
+        }
+    }
+    row_start.push(runs.len());
+
+    // Union runs that touch a run on the row above, diagonals included.
+    let mut parent: Vec<usize> = (0..runs.len()).collect();
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    for y in 1..height {
+        let (above, here) = (
+            row_start[y - 1]..row_start[y],
+            row_start[y]..row_start[y + 1],
+        );
+        let mut j = above.start;
+        for i in here {
+            let (_, x0, x1) = runs[i];
+            while j < above.end && runs[j].2 + 1 < x0 {
+                j += 1;
+            }
+            let mut k = j;
+            while k < above.end && runs[k].1 <= x1 + 1 {
+                let (a, b) = (find(&mut parent, i), find(&mut parent, k));
+                if a != b {
+                    parent[a] = b;
+                }
+                k += 1;
+            }
+        }
+    }
+
+    // Area and bounds per blob.
+    let mut stats: Vec<(usize, usize, usize, usize, usize)> =
+        vec![(0, usize::MAX, 0, usize::MAX, 0); runs.len()];
+    for (i, &(y, x0, x1)) in runs.iter().enumerate() {
+        let r = find(&mut parent, i);
+        let s = &mut stats[r];
+        s.0 += x1 - x0 + 1;
+        s.1 = s.1.min(x0);
+        s.2 = s.2.max(x1);
+        s.3 = s.3.min(y);
+        s.4 = s.4.max(y);
+    }
+    let speck = |s: &(usize, usize, usize, usize, usize)| {
+        s.0 > 0 && s.0 <= max_area && s.2 - s.1 < max_side && s.4 - s.3 < max_side
+    };
+    let specks = stats.iter().filter(|s| speck(s)).count();
+    let sq_in = (width as f32 / dpi) * (height as f32 / dpi);
+    if (specks as f32) < DESPECKLE_MIN_DENSITY_PER_SQ_IN * sq_in {
+        return 0;
+    }
+    for (i, &(y, x0, x1)) in runs.iter().enumerate() {
+        if speck(&stats[find(&mut parent, i)]) {
+            pixels[y * row + x0 * channels..y * row + (x1 + 1) * channels].fill(255);
+        }
+    }
+    specks
+}
+
 /// Render the pages in `pages[start..]` that need OCR from an already-open
 /// document, stopping once `options.max_rasters` of them have been rendered.
 /// Returns the rasters plus the index to resume scanning from, so a caller
@@ -1008,6 +1148,7 @@ pub(crate) fn render_pages_for_ocr_capped(
         continue_on_page_error,
         reflatten_pages: flatten_page_numbers,
         selection,
+        despeckle_scans,
         request_fields,
         page_request_fields,
     } = options;
@@ -1108,6 +1249,19 @@ pub(crate) fn render_pages_for_ocr_capped(
             } else {
                 bitmap.to_rgb()
             };
+            let channels = if grayscale { 1 } else { 3 };
+            // A 1-bit scan on a dotted or dithered background: drop the specks before OCR.
+            // Rendered at the scan's resolution they read as diacritics and stray
+            // punctuation, and a server that downscales for detection aliases them.
+            if *despeckle_scans && eff_dpi >= DESPECKLE_MIN_DPI && is_bilevel_scan(&page_obj) {
+                despeckle(
+                    &mut pixels,
+                    width as usize,
+                    height as usize,
+                    channels,
+                    eff_dpi,
+                );
+            }
             // A page whose native text the merge keeps as is: blank that text out of the raster.
             // The merge drops every OCR line overlapping kept native text, so reading those
             // lines was wasted; OCR now only sees what the text layer doesn't cover (figures,
@@ -1117,13 +1271,7 @@ pub(crate) fn render_pages_for_ocr_capped(
                 && !replace_native
                 && matches!(garbled_scope(page), GarbledScope::None)
             {
-                mask_native_text(
-                    &mut pixels,
-                    width,
-                    height,
-                    page,
-                    if grayscale { 1 } else { 3 },
-                );
+                mask_native_text(&mut pixels, width, height, page, channels);
             }
 
             let image_rects = if has_native_text {
@@ -2546,6 +2694,57 @@ mod tests {
     use super::*;
     use crate::ocr::OcrWord;
     use crate::types::Rect;
+
+    /// A 1-inch square 300 dpi grey raster: white, with 2x2 px dots every 8 px.
+    fn dotted_inch() -> Vec<u8> {
+        (0..300 * 300)
+            .map(|i| {
+                if (i % 300) % 8 < 2 && (i / 300) % 8 < 2 {
+                    0
+                } else {
+                    255
+                }
+            })
+            .collect()
+    }
+
+    fn paint(pixels: &mut [u8], x: usize, y: usize, w: usize, h: usize) {
+        for row in y..y + h {
+            pixels[row * 300 + x..row * 300 + x + w].fill(0);
+        }
+    }
+
+    #[test]
+    fn despeckle_removes_dots_and_keeps_punctuation_and_rules() {
+        let mut px = dotted_inch();
+        paint(&mut px, 100, 100, 7, 7); // a 300 dpi period
+        paint(&mut px, 20, 200, 260, 2); // a hairline rule
+        paint(&mut px, 150, 51, 1, 4); // a thin 1x4 mark touching a dot: still a speck
+        let removed = despeckle(&mut px, 300, 300, 1, 300.0);
+        assert!(removed > 1000, "{removed}");
+        let dark = |x: usize, y: usize| px[y * 300 + x] == 0;
+        assert!(dark(103, 103), "the period was removed");
+        assert!(dark(150, 201), "the rule was removed");
+        assert!(!dark(0, 0) && !dark(8, 8), "a dot survived");
+    }
+
+    #[test]
+    fn despeckle_leaves_a_clean_page_and_low_dpi_alone() {
+        // A few specks on a clean page are under the density gate.
+        let mut clean = vec![255u8; 300 * 300 * 3];
+        for i in 0..10 {
+            let o = (i * 20 * 300 + i * 20) * 3;
+            clean[o..o + 3].fill(0);
+        }
+        let before = clean.clone();
+        assert_eq!(despeckle(&mut clean, 300, 300, 3, 300.0), 0);
+        assert_eq!(clean, before);
+        // Below the minimum dpi nothing runs, however dotted.
+        let mut low = dotted_inch();
+        let before = low.clone();
+        assert_eq!(despeckle(&mut low, 300, 300, 1, 150.0), 0);
+        assert_eq!(low, before);
+    }
 
     #[test]
     fn malformed_tokens_flag_cipher_and_legacy_fonts() {

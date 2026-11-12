@@ -330,6 +330,7 @@ impl LiteParse {
                 extract_form_fields: self.config.extract_form_fields,
                 extract_structure_tree: self.config.extract_structure_tree,
                 split_scripts: self.style_runs(),
+                keep_clipped_text: self.config.keep_clipped_text,
             },
         }
     }
@@ -366,6 +367,7 @@ impl LiteParse {
             continue_on_page_error: self.config.continue_on_page_error,
             reflatten_pages,
             selection: None,
+            despeckle_scans: self.config.ocr_despeckle_scans,
             request_fields: self.config.ocr_request_fields.clone(),
             page_request_fields: self.config.ocr_page_request_fields.clone(),
         }
@@ -497,6 +499,7 @@ impl LiteParse {
                     glyph_resolver: self.glyph_resolver.as_deref(),
                     output: stages::ExtractionOutputOptions {
                         continue_on_page_error: self.config.continue_on_page_error,
+                        keep_clipped_text: self.config.keep_clipped_text,
                         ..Default::default()
                     },
                 },
