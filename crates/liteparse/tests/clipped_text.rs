@@ -92,9 +92,8 @@ fn clipped_overflow_does_not_leak_into_next_row() {
 fn keep_clipped_text_keeps_hidden_overflow() {
     let content = "q 100 200 70 8 re W* n BT /F1 6 Tf 105 201 Td (VISIBLE) Tj 0 -7 Td (42) Tj ET Q BT /F1 6 Tf 105 194 Td (NEXT) Tj ET";
     let lib = Library::init();
-    let doc = lib
-        .load_document_from_bytes(&pdf(content, &[], 0), None)
-        .unwrap();
+    let bytes = pdf(content, &[], 0);
+    let doc = lib.load_document_from_bytes(&bytes, None).unwrap();
     let compact: String = standard_text(&doc, true).split_whitespace().collect();
     assert_eq!(compact, "VISIBLE42NEXT");
 }
