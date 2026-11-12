@@ -579,7 +579,7 @@ fn form_lines(
         height(a).min(height(b)).max(0.0)
     }
 
-    /// Measure aligned native Latin runs before whole-point width rounding.
+    /// Measure aligned native Latin letter boundaries before width rounding.
     /// OCR, scripts and unreliable font mappings retain their grid checks.
     fn native_gap(a: &ProjectedTextItem, b: &ProjectedTextItem) -> Option<f32> {
         let latin = |p: &ProjectedTextItem| {
@@ -594,6 +594,8 @@ fn form_lines(
         };
         if !latin(a)
             || !latin(b)
+            || !a.item.text.chars().last().is_some_and(char::is_alphabetic)
+            || !b.item.text.chars().next().is_some_and(char::is_alphabetic)
             || a.item.font_size != b.item.font_size
             || a.item.font_height != b.item.font_height
             || (a.orig_y - b.orig_y).abs() > WORD_GAP_ALIGNMENT_TOLERANCE
