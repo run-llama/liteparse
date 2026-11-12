@@ -51,10 +51,29 @@ You'll need the following tools installed:
 
 | Tool | Purpose | Install |
 |------|---------|---------|
-| **Rust toolchain** | Core library and all bindings | [rustup.rs](https://rustup.rs) |
-| **napi-rs CLI** | Node.js native addon builds | `npm i -g @napi-rs/cli` |
-| **maturin** | Python extension builds | `pip install maturin` |
+| **Stable Rust toolchain** (`cargo`, `rustc`) | Core library and all bindings | [rustup.rs](https://rustup.rs) |
+| **Node.js 18+ and npm** | Node.js bindings and WASM build scripts | [nodejs.org](https://nodejs.org/) |
+| **napi-rs CLI** | Node.js native addon builds | `npm install` in `packages/node` installs the declared development dependency |
+| **Python 3.10+ and a virtual environment** | Python bindings | [python.org](https://www.python.org/downloads/) |
+| **maturin 1.x** | Python extension builds | `python -m pip install "maturin>=1.0,<2.0"` in the active environment |
 | **wasm-pack** | WebAssembly builds | `cargo install wasm-pack` |
+
+The Node.js and Python minimum versions come from their package manifests;
+the core formatting and lint checks in CI use stable Rust. `npx` is included with npm;
+the Node build uses the locally installed `napi` executable, so a global
+napi-rs installation is unnecessary.
+
+Native builds also need a C/C++ compiler and linker. On Windows, install the
+Visual Studio **Desktop development with C++** workload. The default Tesseract
+feature also requires [CMake](https://docs.rs/crate/tesseract-rs/0.2.0#system-requirements).
+CI installs `libtesseract-dev` and
+`libleptonica-dev` on Ubuntu, and `tesseract` and `leptonica` through Homebrew
+on macOS. The Node build also calls a Bash script; make sure Bash is available
+(for example, Git Bash on Windows).
+
+For Linux wheel repair, install `patchelf` in the build environment when needed
+(`python -m pip install patchelf`). It is not required by every source-build
+target.
 
 PDFium is **auto-downloaded** by the `pdfium-sys` build script — no manual setup needed. For WASM, a static `libpdfium.a` is downloaded and linked into the `.wasm` binary. For native targets, a shared library (`.dylib`/`.so`/`.dll`) is downloaded and copied to the build output.
 
@@ -92,7 +111,26 @@ import { LiteParse } from './packages/node/dist/lib.js';
 
 ### Python bindings (maturin + PyO3)
 
+Create and activate a virtual environment from the repository root.
+
+macOS/Linux:
+
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+Then install the build tool and build the extension:
+
+```bash
+python -m pip install "maturin>=1.0,<2.0"
 cd packages/python
 maturin develop        # Builds Rust and installs into active virtualenv
 ```
