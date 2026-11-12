@@ -594,22 +594,86 @@ fn form_lines(
         ya.cmp(&yb).then_with(|| a.item.x.total_cmp(&b.item.x))
     });
 
+    // Keep bidirectional ordering and punctuation on the established grid path.
+    let use_native_gaps = !items
+        .iter()
+        .any(|p| p.item.text.chars().any(crate::bidi::is_rtl_char));
+
+    const WORD_GAP_ALIGNMENT_TOLERANCE: f32 = 0.1;
+    // Sheared boxes can hide small word spaces. Only subpixel residuals bridge
+    // those gaps, while upright text keeps the existing 0.1 pt merge allowance.
+    const GLYPH_GAP_HEIGHT_RATIO: f32 = 0.001;
+    const GLYPH_OVERLAP_HEIGHT_RATIO: f32 = 0.04;
+
+    fn gap_height(a: &ProjectedTextItem, b: &ProjectedTextItem) -> f32 {
+        let height = |p: &ProjectedTextItem| p.item.font_height.unwrap_or(p.orig_height);
+        height(a).min(height(b)).max(0.0)
+    }
+
+    /// Measure aligned native Latin runs before whole-point width rounding.
+    /// OCR, scripts and unreliable font mappings retain their grid checks.
+    fn native_gap(a: &ProjectedTextItem, b: &ProjectedTextItem) -> Option<f32> {
+        let latin = |p: &ProjectedTextItem| {
+            !p.rotated
+                && p.item.confidence.is_none()
+                && !p.item.font_is_buggy
+                && !p.item.has_unicode_map_error
+                && !(p.item.sup || p.item.sub || p.item.script_geom.is_some())
+                && p.item.text.chars().filter(|c| c.is_alphabetic()).all(
+                    |c| matches!(c as u32, 0x0000..=0x024F | 0x1E00..=0x1EFF | 0xFB00..=0xFB06),
+                )
+        };
+        if !latin(a)
+            || !latin(b)
+            || a.item.font_size != b.item.font_size
+            || a.item.font_height != b.item.font_height
+            || (a.orig_y - b.orig_y).abs() > WORD_GAP_ALIGNMENT_TOLERANCE
+            || (a.orig_height - b.orig_height).abs() > WORD_GAP_ALIGNMENT_TOLERANCE
+        {
+            return None;
+        }
+        let gap = b.orig_x - (a.orig_x + a.orig_width);
+        // Monospace and sheared boxes can overlap across genuine word spaces.
+        if gap < 0.0
+            && (is_mono_item(&a.item)
+                || is_mono_item(&b.item)
+                || canonical_rotation(a.item.rotation) != 0
+                || canonical_rotation(b.item.rotation) != 0)
+        {
+            return None;
+        }
+        (gap >= -(gap_height(a, b) * GLYPH_OVERLAP_HEIGHT_RATIO).min(0.5)).then_some(gap)
+    }
+
     fn can_merge(
         prev: &ProjectedTextItem,
         cur: &ProjectedTextItem,
         y_tolerance: f32,
         h_tolerance: f32,
+        use_native_gaps: bool,
     ) -> bool {
-        // a super/subscript run shares its host's band (`TextItem::script_geom`) but must reach
-        // script flagging on its own; the later word merge joins it, keeping it as a piece
+        // A script run shares its host's line band. Keep it separate until script flagging
+        // can preserve it as a styled piece, even when its grid gap is zero.
         if prev.item.script_geom.is_some() || cur.item.script_geom.is_some() {
             return false;
         }
         if (cur.item.y - prev.item.y).abs() <= y_tolerance
             && (cur.item.height - prev.item.height).abs() <= h_tolerance
         {
-            let delta_x = cur.item.x - (prev.item.x + prev.item.width);
-            return (-0.5..0.0).contains(&delta_x) || (0.0..0.1).contains(&delta_x);
+            // This early merge keeps one style. Preserve its grid behavior across style changes.
+            let measured = (use_native_gaps && same_emphasis(&prev.item, &cur.item))
+                .then(|| native_gap(prev, cur))
+                .flatten();
+            let delta_x = measured.unwrap_or(cur.item.x - (prev.item.x + prev.item.width));
+            let max_gap = if measured.is_some()
+                && (canonical_rotation(prev.item.rotation) != 0
+                    || canonical_rotation(cur.item.rotation) != 0)
+            {
+                (gap_height(prev, cur) * GLYPH_GAP_HEIGHT_RATIO).min(0.1)
+            } else {
+                0.1
+            };
+            return (-0.5..0.0).contains(&delta_x) || (0.0..max_gap).contains(&delta_x);
         }
 
         false
@@ -643,7 +707,15 @@ fn form_lines(
     for mut cur in items.drain(..) {
         let should_merge = merged_items
             .last()
-            .map(|prev| can_merge(prev, &cur, merge_y_tolerance, merge_h_tolerance))
+            .map(|prev| {
+                can_merge(
+                    prev,
+                    &cur,
+                    merge_y_tolerance,
+                    merge_h_tolerance,
+                    use_native_gaps,
+                )
+            })
             .unwrap_or(false);
 
         if should_merge {
@@ -854,6 +926,13 @@ fn form_lines(
                         cs.next() == Some('.') && cs.next().is_some_and(|c| c.is_ascii_digit())
                     };
                 if is_decimal_continuation {
+                    // Markdown renders the pieces, so a numeric suffix must join both views.
+                    if style_runs
+                        && (!prev.item.style_pieces.is_empty()
+                            || !same_emphasis(&prev.item, &item.item))
+                    {
+                        record_style_piece(&mut prev.item, &item.item, "");
+                    }
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
                     prev.item.text.push_str(&item.item.text);
                     prev.item.words.append(&mut item.item.words);
@@ -870,7 +949,11 @@ fn form_lines(
                 // builder inserts a space based on `gap > space_threshold`.
                 // Punctuation joins (`Standards`+`.`, `width`+`)`, etc.)
                 // and overlapping/negative-gap merges still go through.
-                let alpha_alpha_gap = delta_x > 0.0
+                let gap = use_native_gaps
+                    .then(|| native_gap(prev, &item))
+                    .flatten()
+                    .unwrap_or(delta_x);
+                let alpha_alpha_gap = gap > 0.0
                     && prev
                         .item
                         .text
@@ -895,7 +978,7 @@ fn form_lines(
                     && delta_x <= MERGE_THRESHOLD
                 {
                     if keep_pieces {
-                        record_style_piece(&mut prev.item, &item.item);
+                        record_style_piece(&mut prev.item, &item.item, "");
                     }
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
                     join_in_reading_order(&mut prev.item.text, &item.item.text, "");
@@ -908,7 +991,7 @@ fn form_lines(
                 let avg_char_width = prev.item.width / prev_len;
                 if y_compatible && !both_are_numbers && delta_x < avg_char_width {
                     if keep_pieces {
-                        record_style_piece(&mut prev.item, &item.item);
+                        record_style_piece(&mut prev.item, &item.item, " ");
                     }
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
                     join_in_reading_order(&mut prev.item.text, &item.item.text, " ");
@@ -3226,21 +3309,38 @@ fn mark_script_items(line: &mut [ProjectedTextItem]) {
     }
 }
 
-/// Before `next` merges into `prev`: keep both as styled pieces (`TextItem::style_pieces`), `prev`
-/// as it was before any merge and `next` with its own pieces flattened in.
-fn record_style_piece(prev: &mut TextItem, next: &TextItem) {
+/// Keep every merged character in the pieces Markdown renders. Leading-dot
+/// continuations with the same style stay in one piece, preserving URLs and numbers.
+fn record_style_piece(prev: &mut TextItem, next: &TextItem, sep: &str) {
     if prev.style_pieces.is_empty() {
         let mut first = prev.clone();
         first.words.clear();
         prev.style_pieces.push(first);
     }
-    if next.style_pieces.is_empty() {
+    let mut pieces = if next.style_pieces.is_empty() {
         let mut piece = next.clone();
         piece.words.clear();
-        prev.style_pieces.push(piece);
+        vec![piece]
     } else {
-        prev.style_pieces.extend(next.style_pieces.iter().cloned());
+        next.style_pieces.clone()
+    };
+    if let (Some(last), Some(first)) = (prev.style_pieces.last_mut(), pieces.first())
+        && sep.is_empty()
+        && first.text.starts_with('.')
+        && same_emphasis(last, first)
+        && last.link == first.link
+        && !crate::bidi::is_rtl_pieces([last.text.as_str(), first.text.as_str()])
+    {
+        let right = (last.x + last.width).max(first.x + first.width);
+        let bottom = (last.y + last.height).max(first.y + first.height);
+        last.x = last.x.min(first.x);
+        last.y = last.y.min(first.y);
+        last.width = right - last.x;
+        last.height = bottom - last.y;
+        last.text.push_str(&first.text);
+        pieces.remove(0);
     }
+    prev.style_pieces.extend(pieces);
 }
 
 /// Whether two items render with the same inline emphasis.
@@ -6347,13 +6447,213 @@ mod tests {
         let item = parsed[0]
             .text_items
             .iter()
-            .find(|item| item.text == "ab cd")
+            .find(|item| item.text == "abcd")
             .expect("merged continuous text item");
 
         assert!((item.x - 40.0).abs() < 0.001);
         assert!((item.y - 100.0).abs() < 0.001);
         assert!((item.width - 22.5).abs() < 0.01);
         assert!((item.height - 9.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn projection_joins_glyph_residuals_and_preserves_word_gaps() {
+        let mut page = Page {
+            page_number: 1,
+            page_width: 612.0,
+            page_height: 792.0,
+            ocr_deskew: None,
+            page_label: None,
+            content_bounds: None,
+            text_items: Vec::new(),
+            graphics: Vec::new(),
+            vector_graphics: None,
+            struct_nodes: Vec::new(),
+            image_refs: Vec::new(),
+            annotations: None,
+            form_fields: None,
+            structure_tree: None,
+        };
+        let mut x = 40.0;
+        for (text, width, gap) in [
+            ("F", 4.26848, 0.006),
+            ("inancials", 28.2, 1.95),
+            ("Sector", 20.4, 0.0),
+        ] {
+            page.text_items.push(TextItem {
+                text: text.into(),
+                x,
+                y: 100.0,
+                width,
+                height: 6.9975,
+                ..Default::default()
+            });
+            x += width + gap;
+        }
+        let parsed = project_pages_to_grid(vec![page]);
+        assert_eq!(
+            parsed[0].text.split_whitespace().collect::<Vec<_>>(),
+            ["Financials", "Sector"]
+        );
+    }
+
+    #[test]
+    fn font_scaled_gap_checks_preserve_word_spaces_and_kerning() {
+        for (left, right, height, width, gap, rotation, mono, expected) in [
+            ("word", "next", 12.75, 35.4, -0.222, 0.0, true, "word next"),
+            ("word", "next", 8.0, 15.885, 0.063, 10.0, false, "word next"),
+            (
+                "word",
+                "next",
+                6.745,
+                38.1856,
+                -0.0706,
+                12.0,
+                false,
+                "word next",
+            ),
+            ("r", "e", 6.9975, 2.4281, -0.0979, 0.0, false, "re"),
+            ("W", "ord", 6.9975, 6.602, -0.2537, 0.0, false, "Word"),
+            (
+                "acti viti",
+                "es",
+                16.0,
+                49.7824,
+                0.0960,
+                0.0,
+                false,
+                "acti vities",
+            ),
+            (
+                "Operati",
+                "ng",
+                27.0,
+                86.5485,
+                -0.2592,
+                0.0,
+                false,
+                "Operating",
+            ),
+        ] {
+            let mut items = vec![
+                item_at(left, 40.0, 100.0, width, height),
+                item_at(right, 40.0 + width + gap, 100.0, 20.0, height),
+            ];
+            for item in &mut items {
+                item.item.font_height = Some(height);
+                item.item.rotation = rotation;
+                if mono {
+                    item.item.font_name = Some("Courier".into());
+                }
+                item.item.width = item.item.width.round();
+                item.item.height = item.item.height.round();
+            }
+            let lines = form_lines(&mut items, 5.0, height, 500.0, true);
+            let text: String = lines[0].iter().map(|p| p.item.text.as_str()).collect();
+            assert_eq!(text, expected);
+        }
+    }
+
+    #[test]
+    fn decimal_continuation_preserves_styled_text() {
+        let mut items = vec![
+            item_at("Reference", 10.0, 100.0, 29.8, 9.0),
+            item_at("doi.org/10", 40.2, 100.0, 39.8, 9.0),
+            item_at(".1234/example", 80.4, 100.0, 40.0, 9.0),
+        ];
+        items[1].item.underline = true;
+        items[2].item.underline = true;
+        for item in &mut items {
+            item.item.width = item.item.width.round();
+        }
+        let lines = form_lines(&mut items, 5.0, 9.0, 500.0, true);
+        let merged = &lines[0][0].item;
+        assert!(merged.text.contains("doi.org/10.1234/example"));
+        let pieces: String = merged
+            .style_pieces
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect();
+        assert!(pieces.contains("doi.org/10.1234/example"));
+    }
+
+    #[test]
+    fn overlapping_ocr_detections_keep_the_following_label_separate() {
+        let mut items = vec![
+            item_at("b", 9.12218, 34.08, 5.2812614, 4.799999),
+            item_at("h", 9.12218, 34.56, 3.6008606, 3.8400002),
+            item_at("Label", 13.6832695, 33.36, 60.2544, 5.040001),
+        ];
+        for item in &mut items {
+            item.item.font_name = Some("OCR".into());
+            item.item.font_size = Some(item.item.height);
+            item.item.confidence = Some(0.98);
+            item.item.width = item.item.width.round();
+            item.item.height = item.item.height.round();
+        }
+        let lines = form_lines(&mut items, 5.0, 5.0, 500.0, true);
+        let text: Vec<_> = lines
+            .iter()
+            .flatten()
+            .map(|item| item.item.text.as_str())
+            .collect();
+        assert_eq!(text, ["bh Label"]);
+    }
+
+    #[test]
+    fn ocr_and_mixed_pairs_keep_rounded_gaps_in_both_merge_checks() {
+        for confidences in [
+            (Some(0.98), Some(0.98)),
+            (Some(0.98), None),
+            (None, Some(0.98)),
+        ] {
+            let mut items = vec![
+                item_at("first", 40.0, 100.0, 10.4, 9.0),
+                item_at("second", 50.2, 100.0, 12.3, 9.0),
+            ];
+            items[0].item.confidence = confidences.0;
+            items[1].item.confidence = confidences.1;
+            for item in &mut items {
+                item.item.width = item.item.width.round();
+            }
+            let lines = form_lines(&mut items, 5.0, 9.0, 500.0, true);
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0].len(), 1);
+            assert_eq!(lines[0][0].item.text, "first second");
+        }
+    }
+
+    #[test]
+    fn original_gap_does_not_silently_join_scripts_or_mismatched_native_runs() {
+        for case in 0..6 {
+            let mut items = vec![
+                item_at("word", 40.0, 100.0, 10.2, 9.0),
+                item_at("a", 50.2, 100.0, 3.3, 9.0),
+            ];
+            let marker = &mut items[1].item;
+            match case {
+                0 => marker.script_geom = Some((98.0, 6.0)),
+                1 => marker.sup = true,
+                2 => marker.sub = true,
+                3 => marker.font_size = Some(6.0),
+                4 => marker.font_height = Some(6.0),
+                _ => {
+                    marker.y += 0.2;
+                    items[1].orig_y += 0.2;
+                }
+            }
+            for item in &mut items {
+                item.item.width = item.item.width.round();
+                item.item.height = item.item.height.round();
+            }
+            let lines = form_lines(&mut items, 5.0, 9.0, 500.0, true);
+            let text: Vec<_> = lines
+                .iter()
+                .flatten()
+                .map(|p| p.item.text.as_str())
+                .collect();
+            assert_eq!(text, ["word a"], "case {case}");
+        }
     }
 
     #[test]

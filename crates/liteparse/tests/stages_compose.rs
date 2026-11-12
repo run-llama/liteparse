@@ -806,7 +806,13 @@ async fn render_for_ocr_selection_overrides_complexity_gate() {
         .unwrap()
         .pages;
     let first = pages[0].page_number as u32;
-    let gated = stages::render_for_ocr(&document, &pages, 0, &stages::OcrRenderOptions::default())
+    // An image for a native-text page must not force OCR or even open its
+    // image file. The explicit selection below can still override the gate.
+    let gated_options = stages::OcrRenderOptions {
+        page_images: std::collections::HashMap::from([(first, "missing-page-image.png".into())]),
+        ..Default::default()
+    };
+    let gated = stages::render_for_ocr(&document, &pages, 0, &gated_options)
         .unwrap()
         .0;
     assert!(
@@ -822,10 +828,11 @@ async fn render_for_ocr_selection_overrides_complexity_gate() {
     assert_eq!(rasters.len(), 1);
     assert_eq!(rasters[0].page_number as u32, first);
     assert!(rasters[0].has_native_text);
-    assert!(rasters[0].width > 0 && rasters[0].height > 0);
+    let (width, height) = rasters[0].image.dimensions();
+    assert!(width > 0 && height > 0);
     // The raster's pixels survive the boundary as base64, not a number array.
     let json = serde_json::to_value(&rasters[0]).unwrap();
-    assert!(json["pixels"].is_string());
+    assert!(json["image"]["data"].is_string());
 }
 
 /// A hand-built outcome for a page that is not being merged is an error,
@@ -1120,7 +1127,13 @@ fn dark_pixels(bits: u8, despeckle: bool) -> usize {
     };
     let (rasters, _) = stages::render_for_ocr(&document, &pages, 0, &options).unwrap();
     assert_eq!(rasters.len(), 1, "an image-only page needs OCR");
-    rasters[0].pixels.iter().filter(|&&p| p < 128).count()
+    rasters[0]
+        .image
+        .pixels(true)
+        .unwrap()
+        .iter()
+        .filter(|&&p| p < 128)
+        .count()
 }
 
 /// Only 1-bit full-page scans get despeckled, and only with the option on.
