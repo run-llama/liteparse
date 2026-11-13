@@ -25,6 +25,24 @@ for page in result.pages:
     print(f"Page {page.page_num}: {len(page.text_items)} text items")
 ```
 
+## PDF bookmarks
+
+PDF bookmarks are available as a document-level outline on every parse result:
+
+```python
+from liteparse import LiteParse
+
+result = LiteParse(ocr_enabled=False).parse("document.pdf")
+for entry in result.outline:
+    print("  " * (entry.level - 1), entry.title, "page", entry.page_index + 1)
+```
+
+Entries follow bookmark order. `level` starts at 1, `page_index` starts at 0,
+and `y_pdf` is an optional PDF-space Y coordinate measured from the bottom of
+the page. The list is empty when there are no resolved bookmark destinations.
+It describes the whole document, even when selecting pages or parsing in
+batches; unresolved destinations are omitted.
+
 ## Markdown Output
 
 LiteParse can render documents directly to Markdown including headings, tables, lists,
