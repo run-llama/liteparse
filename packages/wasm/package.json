@@ -1,6 +1,6 @@
 {
   "name": "@llamaindex/liteparse-wasm",
-  "version": "2.18.0",
+  "version": "2.19.0",
   "description": "Fast, lightweight PDF parsing with spatial text extraction — WebAssembly build for browsers",
   "type": "module",
   "main": "./pkg/liteparse_wasm.js",
