@@ -1,4 +1,10 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
+
+fn default_true() -> bool {
+    true
+}
 
 /// Configuration for LiteParse document parsing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7,12 +13,33 @@ pub struct LiteParseConfig {
     pub ocr_language: String,
     /// Whether OCR is enabled. When true, runs on text-sparse pages and embedded images.
     pub ocr_enabled: bool,
+    /// Existing full-page images to use instead of rendering for OCR, keyed by
+    /// 1-based document page number (also with target pages and batch parsing).
+    /// Missing entries use the normal renderer. Images do not force OCR or
+    /// replace requested screenshot outputs. Values are local image paths;
+    /// DPI is derived from image dimensions and the PDF page size.
+    /// Images must cover the full corrected viewport, including `/Rotate` and
+    /// `page_orientation_corrections`, with matching content/form appearances.
+    /// Cropped, deskewed or stretched images are unsupported. Paths are read
+    /// lazily and must remain available until parsing finishes.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub ocr_page_images: HashMap<u32, String>,
     /// HTTP OCR server URL (uses Tesseract if not provided)
     pub ocr_server_url: Option<String>,
     /// Extra HTTP headers sent with every request to `ocr_server_url`, as
     /// `(name, value)` pairs. Use for auth, e.g. `("Authorization", "Bearer …")`.
     /// Ignored when `ocr_server_url` is None.
     pub ocr_server_headers: Vec<(String, String)>,
+    /// Form fields sent as-is with every request to `ocr_server_url`, next to
+    /// `file` and `language` (a `language` entry here replaces it). LiteParse
+    /// adds no other field, so the caller owns flags such as
+    /// `correct_rotation` or `return_word_boxes`. Default empty.
+    #[serde(default)]
+    pub ocr_request_fields: HashMap<String, String>,
+    /// Per-page form fields, keyed by 1-based page number, merged over
+    /// `ocr_request_fields` for that page's request. Default empty.
+    #[serde(default)]
+    pub ocr_page_request_fields: HashMap<u32, HashMap<String, String>>,
     /// Path to tessdata directory. Falls back to TESSDATA_PREFIX env var if not set.
     pub tessdata_path: Option<String>,
     /// Maximum number of pages to parse.
@@ -63,6 +90,13 @@ pub struct LiteParseConfig {
     /// downstream than risk losing content. Only affects Markdown output.
     #[serde(default)]
     pub keep_headers_footers: bool,
+    /// Keep native text hidden by rectangular clips. By default a word that
+    /// lies entirely outside its clip (e.g. overflow from a fixed-height
+    /// table cell, which would otherwise land in the next row) is dropped;
+    /// a partly visible word is always kept whole. Set `true` to keep all
+    /// text the PDF contains, visible or not.
+    #[serde(default)]
+    pub keep_clipped_text: bool,
     /// Extract all PDF annotations into each parsed page. Default `false`.
     /// This is independent of `extract_links`, which only controls Markdown
     /// link reconstruction.
@@ -121,6 +155,14 @@ pub struct LiteParseConfig {
     /// that prefer a degraded document over a hard failure (e.g. when the host
     /// has its own OCR fallback or treats OCR as best-effort enrichment).
     pub ocr_failure_fatal: bool,
+    /// Remove dot-screen specks from the OCR raster of 1-bit full-page scans on a
+    /// dotted or dithered background, when rendered at 200 dpi or more. Rendered
+    /// at the scan's resolution the dots read as diacritics and stray
+    /// punctuation, and servers that downscale for detection alias them. Only
+    /// pages dense with specks are touched; punctuation is several times larger
+    /// than a speck and kept. Default `true`.
+    #[serde(default = "default_true")]
+    pub ocr_despeckle_scans: bool,
     /// OCR request-hedging schedule (milliseconds) for the HTTP OCR engine.
     /// Empty (default) = no hedging. With multiple delays (e.g.
     /// `[0, 5000, 10000, 15000, 20000]`), each OCR attempt fires a duplicate
@@ -299,8 +341,11 @@ impl Default for LiteParseConfig {
             // fast if no engine is reachable, so a real misconfiguration is
             // never silently swallowed.
             ocr_enabled: cfg!(feature = "tesseract"),
+            ocr_page_images: HashMap::new(),
             ocr_server_url: None,
             ocr_server_headers: Vec::new(),
+            ocr_request_fields: HashMap::new(),
+            ocr_page_request_fields: HashMap::new(),
             tessdata_path: None,
             max_pages: 1000,
             target_pages: None,
@@ -317,6 +362,7 @@ impl Default for LiteParseConfig {
             image_output_dir: None,
             extract_links: true,
             keep_headers_footers: false,
+            keep_clipped_text: false,
             extract_annotations: false,
             extract_form_fields: false,
             extract_structure_tree: false,
@@ -327,6 +373,7 @@ impl Default for LiteParseConfig {
             detect_screenshot_rects: false,
             render_form_fields: false,
             ocr_failure_fatal: true,
+            ocr_despeckle_scans: true,
             ocr_hedge_delays_ms: Vec::new(),
             emit_word_boxes: false,
             tight_word_boxes: false,

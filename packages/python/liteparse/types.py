@@ -459,6 +459,8 @@ class LiteParseConfig:
     ocr_enabled: bool
     ocr_server_url: Optional[str]
     ocr_server_headers: Optional[Dict[str, str]]
+    ocr_request_fields: Dict[str, str]
+    ocr_page_request_fields: Dict[int, Dict[str, str]]
     tessdata_path: Optional[str]
     max_pages: int
     target_pages: Optional[str]
@@ -478,6 +480,7 @@ class LiteParseConfig:
     extract_structure_tree: bool
     extract_blocks: bool
     ocr_failure_fatal: bool
+    ocr_despeckle_scans: bool
     ocr_hedge_delays_ms: List[int]
     emit_word_boxes: bool
     tight_word_boxes: bool
@@ -494,6 +497,9 @@ class LiteParseConfig:
     #: Keep running headers/footers in markdown output instead of stripping
     #: repeated page-band lines and page chrome.
     keep_headers_footers: bool = False
+    #: Keep text hidden by rectangular clips (e.g. overflow from a
+    #: fixed-height table cell) instead of dropping it.
+    keep_clipped_text: bool = False
     extract_images: bool = False
     extract_vector_graphics: bool = False
     extract_xfa_packets: bool = False

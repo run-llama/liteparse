@@ -13,6 +13,7 @@
 //! set at two stage boundaries (after extract, after projection), so the
 //! same test proves the boundary types round-trip losslessly.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use liteparse::config::{CropBox, ImageMode, OutputFormat, PageOrientationCorrection};
@@ -74,6 +75,8 @@ impl OcrEngine for MockOcr {
                     bbox: [10.0, 10.0, 260.0, 40.0],
                     confidence: 0.99,
                     polygon: None,
+                    rotation: None,
+                    words: Vec::new(),
                 },
                 OcrResult {
                     text: "rotated".into(),
@@ -85,6 +88,8 @@ impl OcrEngine for MockOcr {
                         [300.0, 400.0],
                         [300.0, 100.0],
                     ]),
+                    rotation: None,
+                    words: Vec::new(),
                 },
             ])
         })
@@ -177,6 +182,12 @@ fn round_trip<T: serde::Serialize + serde::de::DeserializeOwned>(value: T, what:
 /// `LiteParse::parse_resolved` step for step; the point is that nothing in
 /// that function is unreachable from here.
 async fn compose(parser: &LiteParse, input: PdfInput) -> ParseResult {
+    compose_with(parser, input, true).await
+}
+
+/// [`compose`], optionally leaving out the final deskew rotate-back, so a test
+/// can show what a caller that skips it gets.
+async fn compose_with(parser: &LiteParse, input: PdfInput, rotate_back: bool) -> ParseResult {
     let config = parser.config();
     let password = config.password.as_deref();
     let markdown = config.output_format == OutputFormat::Markdown;
@@ -383,6 +394,10 @@ async fn compose(parser: &LiteParse, input: PdfInput) -> ParseResult {
     if markdown {
         stages::canonicalize_image_refs(&mut parsed, &mut text, &images);
     }
+    // Last: deskewed pages' boxes go back onto the image.
+    if rotate_back {
+        stages::rotate_back_ocr_deskew(&mut parsed);
+    }
     // `parse()` writes image files only with `image_output_dir`; none of the
     // configurations here set it, so `path` stays unset on both sides.
     for image in images.iter_mut() {
@@ -552,6 +567,117 @@ async fn parse_equals_composed_stages_on_converted_image() {
     );
 }
 
+/// Mock OCR for a scan tilted 1 degree clockwise: five long text lines that
+/// descend to the right, each with its tilted polygon, so the OCR merge
+/// deskews the page.
+struct SkewedMockOcr;
+
+impl OcrEngine for SkewedMockOcr {
+    fn name(&self) -> &str {
+        "skewed-mock"
+    }
+    fn recognize<'a, 'b: 'a, 'c: 'a>(
+        &'a self,
+        _image_data: &'c [u8],
+        width: u32,
+        height: u32,
+        _options: &'b OcrOptions,
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let (w, h) = (width as f32, height as f32);
+            let (x0, len, line_h) = (0.1 * w, 0.7 * w, 0.02 * h);
+            let rise = len * 1.0f32.to_radians().tan();
+            Ok((0..5)
+                .map(|i| {
+                    let y0 = h * (0.2 + 0.12 * i as f32);
+                    let polygon = [
+                        [x0, y0],
+                        [x0 + len, y0 + rise],
+                        [x0 + len, y0 + rise + line_h],
+                        [x0, y0 + line_h],
+                    ];
+                    OcrResult {
+                        text: format!("skewed line {i} with several words"),
+                        bbox: [x0, y0, x0 + len, y0 + rise + line_h],
+                        confidence: 0.95,
+                        polygon: Some(polygon),
+                        words: Vec::new(),
+                        rotation: None,
+                    }
+                })
+                .collect())
+        })
+    }
+}
+
+/// A deskewed scan: `parse()` rotates the OCR boxes back onto the image, and
+/// the composed stages match it only when they end with
+/// `stages::rotate_back_ocr_deskew`. Without that call the text is the same
+/// but the OCR boxes stay in the upright frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn composed_stages_need_deskew_rotate_back() {
+    if skip_integration() {
+        return;
+    }
+    let config = LiteParseConfig {
+        ocr_enabled: true,
+        quiet: true,
+        output_format: OutputFormat::Markdown,
+        extract_blocks: true,
+        emit_word_boxes: true,
+        ..LiteParseConfig::default()
+    };
+    let parser = LiteParse::new(config).with_ocr_engine(Arc::new(SkewedMockOcr));
+    let input = PdfInput::Path(fixture("receipt.png"));
+    let via_parse = parser.parse_input(input.clone()).await.unwrap();
+    let rotated = compose_with(&parser, input.clone(), true).await;
+    let unrotated = compose_with(&parser, input, false).await;
+
+    assert_eq!(
+        snapshot(&via_parse),
+        snapshot(&rotated),
+        "parse() and the composed stages with the rotate-back diverged"
+    );
+
+    // The page was deskewed, and the rotate-back consumed the angle.
+    let page = &unrotated.pages[0];
+    let deg = page.ocr_deskew.expect("the skewed scan was not deskewed");
+    assert!((deg - 1.0).abs() < 0.05, "deskew angle {deg}");
+    assert!(via_parse.pages[0].ocr_deskew.is_none());
+
+    // Same text either way; only geometry moves.
+    assert_eq!(via_parse.text, unrotated.text);
+    let ocr_boxes = |r: &ParseResult| -> Vec<(f32, f32, f32, f32)> {
+        r.pages[0]
+            .text_items
+            .iter()
+            .filter(|i| i.confidence.is_some())
+            .map(|i| (i.x, i.y, i.width, i.height))
+            .collect()
+    };
+    let (back, upright) = (ocr_boxes(&via_parse), ocr_boxes(&unrotated));
+    assert!(!back.is_empty(), "no OCR items on the page");
+    assert_eq!(back.len(), upright.len());
+    assert!(
+        back.iter().zip(&upright).all(|(a, b)| a != b),
+        "every OCR box should move: {back:?} vs {upright:?}"
+    );
+    // A second call is a no-op.
+    let mut again = via_parse.pages.clone();
+    stages::rotate_back_ocr_deskew(&mut again);
+    assert_eq!(
+        serde_json::to_value(&again).unwrap(),
+        serde_json::to_value(&via_parse.pages).unwrap()
+    );
+}
+
 /// Orientation corrections applied at open, a page selection, and the
 /// content filters.
 #[tokio::test]
@@ -618,6 +744,55 @@ async fn parse_equals_composed_stages_with_form_fields_and_rendered_screenshots(
     );
 }
 
+/// The configured OCR request fields reach every raster, with a page's own
+/// fields merged over the base for that page only.
+#[test]
+#[serial]
+fn ocr_page_request_fields_merge_over_the_base() {
+    let lib = Library::init();
+    let document =
+        stages::open(&lib, &PdfInput::Path(fixture("page_labels.pdf")), None, &[]).unwrap();
+    let probe = LiteParse::new(everything_config());
+    let extracted = stages::extract(&document, &probe.extract_request(None, usize::MAX)).unwrap();
+    let numbers: Vec<u32> = extracted
+        .pages
+        .iter()
+        .map(|p| p.page_number as u32)
+        .collect();
+    assert!(numbers.len() >= 2, "fixture needs two pages");
+    let fields = |pairs: &[(&str, &str)]| -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    };
+    let parser = LiteParse::new(LiteParseConfig {
+        ocr_request_fields: fields(&[("correct_rotation", "true"), ("return_word_boxes", "true")]),
+        ocr_page_request_fields: [(numbers[0], fields(&[("correct_rotation", "false")]))].into(),
+        ..everything_config()
+    });
+    let options = stages::OcrRenderOptions {
+        max_rasters: 0,
+        selection: Some(numbers.iter().copied().collect()),
+        ..parser.ocr_render_options(false, &extracted)
+    };
+    let (rasters, _) = stages::render_for_ocr(&document, &extracted.pages, 0, &options).unwrap();
+    let got: BTreeMap<u32, BTreeMap<String, String>> = rasters
+        .iter()
+        .map(|r| (r.page_number as u32, r.request_fields.clone()))
+        .collect();
+    let want: BTreeMap<u32, BTreeMap<String, String>> = numbers
+        .iter()
+        .map(|&n| {
+            let rotate = if n == numbers[0] { "false" } else { "true" };
+            let page_fields = [("correct_rotation", rotate), ("return_word_boxes", "true")]
+                .map(|(k, v)| (k.to_string(), v.to_string()));
+            (n, BTreeMap::from(page_fields))
+        })
+        .collect();
+    assert_eq!(got, want);
+}
+
 /// An explicit OCR page selection bypasses the complexity gate: a text-dense
 /// page that scoring would never send to OCR is rastered anyway, and pages
 /// outside the selection are skipped.
@@ -631,7 +806,13 @@ async fn render_for_ocr_selection_overrides_complexity_gate() {
         .unwrap()
         .pages;
     let first = pages[0].page_number as u32;
-    let gated = stages::render_for_ocr(&document, &pages, 0, &stages::OcrRenderOptions::default())
+    // An image for a native-text page must not force OCR or even open its
+    // image file. The explicit selection below can still override the gate.
+    let gated_options = stages::OcrRenderOptions {
+        page_images: std::collections::HashMap::from([(first, "missing-page-image.png".into())]),
+        ..Default::default()
+    };
+    let gated = stages::render_for_ocr(&document, &pages, 0, &gated_options)
         .unwrap()
         .0;
     assert!(
@@ -647,10 +828,11 @@ async fn render_for_ocr_selection_overrides_complexity_gate() {
     assert_eq!(rasters.len(), 1);
     assert_eq!(rasters[0].page_number as u32, first);
     assert!(rasters[0].has_native_text);
-    assert!(rasters[0].width > 0 && rasters[0].height > 0);
+    let (width, height) = rasters[0].image.dimensions();
+    assert!(width > 0 && height > 0);
     // The raster's pixels survive the boundary as base64, not a number array.
     let json = serde_json::to_value(&rasters[0]).unwrap();
-    assert!(json["pixels"].is_string());
+    assert!(json["image"]["data"].is_string());
 }
 
 /// A hand-built outcome for a page that is not being merged is an error,
@@ -669,6 +851,8 @@ fn merge_ocr_rejects_outcome_for_unknown_page() {
             bbox: [0.0, 0.0, 10.0, 10.0],
             confidence: 1.0,
             polygon: None,
+            rotation: None,
+            words: Vec::new(),
         }],
         error: None,
     };
@@ -863,4 +1047,107 @@ async fn widget_text_survives_extracting_an_earlier_page_first() {
         .collect();
     assert!(texts[0].contains("Running header"), "page 1: {}", texts[0]);
     assert!(texts[1].contains("Running header"), "page 2: {}", texts[1]);
+}
+
+/// A 24x24 pt page filled by a synthetic 100x100 px (300 dpi) dot-screen image
+/// (2x2 px dots every 6 px), stored at `bits` per pixel.
+fn dot_screen_pdf(bits: u8) -> Vec<u8> {
+    let (w, h) = (100usize, 100usize);
+    let ink = |x: usize, y: usize| x % 6 < 2 && y % 6 < 2;
+    let mut data = Vec::new();
+    for y in 0..h {
+        if bits == 1 {
+            // DeviceGray 1 bpc: 0 = black, rows padded to a byte.
+            let mut row = vec![0xFFu8; w.div_ceil(8)];
+            for x in (0..w).filter(|&x| ink(x, y)) {
+                row[x / 8] &= !(0x80 >> (x % 8));
+            }
+            data.extend(row);
+        } else {
+            data.extend((0..w).map(|x| if ink(x, y) { 0u8 } else { 255 }));
+        }
+    }
+    let content = b"q 24 0 0 24 0 0 cm /Im1 Do Q";
+    let objects: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 24 24] /Resources << /XObject << /Im1 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        [format!("<< /Length {} >>\nstream\n", content.len()).as_bytes(), content, b"\nendstream"].concat(),
+        [
+            format!(
+                "<< /Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceGray /BitsPerComponent {bits} /Length {} >>\nstream\n",
+                data.len()
+            )
+            .as_bytes(),
+            &data,
+            b"\nendstream",
+        ]
+        .concat(),
+    ];
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        pdf.extend_from_slice(object);
+        pdf.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    pdf
+}
+
+/// Count of dark raster pixels after rendering the dot screen for OCR at 300 dpi.
+fn dark_pixels(bits: u8, despeckle: bool) -> usize {
+    let lib = Library::init();
+    // pdfium reads the bytes in place, so they must outlive `document`.
+    let input = PdfInput::Bytes(dot_screen_pdf(bits));
+    let document = stages::open(&lib, &input, None, &[]).unwrap();
+    let parser = LiteParse::new(LiteParseConfig::default());
+    let pages = stages::extract(&document, &parser.extract_request(None, usize::MAX))
+        .unwrap()
+        .pages;
+    let options = stages::OcrRenderOptions {
+        dpi: 300.0, // 1 image px per raster px
+        grayscale: true,
+        despeckle_scans: despeckle,
+        ..stages::OcrRenderOptions::default()
+    };
+    let (rasters, _) = stages::render_for_ocr(&document, &pages, 0, &options).unwrap();
+    assert_eq!(rasters.len(), 1, "an image-only page needs OCR");
+    rasters[0]
+        .image
+        .pixels(true)
+        .unwrap()
+        .iter()
+        .filter(|&&p| p < 128)
+        .count()
+}
+
+/// Only 1-bit full-page scans get despeckled, and only with the option on.
+#[test]
+#[serial]
+fn despeckle_scans_only_touches_one_bit_scans() {
+    assert!(dark_pixels(1, false) > 0);
+    assert!(
+        dark_pixels(8, true) > 0,
+        "8-bit scan must not be despeckled"
+    );
+    assert_eq!(
+        dark_pixels(1, true),
+        0,
+        "1-bit dot screen should be despeckled"
+    );
 }

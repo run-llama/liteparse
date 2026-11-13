@@ -30,6 +30,13 @@ pub struct JsLiteParseConfig {
     /// Extra HTTP headers sent with every request to `ocrServerUrl`
     /// (e.g. `{ Authorization: "Bearer <token>" }`).
     pub ocr_server_headers: Option<HashMap<String, String>>,
+    /// Form fields sent as-is with every request to `ocrServerUrl`, next to
+    /// `file` and `language` (a `language` entry replaces it). LiteParse adds
+    /// no other field.
+    pub ocr_request_fields: Option<HashMap<String, String>>,
+    /// Per-page form fields, keyed by 1-based page number, merged over
+    /// `ocrRequestFields` for that page's request.
+    pub ocr_page_request_fields: Option<HashMap<String, HashMap<String, String>>>,
     /// Path to tessdata directory for Tesseract.
     pub tessdata_path: Option<String>,
     /// Maximum number of pages to parse.
@@ -69,6 +76,9 @@ pub struct JsLiteParseConfig {
     /// Keep running headers/footers in markdown output instead of stripping
     /// repeated page-band lines and page chrome (default false).
     pub keep_headers_footers: Option<bool>,
+    /// Keep text hidden by rectangular clips (e.g. overflow from a
+    /// fixed-height table cell) instead of dropping it. Default false.
+    pub keep_clipped_text: Option<bool>,
     /// Extract all PDF annotations as page-scoped structured data.
     pub extract_annotations: Option<bool>,
     /// Emit each page's classified layout blocks (headings, paragraphs, list
@@ -99,6 +109,9 @@ pub struct JsLiteParseConfig {
     /// Set false to keep already-recovered native text and return partial
     /// results when OCR is unavailable, instead of rejecting.
     pub ocr_failure_fatal: Option<bool>,
+    /// Remove dot-screen specks from OCR rasters of speckled 1-bit full-page
+    /// scans rendered at 200 dpi or more. Default true.
+    pub ocr_despeckle_scans: Option<bool>,
     /// OCR request-hedging schedule (ms). Empty/unset = no hedging. Multiple
     /// delays (e.g. `[0, 5000, 10000]`) fire duplicate requests per attempt and
     /// take the first success — lower tail latency at the cost of extra load.
@@ -172,6 +185,19 @@ impl JsLiteParseConfig {
         if let Some(v) = self.ocr_server_headers {
             cfg.ocr_server_headers = v.into_iter().collect();
         }
+        if let Some(v) = self.ocr_request_fields {
+            cfg.ocr_request_fields = v;
+        }
+        if let Some(v) = self.ocr_page_request_fields {
+            for (page, fields) in v {
+                let n = page.parse::<u32>().map_err(|_| {
+                    Error::from_reason(format!(
+                        "invalid ocrPageRequestFields key: {page} (expected a page number)"
+                    ))
+                })?;
+                cfg.ocr_page_request_fields.insert(n, fields);
+            }
+        }
         if let Some(v) = self.tessdata_path {
             cfg.tessdata_path = Some(v);
         }
@@ -224,6 +250,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.keep_headers_footers {
             cfg.keep_headers_footers = v;
         }
+        if let Some(v) = self.keep_clipped_text {
+            cfg.keep_clipped_text = v;
+        }
         if let Some(v) = self.extract_annotations {
             cfg.extract_annotations = v;
         }
@@ -253,6 +282,9 @@ impl JsLiteParseConfig {
         }
         if let Some(v) = self.ocr_failure_fatal {
             cfg.ocr_failure_fatal = v;
+        }
+        if let Some(v) = self.ocr_despeckle_scans {
+            cfg.ocr_despeckle_scans = v;
         }
         if let Some(v) = self.ocr_hedge_delays_ms {
             cfg.ocr_hedge_delays_ms = v.into_iter().map(u64::from).collect();
@@ -308,6 +340,13 @@ impl JsLiteParseConfig {
             } else {
                 Some(cfg.ocr_server_headers.iter().cloned().collect())
             },
+            ocr_request_fields: Some(cfg.ocr_request_fields.clone()),
+            ocr_page_request_fields: Some(
+                cfg.ocr_page_request_fields
+                    .iter()
+                    .map(|(n, fields)| (n.to_string(), fields.clone()))
+                    .collect(),
+            ),
             tessdata_path: cfg.tessdata_path.clone(),
             max_pages: Some(cfg.max_pages as u32),
             target_pages: cfg.target_pages.clone(),
@@ -332,6 +371,7 @@ impl JsLiteParseConfig {
             image_output_dir: cfg.image_output_dir.clone(),
             extract_links: Some(cfg.extract_links),
             keep_headers_footers: Some(cfg.keep_headers_footers),
+            keep_clipped_text: Some(cfg.keep_clipped_text),
             extract_annotations: Some(cfg.extract_annotations),
             extract_blocks: Some(cfg.extract_blocks),
             extract_form_fields: Some(cfg.extract_form_fields),
@@ -342,6 +382,7 @@ impl JsLiteParseConfig {
             detect_screenshot_rects: Some(cfg.detect_screenshot_rects),
             render_form_fields: Some(cfg.render_form_fields),
             ocr_failure_fatal: Some(cfg.ocr_failure_fatal),
+            ocr_despeckle_scans: Some(cfg.ocr_despeckle_scans),
             ocr_hedge_delays_ms: Some(
                 cfg.ocr_hedge_delays_ms
                     .iter()

@@ -113,6 +113,27 @@ lit parse document.pdf \
 
 In the libraries this is `ocr_server_headers` / `ocrServerHeaders`, taking a map of header name to value. It has no effect unless an OCR server URL is set.
 
+### Request fields
+
+Each OCR request sends the page image as `file` and the language as `language`. Add any other form field your server understands with `ocr_request_fields` / `ocrRequestFields`, a map of field name to value sent as-is on every request. `ocr_page_request_fields` / `ocrPageRequestFields` maps a 1-based page number to more fields, merged over the base map for that page only. LiteParse adds no field of its own, and a `language` entry replaces the default. Neither option has a CLI flag.
+
+```typescript
+const parser = new LiteParse({
+  ocrServerUrl: "https://ocr.internal/ocr",
+  // Ask for measured word boxes and line angles on every page.
+  ocrRequestFields: {
+    correct_rotation: "true",
+    return_word_boxes: "true",
+    dense_ocr_detection: "true",
+    return_bbox_angles: "true",
+  },
+  // Page 3 is already upright: read it as sent.
+  ocrPageRequestFields: { 3: { correct_rotation: "false" } },
+});
+```
+
+When the response carries measured words, they become `TextItem.words` when word boxes are on (`emit_word_boxes`) and their count matches the words of the line's text. Otherwise, and for a line with no measured words, the line keeps one box, so output without the word-box fields is unchanged. A line's rotation comes from the server's angle when the response has one, and otherwise from the order of its quad's points.
+
 ### Parallel OCR workers
 
 LiteParse OCRs multiple pages in parallel. By default, it uses one fewer worker than your CPU core count. Override this with:
@@ -195,3 +216,36 @@ These days, its common to apply the term "OCR" to both traditional approaches an
 The LiteParse OCR API is designed specifically for approaches that return text with bounding boxes.
 
 If you are trying to integrate a method that doesn't return bounding boxes, you will have to generate dummy bounding boxes.
+
+## Reusing page images in Rust
+
+Supply existing full-page images to skip rendering them for OCR. Native PDF
+text extraction still runs. This option is available only in Rust.
+
+```rust
+use std::collections::HashMap;
+use liteparse::{LiteParse, LiteParseConfig};
+
+let parser = LiteParse::new(LiteParseConfig {
+    ocr_enabled: true,
+    ocr_page_images: HashMap::from([
+        (1, "/path/to/page-1.png".into()),
+        (3, "/path/to/page-3.jpg".into()),
+    ]),
+    ..Default::default()
+});
+```
+
+- Keys are **1-based source page numbers**, including selected-page and batch
+  parses. DPI is inferred from image dimensions and PDF page size.
+- Images must match the PDF's full page, content and orientation after `/Rotate`
+  and `page_orientation_corrections`. Cropped, stretched or deskewed images are
+  unsupported. Keep files available until parsing finishes.
+- Missing entries render normally. Supplying an image does not force OCR.
+  Invalid images are page errors; `continue_on_page_error` applies.
+- Supplied images keep their dimensions; render DPI and `max_long_edge` affect
+  only newly rendered pages. Requested screenshots are generated separately.
+
+For staged pipelines, set `OcrRenderOptions::page_images`. Access raster data
+through `OcrRaster::image`, using `dimensions()` or `pixels(grayscale)`.
+Existing OCR engine implementations need no changes.

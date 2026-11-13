@@ -94,6 +94,10 @@ program
     "--keep-headers-footers",
     "Keep running headers/footers in markdown output instead of stripping them",
   )
+  .option(
+    "--keep-clipped-text",
+    "Keep text hidden by clips (e.g. overflow from fixed-height table cells)",
+  )
   .option("--extract-annotations", "Include all PDF annotations in page output")
   .option("--extract-form-fields", "Include AcroForm widget fields and values")
   .option("--extract-structure-tree", "Include the tagged-PDF logical structure tree")
@@ -165,6 +169,7 @@ program
       if (opts.extractImages) config.extractImages = true;
       if (opts.links === false) config.extractLinks = false;
       if (opts.keepHeadersFooters) config.keepHeadersFooters = true;
+      if (opts.keepClippedText) config.keepClippedText = true;
       if (opts.extractAnnotations) config.extractAnnotations = true;
       if (opts.extractFormFields) config.extractFormFields = true;
       if (opts.extractStructureTree) config.extractStructureTree = true;

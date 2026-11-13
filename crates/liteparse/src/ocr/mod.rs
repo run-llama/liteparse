@@ -9,7 +9,7 @@ pub mod oar;
 #[cfg(all(feature = "tesseract", not(target_arch = "wasm32")))]
 pub mod tesseract;
 
-/// A single word-level OCR result with bounding box and confidence.
+/// One OCR detection, a word or a line, with its box and confidence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OcrResult {
     pub text: String,
@@ -23,7 +23,41 @@ pub struct OcrResult {
     /// to recover orientation for rotated text. None for axis-aligned-only
     /// engines (e.g. Tesseract word boxes).
     pub polygon: Option<[[f32; 2]; 4]>,
+    /// Measured word boxes in reading order, in the result's pixel space.
+    /// Used when their count equals the cleaned text's whitespace-separated words.
+    /// Output word text comes from that text. Otherwise the result keeps one box.
+    #[serde(default)]
+    pub words: Vec<OcrWord>,
+    /// The line's rotation as the engine measured it, in degrees
+    /// counter-clockwise in [0, 360). None when the engine sent no angle;
+    /// merging then infers it from the polygon's point order.
+    #[serde(default)]
+    pub rotation: Option<f32>,
 }
+
+/// One word an OCR engine measured inside a line-level result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OcrWord {
+    pub text: String,
+    /// Axis-aligned box in pixel coordinates: [x1, y1, x2, y2].
+    pub bbox: [f32; 4],
+}
+
+mod image;
+pub use image::{EncodedOcrImage, OcrImage, OcrImageFormat};
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type OcrFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
+            + Send
+            + 'a,
+    >,
+>;
+#[cfg(target_arch = "wasm32")]
+pub type OcrFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>> + 'a>,
+>;
 
 pub struct OcrOptions {
     pub language: String,
@@ -31,6 +65,10 @@ pub struct OcrOptions {
     /// that can't infer DPI from raw pixel buffers (e.g. Tesseract fed RGB bytes)
     /// use this so their internal point-size estimates are correct.
     pub dpi: f32,
+    /// Form fields for this page's request (see
+    /// `LiteParseConfig::ocr_request_fields`). The HTTP engine sends them
+    /// as-is; the other engines ignore them.
+    pub request_fields: std::collections::BTreeMap<String, String>,
 }
 
 /// On native targets, `OcrEngine` and its returned futures must be `Send` so
@@ -41,6 +79,19 @@ pub struct OcrOptions {
 #[cfg(not(target_arch = "wasm32"))]
 pub trait OcrEngine: Send + Sync {
     fn name(&self) -> &str;
+    /// Unified image entry point. The default adapter preserves existing OCR
+    /// engines by supplying pixels in their preferred format to `recognize`.
+    fn recognize_image<'a>(
+        &'a self,
+        image: &'a OcrImage,
+        options: &'a OcrOptions,
+    ) -> OcrFuture<'a> {
+        Box::pin(async move {
+            let (width, height) = image.dimensions();
+            let pixels = image.pixels(self.prefers_grayscale())?;
+            self.recognize(&pixels, width, height, options).await
+        })
+    }
     /// Whether this engine prefers a single-channel grayscale buffer: engines
     /// that binarize internally (Tesseract) do; color-trained engines want RGB.
     fn prefers_grayscale(&self) -> bool {
@@ -52,18 +103,25 @@ pub trait OcrEngine: Send + Sync {
         width: u32,
         height: u32,
         options: &'b OcrOptions,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
-                + Send
-                + '_,
-        >,
-    >;
+    ) -> OcrFuture<'a>;
 }
 
 #[cfg(target_arch = "wasm32")]
 pub trait OcrEngine: Send + Sync {
     fn name(&self) -> &str;
+    /// Unified image entry point. The default adapter preserves existing OCR
+    /// engines by supplying pixels in their preferred format to `recognize`.
+    fn recognize_image<'a>(
+        &'a self,
+        image: &'a OcrImage,
+        options: &'a OcrOptions,
+    ) -> OcrFuture<'a> {
+        Box::pin(async move {
+            let (width, height) = image.dimensions();
+            let pixels = image.pixels(self.prefers_grayscale())?;
+            self.recognize(&pixels, width, height, options).await
+        })
+    }
     /// Whether this engine prefers a single-channel grayscale buffer: engines
     /// that binarize internally (Tesseract) do; color-trained engines want RGB.
     fn prefers_grayscale(&self) -> bool {
@@ -75,12 +133,7 @@ pub trait OcrEngine: Send + Sync {
         width: u32,
         height: u32,
         options: &'b OcrOptions,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
-                + '_,
-        >,
-    >;
+    ) -> OcrFuture<'a>;
 }
 
 #[cfg(test)]
@@ -112,6 +165,8 @@ mod tests {
                     bbox: [0.0, 0.0, 10.0, 10.0],
                     confidence: 0.9,
                     polygon: None,
+                    rotation: None,
+                    words: Vec::new(),
                 }])
             })
         }
@@ -124,6 +179,7 @@ mod tests {
         let opts = OcrOptions {
             language: "eng".into(),
             dpi: 150.0,
+            request_fields: Default::default(),
         };
         let r = engine.recognize(&[], 1, 1, &opts).await.unwrap();
         assert_eq!(r.len(), 1);

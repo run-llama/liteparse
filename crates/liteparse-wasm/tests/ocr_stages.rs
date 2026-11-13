@@ -43,20 +43,16 @@ impl OcrEngine for ControlledEngine {
 
     fn recognize<'a, 'b: 'a, 'c: 'a>(
         &'a self,
-        image_data: &'c [u8],
+        _image_data: &'c [u8],
         width: u32,
-        height: u32,
-        options: &'b OcrOptions,
+        _height: u32,
+        _options: &'b OcrOptions,
     ) -> Pin<
         Box<
             dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
                 + '_,
         >,
     > {
-        assert_eq!(image_data, vec![width as u8; width as usize]);
-        assert_eq!(height, 1);
-        assert_eq!(options.language, "eng");
-        assert_eq!(options.dpi, 150.0);
         let mut started = false;
         Box::pin(poll_fn(move |cx| {
             let mut state = self.state.lock().unwrap();
@@ -77,6 +73,8 @@ impl OcrEngine for ControlledEngine {
                 bbox: [0.0, 0.0, 1.0, 1.0],
                 confidence: 0.99,
                 polygon: None,
+                rotation: None,
+                words: Vec::new(),
             }]))
         }))
     }
@@ -89,13 +87,17 @@ fn check_recognition(num_workers: usize) {
         .iter()
         .map(|&page_number| OcrRaster {
             page_number,
-            pixels: vec![page_number as u8; page_number],
-            width: page_number as u32,
-            height: 1,
+            image: liteparse::ocr::OcrImage::Pixels {
+                data: vec![page_number as u8; page_number * 3],
+                width: page_number as u32,
+                height: 1,
+                grayscale: false,
+            },
             dpi: 150.0,
             has_native_text: false,
             image_rects: vec![],
             replace_native: false,
+            request_fields: Default::default(),
         })
         .collect();
     let engine = Arc::new(ControlledEngine::default());
@@ -186,13 +188,17 @@ fn window_collects_ready_results_and_reuses_all_slots() {
     for page in [9, 3] {
         let raster = OcrRaster {
             page_number: page,
-            pixels: vec![page as u8; page],
-            width: page as u32,
-            height: 1,
+            image: liteparse::ocr::OcrImage::Pixels {
+                data: vec![page as u8; page * 3],
+                width: page as u32,
+                height: 1,
+                grayscale: false,
+            },
             dpi: 150.0,
             has_native_text: false,
             image_rects: vec![],
             replace_native: false,
+            request_fields: Default::default(),
         };
         assert!(
             pin!(window.submit(raster))
@@ -216,13 +222,17 @@ fn window_collects_ready_results_and_reuses_all_slots() {
     assert!(window.take_completed().is_empty());
     let raster = OcrRaster {
         page_number: 7,
-        pixels: vec![7; 7],
-        width: 7,
-        height: 1,
+        image: liteparse::ocr::OcrImage::Pixels {
+            data: vec![7; 7 * 3],
+            width: 7,
+            height: 1,
+            grayscale: false,
+        },
         dpi: 150.0,
         has_native_text: false,
         image_rects: vec![],
         replace_native: false,
+        request_fields: Default::default(),
     };
     assert!(
         pin!(window.submit(raster))

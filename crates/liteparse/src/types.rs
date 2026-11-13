@@ -242,7 +242,7 @@ pub struct Page {
     pub page_number: usize,
     /// Tilt (degrees) the OCR merge removed from this page's OCR items: on a skewed scan the
     /// items are rotated upright about the page centre so lines group into rows correctly,
-    /// and their output boxes are rotated back after layout (`ParsedPage::ocr_deskew`).
+    /// and their output boxes are rotated back after layout (see `ParsedPage::ocr_deskew`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ocr_deskew: Option<f32>,
     /// The document's `/PageLabels` entry for this page ("iv", "A-1"), when
@@ -481,8 +481,8 @@ pub struct ParsedPage {
     /// the public JSON/text outputs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub projected_lines: Vec<ProjectedLine>,
-    /// Root of the XY-cut region tree for this page. Leaves correspond to the
-    /// `region_path` on each `ProjectedLine`. Internal-only.
+    /// Body XY-cut region tree. Isolated numeric footer lines are detached
+    /// from this tree; other lines use its leaves as their `region_path`. Internal-only.
     #[serde(default)]
     pub regions: Region,
     /// Vector graphics on the page (decomposed paths) used by the markdown
@@ -542,6 +542,13 @@ pub struct ParsedPage {
     /// without the font metadata the classifier needs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<crate::layout::LayoutBlock>>,
+    /// Tilt (degrees) the OCR merge removed from this page's OCR items
+    /// (`Page::ocr_deskew`), carried through projection. While set, the OCR item,
+    /// word, block and table-cell boxes are still in the upright frame;
+    /// [`stages::rotate_back_ocr_deskew`](crate::stages::rotate_back_ocr_deskew)
+    /// moves them back onto the image and clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocr_deskew: Option<f32>,
 }
 
 /// One embedded raster image on a page. `id` is a stable, page-scoped slug
