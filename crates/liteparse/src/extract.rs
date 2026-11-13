@@ -1791,6 +1791,9 @@ fn extract_page_text_items(
             continue;
         };
         let vp_strict = vp_xform.transform_bounds(&strict_rect);
+        let baseline = ch
+            .origin()
+            .map(|(ox, oy)| vp_xform.transform_point(ox as f32, oy as f32).1);
 
         if seg.has_content {
             // Use viewport-space coordinates for gap/overlap checks
@@ -1838,9 +1841,25 @@ fn extract_page_text_items(
             let backward_jump = char_w > 0.0 && gap < -(char_w * 3.0) && !is_combining_mark(c);
             let very_large_backward_jump =
                 (seg_width > 20.0 && gap < -(seg_width * 0.5)) || backward_jump;
+            // 4. Baseline step: the glyph sits on a baseline well above or below the
+            //    previous glyph's, at a size the strict boxes still overlap (a line set
+            //    a few points above the run's own, right after it). Only upright
+            //    horizontal runs at the run's own size: raised / lowered smaller
+            //    type (footnote markers, CO2, 10th) stays put or goes to `size_break`.
+            let cur_h = (vp_loose.bottom - vp_loose.top).abs();
+            let last_h = seg.last_char_loose_height;
+            let same_size = last_h > 0.0 && cur_h > last_h * 0.9 && last_h > cur_h * 0.9;
+            let baseline_step = seg.rotation_deg.abs() < 1.0
+                && same_size
+                && !is_combining_mark(c)
+                && match (baseline, seg.last_char_baseline) {
+                    (Some(b), Some(last)) => (b - last).abs() > 0.4 * cur_h.min(last_h),
+                    _ => false,
+                };
             let line_changed = vp_strict.top > seg.last_char_bottom + y_tolerance
                 || (strict_below && large_backward_jump)
-                || very_large_backward_jump;
+                || very_large_backward_jump
+                || baseline_step;
 
             // Dot leader detection: break at the boundary between dots and non-dots.
             // This prevents items like "Total . . . . 330,100" from merging.
@@ -1935,6 +1954,7 @@ fn extract_page_text_items(
                     c,
                     &vp_loose,
                     &vp_strict,
+                    baseline,
                     &cv,
                     recovered,
                     page_rotation,
@@ -1951,6 +1971,7 @@ fn extract_page_text_items(
                         c,
                         &vp_loose,
                         &vp_strict,
+                        baseline,
                         &cv,
                         recovered,
                         page_rotation,
@@ -1979,7 +2000,7 @@ fn extract_page_text_items(
                         }
                     }
                     seg.commit_pending_space();
-                    seg.push_char(c, &vp_loose, &vp_strict, &cv, recovered);
+                    seg.push_char(c, &vp_loose, &vp_strict, baseline, &cv, recovered);
                     seg.append_ligature_tail(ligature_tail);
                 }
             } else {
@@ -2026,7 +2047,7 @@ fn extract_page_text_items(
                     seg.text.push(' ');
                     seg.break_word();
                 }
-                seg.push_char(c, &vp_loose, &vp_strict, &cv, recovered);
+                seg.push_char(c, &vp_loose, &vp_strict, baseline, &cv, recovered);
                 seg.append_ligature_tail(ligature_tail);
             }
         } else {
@@ -2035,6 +2056,7 @@ fn extract_page_text_items(
                 c,
                 &vp_loose,
                 &vp_strict,
+                baseline,
                 &cv,
                 recovered,
                 page_rotation,
@@ -2296,6 +2318,24 @@ fn dedup_pair_drops_earlier(items: &[TextItem], i: usize, j: usize, debug: bool)
     // true duplicate stamps overlap essentially 100%, unrelated repeats
     // share at most a sliver of slack loose-box area.
     if !(smaller_area > 0.0 && intersection / smaller_area > 0.5) {
+        return false;
+    }
+
+    // Different lines must never dedupe, even with heavy loose-box overlap —
+    // but only when the pair shows the tall-box pathology signature (one box
+    // several times the height of the other, e.g. #486's 50pt line over a
+    // 10pt line). Similarly-sized overlapping stamps are restamps/footer
+    // overprints and keep the legacy dedupe, or repeated headers and tag
+    // clouds would survive as duplicates.
+    let ha = a.height.abs().max(1e-6);
+    let hb = b.height.abs().max(1e-6);
+    if ha.max(hb) > 2.5 * ha.min(hb) && !dedup_same_line(a, b) {
+        if debug {
+            eprintln!(
+                "[extract-debug] DEDUP skip (different lines) i={i} text='{}' at ({:.1},{:.1} {}x{}) j={j} text='{}' at ({:.1},{:.1} {}x{})",
+                a.text, a.x, a.y, a.width, a.height, b.text, b.x, b.y, b.width, b.height,
+            );
+        }
         return false;
     }
 
@@ -3358,6 +3398,87 @@ fn prescan_page_batched(
     (skip_invisible, garbage_fonts)
 }
 
+/// Maximum loose-box height as a multiple of the INK height before the
+/// vertical extent is treated as pathological. A single glyph in a font
+/// with very tall vertical metrics (e.g. Cambria Math
+/// `/Ascent 3116 /Descent -2463` makes a 9pt hyphen 50pt tall with ~0.6pt
+/// of ink) would otherwise stretch its whole line over adjacent lines
+/// (#486). When triggered, vertical expansion uses the ink (strict) box
+/// instead — the same "judge by ink box, not loose box" move as #485.
+///
+/// Deliberately scale-free: both boxes live in the same space, so no font
+/// size (text-space, device-space, matrix-scaled or otherwise) enters the
+/// decision, and text-matrix scaling like sample.pdf's `1 Tf` cannot shift
+/// the verdict. The bar sits at 40x: the highest healthy ratios measured
+/// across the corpus are hairline punctuation and display-math marks
+/// (~20x for a 12.3pt box around 0.6pt of ink, ~14x for a 39.9pt math box
+/// around 2.8pt of ink), while #486's hyphen reads ~84x. Clamping the
+/// former fragments their lines (periods detach from words, math marks
+/// unjoin formulas); only the latter is clamped.
+fn clamped_vertical_bounds(vp_loose: &RectF, vp_strict: &RectF) -> (f32, f32) {
+    let loose_h = (vp_loose.bottom - vp_loose.top).abs();
+    let strict_h = (vp_strict.bottom - vp_strict.top).abs();
+    if strict_h > 0.0 && strict_h < loose_h && loose_h > 40.0 * strict_h {
+        (vp_strict.top, vp_strict.bottom)
+    } else {
+        (vp_loose.top, vp_loose.bottom)
+    }
+}
+
+/// True when two items print on the same line, for the dedupe overpaint
+/// check. Overpainted layers share a baseline; adjacent lines 10pt apart
+/// must never dedupe even when a pathological loose box makes them overlap
+/// (#486). Horizontal text compares vertical centers, vertical text compares
+/// horizontal centers, with 50% of the smaller extent as slack for slight
+/// restamp offsets.
+fn dedup_same_line(a: &TextItem, b: &TextItem) -> bool {
+    fn orientation(rotation: f32) -> Option<bool> {
+        // Some(true) = horizontal (near 0/180), Some(false) = vertical (near 90/270).
+        let norm = rotation.rem_euclid(360.0);
+        let dist_to = |target: f32| {
+            let d = (norm - target).abs();
+            d.min(360.0 - d)
+        };
+        let d_horiz = dist_to(0.0).min(dist_to(180.0));
+        let d_vert = dist_to(90.0).min(dist_to(270.0));
+        if d_horiz <= 45.0 && d_horiz <= d_vert {
+            Some(true)
+        } else if d_vert < 45.0 {
+            Some(false)
+        } else {
+            None
+        }
+    }
+    match (orientation(a.rotation), orientation(b.rotation)) {
+        (Some(true), Some(true)) => {
+            let ha = a.height.abs();
+            let hb = b.height.abs();
+            let smaller = ha.min(hb);
+            if !(smaller > 0.0) {
+                return true;
+            }
+            let ca = a.y + a.height / 2.0;
+            let cb = b.y + b.height / 2.0;
+            (ca - cb).abs() <= 0.5 * smaller
+        }
+        (Some(false), Some(false)) => {
+            let wa = a.width.abs();
+            let wb = b.width.abs();
+            let smaller = wa.min(wb);
+            if !(smaller > 0.0) {
+                return true;
+            }
+            let ca = a.x + a.width / 2.0;
+            let cb = b.x + b.width / 2.0;
+            (ca - cb).abs() <= 0.5 * smaller
+        }
+        // Mixed orientations overlapping heavily is not an overpaint layer.
+        (Some(_), Some(_)) => false,
+        // Unknown orientation: fail open (preserve old behavior).
+        _ => true,
+    }
+}
+
 /// Accumulates characters into a single TextItem segment.
 struct SegmentBuilder {
     text: String,
@@ -3382,6 +3503,10 @@ struct SegmentBuilder {
     dir_rtl: Option<bool>,
     // Bottom of last char strict bounds (for line-change detection)
     last_char_bottom: f32,
+    // Viewport-space baseline (glyph origin y) of the last char, when PDFium reports one.
+    last_char_baseline: Option<f32>,
+    // Loose-box height of the last char (its line height at its own size).
+    last_char_loose_height: f32,
     // Count of non-space characters (for avg width calculation)
     char_count: usize,
     // Count of characters whose Unicode came from PDFium's char-code fallback
@@ -3447,6 +3572,8 @@ impl SegmentBuilder {
             last_char_loose_left: f32::MAX,
             dir_rtl: None,
             last_char_bottom: f32::MIN,
+            last_char_baseline: None,
+            last_char_loose_height: 0.0,
             char_count: 0,
             unmapped_char_count: 0,
             font_name: None,
@@ -3591,6 +3718,7 @@ impl SegmentBuilder {
         c: char,
         vp_loose: &RectF,
         vp_strict: &RectF,
+        baseline: Option<f32>,
         cv: &CharView<'_, '_>,
         recovered: bool,
         page_rotation: i32,
@@ -3623,15 +3751,22 @@ impl SegmentBuilder {
             self.rtl_spans
                 .push((self.text.len(), vp_loose.left, vp_loose.right));
         }
+        // A run's first glyph keeps its loose box even when its metrics are
+        // pathological: clamped to ink, a lone period or math mark would drop
+        // out of the line its neighbours' (equally tall) boxes define. Glyphs
+        // joining a run are clamped in `push_char` (#486).
+        let (eff_top, eff_bottom) = (vp_loose.top, vp_loose.bottom);
         self.vp_left = vp_loose.left;
         self.vp_right = vp_loose.right;
-        self.vp_top = vp_loose.top;
-        self.vp_bottom = vp_loose.bottom;
+        self.vp_top = eff_top;
+        self.vp_bottom = eff_bottom;
         self.last_char_right = vp_strict.right;
         self.last_char_loose_right = vp_loose.right;
         self.last_char_left = vp_strict.left;
         self.last_char_loose_left = vp_loose.left;
         self.last_char_bottom = vp_strict.bottom;
+        self.last_char_baseline = baseline;
+        self.last_char_loose_height = (vp_loose.bottom - vp_loose.top).abs();
         self.dir_rtl = None;
         self.note_direction(c);
         self.char_count = 1;
@@ -3648,7 +3783,13 @@ impl SegmentBuilder {
         self.pending_space_generated = false;
         self.words.clear();
         self.word_has = false;
-        self.add_word_char(c, vp_loose);
+        let eff_word_box = RectF {
+            left: vp_loose.left,
+            top: eff_top,
+            right: vp_loose.right,
+            bottom: eff_bottom,
+        };
+        self.add_word_char(c, &eff_word_box);
         self.text_width = 0.0;
         if self.extract_text_metadata {
             self.char_codes.clear();
@@ -3743,6 +3884,7 @@ impl SegmentBuilder {
         c: char,
         vp_loose: &RectF,
         vp_strict: &RectF,
+        baseline: Option<f32>,
         cv: &CharView<'_, '_>,
         recovered: bool,
     ) {
@@ -3761,16 +3903,26 @@ impl SegmentBuilder {
             self.rtl_spans
                 .push((self.text.len(), vp_loose.left, vp_loose.right));
         }
-        self.add_word_char(c, vp_loose);
+        // Same tall-glyph clamp as `start` (#486).
+        let (eff_top, eff_bottom) = clamped_vertical_bounds(vp_loose, vp_strict);
+        let eff_word_box = RectF {
+            left: vp_loose.left,
+            top: eff_top,
+            right: vp_loose.right,
+            bottom: eff_bottom,
+        };
+        self.add_word_char(c, &eff_word_box);
         self.vp_left = self.vp_left.min(vp_loose.left);
         self.vp_right = self.vp_right.max(vp_loose.right);
-        self.vp_top = self.vp_top.min(vp_loose.top);
-        self.vp_bottom = self.vp_bottom.max(vp_loose.bottom);
+        self.vp_top = self.vp_top.min(eff_top);
+        self.vp_bottom = self.vp_bottom.max(eff_bottom);
         self.last_char_right = vp_strict.right;
         self.last_char_loose_right = vp_loose.right;
         self.last_char_left = vp_strict.left;
         self.last_char_loose_left = vp_loose.left;
         self.last_char_bottom = vp_strict.bottom;
+        self.last_char_baseline = baseline;
+        self.last_char_loose_height = (vp_loose.bottom - vp_loose.top).abs();
         self.note_direction(c);
         self.char_count += 1;
         if self.extract_text_metadata {
@@ -4482,6 +4634,116 @@ mod tests {
             height: h,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn dedup_keeps_adjacent_lines_despite_tall_loose_box() {
+        // #486: a 9pt hyphen in Cambria Math (Ascent 3116 / Descent -2463)
+        // stretches its line to 50.2pt tall, covering 78% of the line above
+        // with a 3.9x area ratio — just under the old cutoffs. Adjacent
+        // lines must survive; overpaint dedupe requires a shared baseline.
+        let mut items = vec![
+            ti(
+                "Based upon payment history, the otherwise applicable premium shall be modified.",
+                72.0,
+                83.9,
+                325.6,
+                10.0,
+            ),
+            ti(
+                "if there are no late fees in the previous 24 months. History is re-",
+                72.0,
+                74.4,
+                254.7,
+                50.2,
+            ),
+            ti("evaluated at each renewal.", 72.0, 104.7, 107.6, 10.0),
+        ];
+        dedup_overlapping_items(&mut items, false);
+        assert_eq!(
+            items.len(),
+            3,
+            "tall loose box must not drop the line above"
+        );
+    }
+
+    #[test]
+    fn dedup_same_line_allows_true_overpaint() {
+        // Identical boxes on the same baseline still dedupe.
+        assert!(dedup_same_line(
+            &ti("old", 0.0, 0.0, 10.0, 5.0),
+            &ti("new", 0.0, 0.0, 10.0, 5.0)
+        ));
+        // 10.4pt-apart baselines with 10pt-tall boxes do not share a line.
+        assert!(!dedup_same_line(
+            &ti("a", 72.0, 83.9, 325.6, 10.0),
+            &ti("b", 72.0, 74.4, 254.7, 50.2)
+        ));
+    }
+
+    #[test]
+    fn clamped_vertical_bounds_uses_ink_for_pathological_loose() {
+        // #486 hyphen: 50.2pt loose box, ~0.6pt ink (~84x disproportion).
+        let loose = RectF {
+            left: 0.0,
+            top: 74.4,
+            right: 10.0,
+            bottom: 124.6,
+        };
+        let strict = RectF {
+            left: 0.0,
+            top: 90.0,
+            right: 10.0,
+            bottom: 90.6,
+        };
+        let (top, bottom) = clamped_vertical_bounds(&loose, &strict);
+        assert_eq!((top, bottom), (90.0, 90.6));
+        // Normal 10pt line (10pt loose, 3pt ink: 3.3x) is untouched.
+        let normal_loose = RectF {
+            left: 0.0,
+            top: 83.9,
+            right: 10.0,
+            bottom: 93.9,
+        };
+        let normal_strict = RectF {
+            left: 0.0,
+            top: 90.0,
+            right: 10.0,
+            bottom: 93.0,
+        };
+        let (top, bottom) = clamped_vertical_bounds(&normal_loose, &normal_strict);
+        assert_eq!((top, bottom), (83.9, 93.9));
+        // Hairline punctuation (12.3pt loose, 0.6pt ink: ~20x) is untouched:
+        // clamping it would detach periods from their words.
+        let hair_loose = RectF {
+            left: 0.0,
+            top: 119.0,
+            right: 10.0,
+            bottom: 131.3,
+        };
+        let hair_strict = RectF {
+            left: 0.0,
+            top: 130.0,
+            right: 10.0,
+            bottom: 130.6,
+        };
+        let (top, bottom) = clamped_vertical_bounds(&hair_loose, &hair_strict);
+        assert_eq!((top, bottom), (119.0, 131.3));
+        // Display math (39.9pt loose, 9.9pt ink: 4x) is untouched.
+        let math_loose = RectF {
+            left: 0.0,
+            top: 79.0,
+            right: 10.0,
+            bottom: 118.9,
+        };
+        let math_strict = RectF {
+            left: 0.0,
+            top: 90.0,
+            right: 10.0,
+            bottom: 99.9,
+        };
+        let (top, bottom) = clamped_vertical_bounds(&math_loose, &math_strict);
+        assert_eq!((top, bottom), (79.0, 118.9));
     }
 
     #[test]
