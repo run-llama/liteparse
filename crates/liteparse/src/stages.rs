@@ -59,7 +59,7 @@ use crate::types::{
 pub use crate::extract::{ExtractedPages, ExtractionOutputOptions};
 pub use crate::layout::{LayoutBlock, LayoutCell};
 pub use crate::markdown_layout::{Block, Cell, PositionedBlock, SpanCell, render_blocks};
-pub use crate::ocr::OcrResult;
+pub use crate::ocr::{EncodedOcrImage, OcrImage, OcrImageFormat, OcrResult};
 pub use crate::ocr_merge::{
     ComplexityReason, LayoutComplexityReason, LayoutComplexityStats, OcrRaster, OcrRenderOptions,
     PageComplexityStats, PageOcrOutcome,
@@ -227,7 +227,10 @@ pub fn layout_complexity(page: &ParsedPage) -> LayoutComplexityStats {
 /// Rasterize the pages in `pages[start..]` that need OCR (or that
 /// `options.selection` names), stopping after `options.max_rasters`. Returns
 /// the rasters and the index to resume from, so a long document runs in
-/// bounded rounds. Drop the [`Document`] before awaiting recognition.
+/// bounded rounds. `options.page_images` supplies full-page images that bypass
+/// rendering for those pages; missing entries render normally. OCR selection,
+/// native-text masking and pixel-to-page scaling still apply. Drop the
+/// [`Document`] before awaiting recognition.
 pub fn render_for_ocr(
     document: &Document,
     pages: &[Page],

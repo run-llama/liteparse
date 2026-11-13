@@ -13,6 +13,17 @@ pub struct LiteParseConfig {
     pub ocr_language: String,
     /// Whether OCR is enabled. When true, runs on text-sparse pages and embedded images.
     pub ocr_enabled: bool,
+    /// Existing full-page images to use instead of rendering for OCR, keyed by
+    /// 1-based document page number (also with target pages and batch parsing).
+    /// Missing entries use the normal renderer. Images do not force OCR or
+    /// replace requested screenshot outputs. Values are local image paths;
+    /// DPI is derived from image dimensions and the PDF page size.
+    /// Images must cover the full corrected viewport, including `/Rotate` and
+    /// `page_orientation_corrections`, with matching content/form appearances.
+    /// Cropped, deskewed or stretched images are unsupported. Paths are read
+    /// lazily and must remain available until parsing finishes.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub ocr_page_images: HashMap<u32, String>,
     /// HTTP OCR server URL (uses Tesseract if not provided)
     pub ocr_server_url: Option<String>,
     /// Extra HTTP headers sent with every request to `ocr_server_url`, as
@@ -320,6 +331,7 @@ impl Default for LiteParseConfig {
             // fast if no engine is reachable, so a real misconfiguration is
             // never silently swallowed.
             ocr_enabled: cfg!(feature = "tesseract"),
+            ocr_page_images: HashMap::new(),
             ocr_server_url: None,
             ocr_server_headers: Vec::new(),
             ocr_request_fields: HashMap::new(),
