@@ -324,6 +324,7 @@ impl LiteParse {
                 extract_content_bounds: self.config.extract_content_bounds,
                 extract_images: self.config.effective_extract_images(),
                 emit_word_boxes: self.config.effective_emit_word_boxes(),
+                tight_word_boxes: self.config.tight_word_boxes,
                 extract_text_metadata: self.config.extract_text_metadata,
                 extract_vector_graphics: self.config.extract_vector_graphics,
                 extract_annotations: self.config.extract_annotations,
@@ -944,11 +945,18 @@ impl LiteParse {
 
     /// Grid projection (see [`Self::style_runs`]).
     fn project(&self, pages: Vec<Page>) -> Vec<ParsedPage> {
-        if self.style_runs() {
+        let mut parsed = if self.style_runs() {
             stages::project_for_markdown(pages)
         } else {
             stages::project(pages)
+        };
+        if self.config.logical_word_order {
+            for item in parsed.iter_mut().flat_map(|p| p.text_items.iter_mut()) {
+                crate::bidi::words_to_logical_order(&mut item.words);
+                crate::bidi::join_touching_words(&mut item.words, 0.15 * item.height);
+            }
         }
+        parsed
     }
 
     pub fn parse_from_pages(&self, pages: Vec<Page>, outline: Vec<OutlineTarget>) -> ParseResult {
