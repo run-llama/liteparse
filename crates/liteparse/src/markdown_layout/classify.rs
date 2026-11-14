@@ -419,7 +419,14 @@ pub fn classify_page_with_filters(
         while s < lines.len() {
             let path = &lines[s].region_path;
             let mut e = s + 1;
-            while e < lines.len() && lines[e].region_path == *path {
+            // Adjacent merges may share a path. Keep their validated table
+            // slices separate so each exact-range cache remains usable.
+            while e < lines.len()
+                && lines[e].region_path == *path
+                && !cross_region_runs
+                    .iter()
+                    .any(|(range, _)| range.start == e || range.end == e)
+            {
                 e += 1;
             }
             region_ranges.push((s, e));
@@ -1443,15 +1450,19 @@ mod tests {
     use super::*;
     use crate::types::TextItem;
 
-    // Entirely synthetic: two tables whose merged region paths collide.
+    // Hand-built multi-sibling paths exercise cache collisions. The binary
+    // control uses the child indices emitted by the current XY-cut projector;
+    // this fixture does not reproduce projection from a PDF.
     #[test]
     fn synthetic_separate_tables_with_common_region_path() {
         for counts in [[8, 7], [7, 8], [8, 8]] {
-            separate_tables_with_common_region_path(counts);
+            for binary_paths in [false, true] {
+                separate_tables_with_common_region_path(counts, binary_paths);
+            }
         }
     }
 
-    fn separate_tables_with_common_region_path(counts: [usize; 2]) {
+    fn separate_tables_with_common_region_path(counts: [usize; 2], binary_paths: bool) {
         let mut lines = Vec::new();
         for (table, count, top) in [(0, counts[0], 100.0), (1, counts[1], 400.0)] {
             for side in 0..2 {
@@ -1464,13 +1475,21 @@ mod tests {
                         vec![(number.as_str(), 250.0), ("42", 350.0)]
                     };
                     let mut l = line_with_spans(&cells, top + row as f32 * 20.0, 10.0);
-                    l.region_path = vec![(table * 3 + side) as u16, 0];
+                    l.region_path = if binary_paths {
+                        if table == 0 {
+                            vec![0, side as u16]
+                        } else {
+                            vec![1, 1, side as u16]
+                        }
+                    } else {
+                        vec![(table * 3 + side) as u16, 0]
+                    };
                     lines.push(l);
                 }
             }
             if table == 0 {
                 let mut divider = line("Separate section", 50.0, 320.0, 10.0, 10.0);
-                divider.region_path = vec![2];
+                divider.region_path = if binary_paths { vec![1, 0] } else { vec![2] };
                 lines.push(divider);
             }
         }
@@ -1500,6 +1519,57 @@ mod tests {
             }
         }
         assert!(md.contains("Separate section"), "{md}");
+    }
+
+    #[test]
+    fn synthetic_adjacent_direct_tables_keep_cached_runs() {
+        for binary_paths in [false, true] {
+            let mut lines = Vec::new();
+            for table in 0..2 {
+                for side in 0..2 {
+                    for row in 0..4 {
+                        let text = match (side, row) {
+                            (0, 0) => "Area".to_string(),
+                            (1, 0) => "Competence".to_string(),
+                            (0, _) => format!("{row}. Sample label T{table}"),
+                            _ => format!(
+                                "{row}.1 Valuing sustainability {row}.2 Supporting fairness"
+                            ),
+                        };
+                        let mut l = line_with_spans(
+                            &[(&text, if side == 0 { 50.0 } else { 250.0 })],
+                            100.0 + table as f32 * 300.0 + row as f32 * 50.0,
+                            10.0,
+                        );
+                        l.region_path = if binary_paths {
+                            vec![table, side]
+                        } else {
+                            vec![table * 2 + side, 0]
+                        };
+                        lines.push(l);
+                    }
+                }
+            }
+            let blocks = classify_page(&page(lines), &[]);
+            let md = render_blocks(&blocks);
+            assert_eq!(
+                blocks
+                    .iter()
+                    .filter(|b| matches!(b.block, Block::Table { .. }))
+                    .count(),
+                2,
+                "{md}"
+            );
+            for table in 0..2 {
+                for row in 1..4 {
+                    assert_eq!(
+                        md.matches(&format!("{row}. Sample label T{table}")).count(),
+                        1,
+                        "{md}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
