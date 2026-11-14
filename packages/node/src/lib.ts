@@ -33,6 +33,7 @@ export interface PoolOptions {
   poolSize?: number;
   /**
    * Hard per-parse deadline in milliseconds. Requires `poolSize`.
+   * Must be finite, greater than 0, and at most 2,147,483,647 (Node's timer limit).
    * The pool enforces the deadline by SIGKILLing the worker. On expiry
    * the parse rejects with {@link ParseTimeoutError} (naming the document)
    * and a fresh worker replaces the killed one.
