@@ -369,7 +369,10 @@ pub fn classify_page_with_filters(
     // TOC pages are skipped: their split number/title/page-number leaves
     // baseline-align perfectly and fuse into a convincing-but-wrong table.
     let mut cross_merged_owned: Option<Vec<ProjectedLine>> = None;
-    let mut cross_region_runs: Vec<(Vec<u16>, Vec<super::tables::TableRun>)> = Vec::new();
+    // Paths are not unique: separate merges can share an ancestor.
+    // Cache against the exact fused line range, updating it after each splice.
+    let mut cross_region_runs: Vec<(std::ops::Range<usize>, Vec<super::tables::TableRun>)> =
+        Vec::new();
     for _ in 0..3 {
         if toc_page {
             break;
@@ -380,10 +383,22 @@ pub fn classify_page_with_filters(
         };
         let mut next: Vec<ProjectedLine> = Vec::with_capacity(cur.len());
         next.extend_from_slice(&cur[..m.start]);
-        let merged_path = m.merged[0].region_path.clone();
+        let merged_end = m.start + m.merged.len();
         next.extend(m.merged);
         next.extend_from_slice(&cur[m.end..]);
-        cross_region_runs.push((merged_path, m.runs));
+        cross_region_runs.retain_mut(|(range, _)| {
+            if range.end <= m.start {
+                true
+            } else if range.start >= m.end {
+                range.start = merged_end + (range.start - m.end);
+                range.end = merged_end + (range.end - m.end);
+                true
+            } else {
+                // A later merge consumed these rows; its runs replace theirs.
+                false
+            }
+        });
+        cross_region_runs.push((m.start..merged_end, m.runs));
         cross_merged_owned = Some(next);
     }
     let lines: &[ProjectedLine] = cross_merged_owned.as_deref().unwrap_or(lines);
@@ -404,7 +419,14 @@ pub fn classify_page_with_filters(
         while s < lines.len() {
             let path = &lines[s].region_path;
             let mut e = s + 1;
-            while e < lines.len() && lines[e].region_path == *path {
+            // Adjacent merges may share a path. Keep their validated table
+            // slices separate so each exact-range cache remains usable.
+            while e < lines.len()
+                && lines[e].region_path == *path
+                && !cross_region_runs
+                    .iter()
+                    .any(|(range, _)| range.start == e || range.end == e)
+            {
                 e += 1;
             }
             region_ranges.push((s, e));
@@ -481,7 +503,7 @@ pub fn classify_page_with_filters(
         let region_start = blocks.len();
         let precomputed_tables = cross_region_runs
             .iter()
-            .find(|(path, _)| *path == lines[rstart].region_path)
+            .find(|(range, _)| *range == (rstart..rend))
             .map(|(_, runs)| runs.clone());
         let region_blocks = classify_region(
             region_lines,
@@ -638,6 +660,9 @@ fn classify_region(
     // sub-list's line bboxes anyway.
     let ruled_runs = detect_ruled_tables(lines, rule_segments, page.page_width, page.page_height);
     let borderless_runs = precomputed_tables
+        // Invalid cached spans must be redetected from these lines, not clamped:
+        // stale cells could silently replace unrelated text.
+        .filter(|runs| runs.iter().all(|r| r.start < r.end && r.end <= lines.len()))
         .unwrap_or_else(|| detect_tables_banded(lines, rule_segments, page.page_height));
     // A table that carries under 70% of the text of the lines it spans loses
     // the rest, since the loop below skips the span. Handing back lines no
@@ -1424,6 +1449,128 @@ mod tests {
     };
     use super::*;
     use crate::types::TextItem;
+
+    // Hand-built multi-sibling paths exercise cache collisions. The binary
+    // control uses the child indices emitted by the current XY-cut projector;
+    // this fixture does not reproduce projection from a PDF.
+    #[test]
+    fn synthetic_separate_tables_with_common_region_path() {
+        for counts in [[8, 7], [7, 8], [8, 8]] {
+            for binary_paths in [false, true] {
+                separate_tables_with_common_region_path(counts, binary_paths);
+            }
+        }
+    }
+
+    fn separate_tables_with_common_region_path(counts: [usize; 2], binary_paths: bool) {
+        let mut lines = Vec::new();
+        for (table, count, top) in [(0, counts[0], 100.0), (1, counts[1], 400.0)] {
+            for side in 0..2 {
+                for row in 0..count {
+                    let label = format!("Item{table}row{row}");
+                    let number = format!("{}", 100 + table * 10 + row);
+                    let cells = if side == 0 {
+                        vec![(label.as_str(), 50.0)]
+                    } else {
+                        vec![(number.as_str(), 250.0), ("42", 350.0)]
+                    };
+                    let mut l = line_with_spans(&cells, top + row as f32 * 20.0, 10.0);
+                    l.region_path = if binary_paths {
+                        if table == 0 {
+                            vec![0, side as u16]
+                        } else {
+                            vec![1, 1, side as u16]
+                        }
+                    } else {
+                        vec![(table * 3 + side) as u16, 0]
+                    };
+                    lines.push(l);
+                }
+            }
+            if table == 0 {
+                let mut divider = line("Separate section", 50.0, 320.0, 10.0, 10.0);
+                divider.region_path = if binary_paths { vec![1, 0] } else { vec![2] };
+                lines.push(divider);
+            }
+        }
+        let p = page(lines);
+        let blocks = classify_page(&p, &[]);
+        let md = render_blocks(&blocks);
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|b| matches!(b.block, Block::Table { .. }))
+                .count(),
+            2,
+            "{md}"
+        );
+        for (table, count) in counts.into_iter().enumerate() {
+            for row in 0..count {
+                assert_eq!(
+                    md.matches(&format!("Item{table}row{row}")).count(),
+                    1,
+                    "{md}"
+                );
+                assert_eq!(
+                    md.matches(&format!("{}", 100 + table * 10 + row)).count(),
+                    1,
+                    "{md}"
+                );
+            }
+        }
+        assert!(md.contains("Separate section"), "{md}");
+    }
+
+    #[test]
+    fn synthetic_adjacent_direct_tables_keep_cached_runs() {
+        for binary_paths in [false, true] {
+            let mut lines = Vec::new();
+            for table in 0..2 {
+                for side in 0..2 {
+                    for row in 0..4 {
+                        let text = match (side, row) {
+                            (0, 0) => "Area".to_string(),
+                            (1, 0) => "Competence".to_string(),
+                            (0, _) => format!("{row}. Sample label T{table}"),
+                            _ => format!(
+                                "{row}.1 Valuing sustainability {row}.2 Supporting fairness"
+                            ),
+                        };
+                        let mut l = line_with_spans(
+                            &[(&text, if side == 0 { 50.0 } else { 250.0 })],
+                            100.0 + table as f32 * 300.0 + row as f32 * 50.0,
+                            10.0,
+                        );
+                        l.region_path = if binary_paths {
+                            vec![table, side]
+                        } else {
+                            vec![table * 2 + side, 0]
+                        };
+                        lines.push(l);
+                    }
+                }
+            }
+            let blocks = classify_page(&page(lines), &[]);
+            let md = render_blocks(&blocks);
+            assert_eq!(
+                blocks
+                    .iter()
+                    .filter(|b| matches!(b.block, Block::Table { .. }))
+                    .count(),
+                2,
+                "{md}"
+            );
+            for table in 0..2 {
+                for row in 1..4 {
+                    assert_eq!(
+                        md.matches(&format!("{row}. Sample label T{table}")).count(),
+                        1,
+                        "{md}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn blocks_report_the_region_they_were_read_from() {
