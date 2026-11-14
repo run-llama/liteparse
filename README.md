@@ -653,6 +653,14 @@ choco install libreoffice-fresh
 > As of [v2.8.0](https://github.com/run-llama/liteparse/releases/tag/crates-v2.8.0), `imagemagick` is no longer required to convert images to PDF. Conversion is natively
 > handled by the rust code.
 
+## Preserving Native Punctuation
+
+Native PDF text normally folds typographic quotes and dashes to ASCII. Set
+`normalizePunctuation: false` in Node.js/WASM or `normalize_punctuation=False`
+in Python (`normalize_punctuation: false` in Rust) to retain those characters
+in text, text items, and word boxes. The default remains `true`. This option
+does not change OCR output or the filtering of decorative dot leaders/bullets.
+
 ## Environment Variables
 
 | Variable | Description |

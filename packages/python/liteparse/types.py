@@ -496,6 +496,8 @@ class LiteParseConfig:
     #: Keep text hidden by rectangular clips (e.g. overflow from a
     #: fixed-height table cell) instead of dropping it.
     keep_clipped_text: bool = False
+    #: Fold native typographic quotes and dashes to ASCII.
+    normalize_punctuation: bool = True
     extract_images: bool = False
     extract_vector_graphics: bool = False
     extract_xfa_packets: bool = False
