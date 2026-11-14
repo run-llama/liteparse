@@ -201,8 +201,13 @@ export class WorkerPool {
     if (!Number.isInteger(poolSize) || poolSize < 1) {
       throw new Error("poolSize must be an integer >= 1");
     }
-    if (parseTimeoutMs !== undefined && !(parseTimeoutMs > 0)) {
-      throw new Error("parseTimeoutMs must be > 0");
+    if (
+      parseTimeoutMs !== undefined &&
+      (!Number.isFinite(parseTimeoutMs) ||
+        parseTimeoutMs <= 0 ||
+        parseTimeoutMs > 2_147_483_647)
+    ) {
+      throw new Error("parseTimeoutMs must be finite, > 0, and <= 2147483647");
     }
     this.config = config;
     this.timeoutMs = parseTimeoutMs;
