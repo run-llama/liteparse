@@ -331,6 +331,7 @@ impl LiteParse {
                 extract_structure_tree: self.config.extract_structure_tree,
                 split_scripts: self.style_runs(),
                 keep_clipped_text: self.config.keep_clipped_text,
+                preserve_punctuation: !self.config.normalize_punctuation,
             },
         }
     }
@@ -501,6 +502,7 @@ impl LiteParse {
                     output: stages::ExtractionOutputOptions {
                         continue_on_page_error: self.config.continue_on_page_error,
                         keep_clipped_text: self.config.keep_clipped_text,
+                        preserve_punctuation: !self.config.normalize_punctuation,
                         ..Default::default()
                     },
                 },

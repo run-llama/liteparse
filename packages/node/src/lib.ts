@@ -80,6 +80,8 @@ export interface LiteParseConfig {
   keepHeadersFooters: boolean;
   /** Keep text hidden by rectangular clips (e.g. overflow from a fixed-height table cell) instead of dropping it (default: false). */
   keepClippedText: boolean;
+  /** Fold native typographic quotes and dashes to ASCII (default: true). */
+  normalizePunctuation: boolean;
   /** Extract all PDF annotations into each parsed page (default: false). */
   extractAnnotations: boolean;
   /** Extract AcroForm widget fields and values (default: false). */
@@ -698,6 +700,7 @@ export class LiteParse {
       extractLinks: userConfig.extractLinks,
       keepHeadersFooters: userConfig.keepHeadersFooters,
       keepClippedText: userConfig.keepClippedText,
+      normalizePunctuation: userConfig.normalizePunctuation,
       extractAnnotations: userConfig.extractAnnotations,
       extractFormFields: userConfig.extractFormFields,
       extractStructureTree: userConfig.extractStructureTree,
@@ -763,6 +766,7 @@ export class LiteParse {
       extractLinks: resolved.extractLinks ?? true,
       keepHeadersFooters: resolved.keepHeadersFooters ?? false,
       keepClippedText: resolved.keepClippedText ?? false,
+      normalizePunctuation: resolved.normalizePunctuation ?? true,
       extractAnnotations: resolved.extractAnnotations ?? false,
       extractFormFields: resolved.extractFormFields ?? false,
       extractStructureTree: resolved.extractStructureTree ?? false,

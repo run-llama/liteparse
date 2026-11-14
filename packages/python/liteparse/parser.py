@@ -488,6 +488,7 @@ class LiteParse:
         extract_links: Optional[bool] = None,
         keep_headers_footers: Optional[bool] = None,
         keep_clipped_text: Optional[bool] = None,
+        normalize_punctuation: Optional[bool] = None,
         extract_annotations: Optional[bool] = None,
         extract_form_fields: Optional[bool] = None,
         extract_structure_tree: Optional[bool] = None,
@@ -551,6 +552,8 @@ class LiteParse:
             image_output_dir: Directory where extracted embedded images are
                 written. Requires ``extract_images=True`` and returns file
                 names/paths in each ``ExtractedImage``.
+            normalize_punctuation: Fold native PDF typographic quotes and dashes
+                to ASCII (default: True). Set False to keep the source characters.
             extract_images: Extract embedded image bytes and metadata. Defaults
                 to False. This is the only option that enables extraction;
                 ``image_mode`` controls Markdown presentation independently.
@@ -664,6 +667,8 @@ class LiteParse:
             kwargs["keep_headers_footers"] = keep_headers_footers
         if keep_clipped_text is not None:
             kwargs["keep_clipped_text"] = keep_clipped_text
+        if normalize_punctuation is not None:
+            kwargs["normalize_punctuation"] = normalize_punctuation
         if extract_annotations is not None:
             kwargs["extract_annotations"] = extract_annotations
         if extract_form_fields is not None:
@@ -1008,6 +1013,7 @@ class LiteParse:
             extract_links=cfg.extract_links,
             keep_headers_footers=cfg.keep_headers_footers,
             keep_clipped_text=cfg.keep_clipped_text,
+            normalize_punctuation=cfg.normalize_punctuation,
             extract_annotations=cfg.extract_annotations,
             extract_form_fields=cfg.extract_form_fields,
             extract_structure_tree=cfg.extract_structure_tree,

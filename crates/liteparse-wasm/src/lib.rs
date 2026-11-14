@@ -72,6 +72,8 @@ pub struct LiteParseConfig {
     /// Keep text hidden by rectangular clips (e.g. overflow from a
     /// fixed-height table cell) instead of dropping it. Default false.
     keep_clipped_text: Option<bool>,
+    /// Fold native typographic quotes and dashes to ASCII. Default true.
+    normalize_punctuation: Option<bool>,
     extract_annotations: Option<bool>,
     extract_form_fields: Option<bool>,
     extract_structure_tree: Option<bool>,
@@ -214,6 +216,9 @@ impl LiteParseConfig {
         }
         if let Some(v) = self.keep_clipped_text {
             cfg.keep_clipped_text = v;
+        }
+        if let Some(v) = self.normalize_punctuation {
+            cfg.normalize_punctuation = v;
         }
         if let Some(v) = self.extract_annotations {
             cfg.extract_annotations = v;
