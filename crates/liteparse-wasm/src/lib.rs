@@ -329,6 +329,7 @@ impl LiteParseConfig {
             extract_links: Some(cfg.extract_links),
             keep_headers_footers: Some(cfg.keep_headers_footers),
             keep_clipped_text: Some(cfg.keep_clipped_text),
+            normalize_punctuation: Some(cfg.normalize_punctuation),
             extract_annotations: Some(cfg.extract_annotations),
             extract_form_fields: Some(cfg.extract_form_fields),
             extract_structure_tree: Some(cfg.extract_structure_tree),
