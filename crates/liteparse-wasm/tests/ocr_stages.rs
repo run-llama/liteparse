@@ -8,26 +8,7 @@ use std::task::{Context, Poll, Waker};
 
 use liteparse::ocr::{OcrEngine, OcrOptions, OcrResult};
 use liteparse::stages::{self, OcrRaster};
-use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_test::wasm_bindgen_test;
-
-#[wasm_bindgen_test]
-fn punctuation_config_round_trips_through_the_public_parser() {
-    for normalize in [None, Some(true), Some(false)] {
-        let config = js_sys::Object::new();
-        if let Some(value) = normalize {
-            js_sys::Reflect::set(
-                &config,
-                &JsValue::from_str("normalizePunctuation"),
-                &JsValue::from_bool(value),
-            )
-            .unwrap();
-        }
-        let parser = liteparse_wasm::LiteParse::new(config.unchecked_into()).unwrap();
-        let resolved = serde_json::to_value(parser.config()).unwrap();
-        assert_eq!(resolved["normalizePunctuation"], normalize.unwrap_or(true));
-    }
-}
 
 #[derive(Default)]
 struct State {

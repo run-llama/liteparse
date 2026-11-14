@@ -87,6 +87,28 @@
       const { default: init, LiteParse } = await import("/packages/wasm/pkg/liteparse_wasm.js");
       await init();
 
+      status.textContent = "testing native punctuation";
+      const punctuationResponse = await fetch("/crates/liteparse/tests/fixtures/typographic-punctuation.pdf");
+      if (!punctuationResponse.ok) throw new Error(`Failed to fetch punctuation PDF: ${punctuationResponse.status}`);
+      const punctuationBytes = new Uint8Array(await punctuationResponse.arrayBuffer());
+      for (const normalizePunctuation of [undefined, true, false]) {
+        const punctuationParser = new LiteParse({ ocrEnabled: false, quiet: true, normalizePunctuation });
+        try {
+          if (punctuationParser.config.normalizePunctuation !== (normalizePunctuation ?? true)) {
+            throw new Error(`Punctuation configuration did not round-trip: ${normalizePunctuation}`);
+          }
+          const punctuationResult = await punctuationParser.parse(punctuationBytes);
+          const expected = normalizePunctuation === false
+            ? "quote ‘word’ and “word”; range 1–2 — done"
+            : "quote 'word' and \"word\"; range 1-2 - done";
+          if (punctuationResult.pages[0].text.trim() !== expected) {
+            throw new Error(`Unexpected native punctuation: ${normalizePunctuation}`);
+          }
+        } finally {
+          punctuationParser.free();
+        }
+      }
+
       status.textContent = "creating parser";
       const parser = new LiteParse({ ocrEnabled: false, outputFormat: "text", quiet: true });
 
