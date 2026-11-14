@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { writeFileSync, mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 
 import { LiteParse, ParseTimeoutError } from "../dist/lib.js";
 
@@ -70,6 +71,56 @@ function gridPdf(nObjects) {
     ),
   );
   return Buffer.concat(chunks);
+}
+
+for (const { name, args, stdin = false, inline = false } of [
+  { name: "module stdin", args: ["--input-type=module"], stdin: true },
+  { name: "CommonJS stdin", args: ["--input-type=commonjs"], stdin: true },
+  { name: "module eval", args: ["--input-type=module", "--eval"] },
+  { name: "separate input type", args: ["--input-type", "module", "-e"] },
+  { name: "CommonJS print/eval", args: ["--input-type=commonjs", "-pe"] },
+  { name: "inline eval", args: ["--input-type=module"], inline: true },
+  { name: "ordinary eval", args: ["-e"] },
+  { name: "ordinary print", args: ["-p"] },
+]) {
+  test(`pool starts and parses from ${name}`, () => {
+    const code = `
+      if (process.env.LITEPARSE_TEST_EVAL_GUARD === "1") {
+        throw new Error("parent eval source ran in a worker");
+      }
+      process.env.LITEPARSE_TEST_EVAL_GUARD = "1";
+      (async () => {
+        const { LiteParse } = await import(${JSON.stringify(new URL("../dist/lib.js", import.meta.url).href)});
+        const { deflateSync } = await import("node:zlib");
+        const gridPdf = ${gridPdf.toString()};
+        const originalArgs = JSON.stringify(process.execArgv);
+        const parser = new LiteParse({ quiet: true, ocrEnabled: false, poolSize: 1 });
+        try {
+          await parser.warmUp();
+          const result = await parser.parse(gridPdf(1));
+          console.log("POOL_RESULT=" + JSON.stringify({
+            pages: result.pages.length,
+            argsUnchanged: originalArgs === JSON.stringify(process.execArgv),
+          }));
+        } finally {
+          parser.close();
+        }
+      })().catch(error => { console.error(error); process.exitCode = 1; });
+    `;
+    const child = spawnSync(
+      process.execPath,
+      [...args, ...(stdin ? [] : [inline ? `--eval=${code}` : code])],
+      {
+        input: stdin ? code : undefined,
+        encoding: "utf8",
+        timeout: 10_000,
+        env: { ...process.env, LITEPARSE_TEST_EVAL_GUARD: "" },
+      },
+    );
+    assert.ifError(child.error);
+    assert.equal(child.status, 0, child.stderr);
+    assert.match(child.stdout, /POOL_RESULT=\{"pages":1,"argsUnchanged":true\}/);
+  });
 }
 
 test("pool matches in-process results", { skip: !existsSync(SAMPLE_PDF) }, async () => {

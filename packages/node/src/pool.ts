@@ -37,6 +37,25 @@ type WorkerResponse =
 
 const WORKER_PATH = fileURLToPath(new URL("./pool-worker.js", import.meta.url));
 
+/** Workers run a file, so stdin/eval-only options must not be inherited.
+ * Supplying execArgv also bypasses fork()'s automatic removal of the parent
+ * eval source; remove it here to avoid running the caller again in a worker. */
+function workerExecArgv(): string[] {
+  const args: string[] = [];
+  for (let i = 0; i < process.execArgv.length; i++) {
+    const arg = process.execArgv[i];
+    if (arg === "--input-type" || arg === "--eval" || arg === "-e") {
+      i++;
+    } else if (arg === "--print" || /^-[ep]+$/.test(arg)) {
+      // Print can read stdin, in which case the next option is not a source.
+      if (process.execArgv[i + 1] && !process.execArgv[i + 1].startsWith("-")) i++;
+    } else if (!/^--(?:input-type|eval|print)=/.test(arg)) {
+      args.push(arg);
+    }
+  }
+  return args;
+}
+
 /** IPC deserialization yields plain Uint8Arrays where the API promises
  * Buffers; rewrap in place (no copy). */
 function reviveBuffers(result: ParseResult): ParseResult {
@@ -66,6 +85,7 @@ class WorkerHandle {
 
   constructor(config: Record<string, unknown>) {
     this.child = fork(WORKER_PATH, [], {
+      execArgv: workerExecArgv(),
       serialization: "advanced",
       // stdout/stderr inherited: parse logs and crash traces stay visible.
       stdio: ["ignore", "inherit", "inherit", "ipc"],
