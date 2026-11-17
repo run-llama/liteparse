@@ -18,7 +18,10 @@ mod paragraphs;
 mod repetition;
 mod tables;
 
-pub use blocks::{Block, Cell, PositionedBlock, SpanCell, render_blocks, splice_soft_hyphens};
+pub use blocks::{
+    Block, Cell, PositionedBlock, SpanCell, rejoin_paragraphs_around_figures, render_blocks,
+    splice_soft_hyphens, split_repeated_header_tables,
+};
 pub use classify::classify_page_with_filters;
 pub use headings::{build_heading_map, compute_body_size};
 pub use inline::{apply_link, escape_inline};

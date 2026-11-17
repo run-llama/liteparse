@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::error::LiteParseError;
-use crate::ocr::{OcrEngine, OcrOptions, OcrResult};
+use crate::ocr::{OcrEngine, OcrImage, OcrOptions, OcrResult};
 use crate::types::{CutAxis, Page, ParsedPage, Rect, Region, RegionKind, TextItem, WordBox};
 #[cfg(target_arch = "wasm32")]
 use futures_util::{
@@ -20,6 +20,9 @@ use serde::{Deserialize, Serialize};
 /// text); measured on a 121-page financial report, the trigger fires on ~3
 /// pages at this threshold.
 const UNCOVERED_VECTOR_AREA_THRESHOLD: f32 = 400.0;
+/// Native characters at which a sparse, raster-free page's text layer is taken as its content
+/// (OCR then runs only for vector-drawn text, see `calculate_page_complexity`).
+const SPARSE_TEXT_TRUSTED_LEN: usize = 500;
 
 /// Minimum side length (pt) for a raster image object to count toward image
 /// coverage; smaller objects (rule lines, bullets, icons) are ignored.
@@ -42,7 +45,7 @@ const MIN_COLUMN_ITEM_FRACTION: f32 = 0.15;
 /// `DenseGraphics`.
 const DENSE_GRAPHICS_MIN_COVERAGE: f32 = 0.2;
 
-/// Owned page bitmap prepared for OCR, plus the page facts the merge needs
+/// Owned OCR image (pixels or original encoded bytes), plus the page facts the merge needs
 /// to judge the engine's output. Produced by [`render_pages_for_ocr`],
 /// consumed by [`recognize_rasters`]; the non-pixel facts are carried into
 /// the [`PageOcrOutcome`] so [`merge_ocr_results`] never needs the raster or
@@ -53,12 +56,7 @@ pub struct OcrRaster {
     /// this number, so a raster can be merged into any page slice that
     /// contains its page.
     pub page_number: usize,
-    /// Tightly-packed pixels: 1 byte/px (grayscale) or 3 (RGB). Serialized
-    /// as a base64 string, since a JSON array of numbers is ~3.5× the size.
-    #[serde(with = "base64_bytes")]
-    pub pixels: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
+    pub image: OcrImage,
     /// DPI this page was actually rendered at (the long-edge cap can lower it
     /// below the requested DPI). Pixel → point scale is `72 / dpi`.
     pub dpi: f32,
@@ -67,9 +65,18 @@ pub struct OcrRaster {
     /// and the merge applies the stricter artifact filters.
     pub has_native_text: bool,
     /// Embedded raster figure rects (viewport pt, excluding full-page
-    /// backgrounds), so the merge can judge each figure's OCR output as a
-    /// group — a chart's axis/legend labels are dropped together.
+    /// backgrounds). Carried for consumers of the stages API; the merge
+    /// itself does not filter on them.
     pub image_rects: Vec<Rect>,
+    /// The page's native text is an invisible OCR layer the new OCR replaces
+    /// ([`ComplexityReason::InvisibleTextLayer`]).
+    #[serde(default)]
+    pub replace_native: bool,
+    /// Form fields for this page's OCR request: the base
+    /// [`OcrRenderOptions::request_fields`] with the page's own
+    /// [`OcrRenderOptions::page_request_fields`] merged over them.
+    #[serde(default)]
+    pub request_fields: BTreeMap<String, String>,
 }
 
 /// How [`render_pages_for_ocr`] picks and rasterizes pages.
@@ -82,9 +89,22 @@ pub struct OcrRenderOptions {
     /// Stop after this many rasters (`0` = no limit), so a long document can
     /// be processed in bounded rounds; the function returns where to resume.
     pub max_rasters: usize,
-    /// Requested render resolution; clamped per page by the long-edge cap.
+    /// Requested render resolution; lowered per page by `max_long_edge` and
+    /// by the built-in long-edge limit.
     pub dpi: f32,
-    /// Emit 1 byte/px luma instead of RGB (see `OcrEngine::prefers_grayscale`).
+    /// Full-page image paths supplied by the caller, keyed by 1-based source page.
+    /// A supplied image replaces rendering only after the normal OCR gate;
+    /// it retains its dimensions regardless of render DPI or `max_long_edge`.
+    pub page_images: HashMap<u32, String>,
+    /// Largest long edge, in pixels, a raster may have. Each page renders at
+    /// `dpi` or, when that would exceed the cap, at the lower dpi whose long
+    /// edge is exactly the cap, so pages of different sizes get different
+    /// dpis in one call (the raster's `dpi` reports which). `None` or
+    /// `Some(0)` leaves `dpi` alone.
+    pub max_long_edge: Option<u32>,
+    /// Use luma instead of RGB when rendering or materializing pixels for
+    /// masking. Encoded inputs retain their format; recognizers choose how
+    /// to decode them (see `OcrEngine::prefers_grayscale`).
     pub grayscale: bool,
     /// Paint form-field appearances into the raster (runs document actions).
     pub render_form_fields: bool,
@@ -99,6 +119,15 @@ pub struct OcrRenderOptions {
     /// `Some` renders exactly these pages, whatever the scoring says, so a
     /// caller with its own routing can override it.
     pub selection: Option<HashSet<u32>>,
+    /// Remove dot-screen specks from rasters of speckled 1-bit full-page scans
+    /// (see `LiteParseConfig::ocr_despeckle_scans`).
+    pub despeckle_scans: bool,
+    /// Form fields every raster's OCR request carries
+    /// (`LiteParseConfig::ocr_request_fields`).
+    pub request_fields: HashMap<String, String>,
+    /// Per-page form fields merged over `request_fields`, keyed by 1-based
+    /// page number (`LiteParseConfig::ocr_page_request_fields`).
+    pub page_request_fields: HashMap<u32, HashMap<String, String>>,
 }
 
 impl Default for OcrRenderOptions {
@@ -106,28 +135,17 @@ impl Default for OcrRenderOptions {
         Self {
             max_rasters: 0,
             dpi: crate::config::DEFAULT_DPI,
+            page_images: HashMap::new(),
+            max_long_edge: None,
             grayscale: false,
             render_form_fields: false,
             continue_on_page_error: false,
             reflatten_pages: HashSet::new(),
             selection: None,
+            despeckle_scans: true,
+            request_fields: HashMap::new(),
+            page_request_fields: HashMap::new(),
         }
-    }
-}
-
-/// Base64 (de)serialization for raster pixel buffers.
-mod base64_bytes {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&STANDARD.encode(bytes))
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
-        let encoded = String::deserialize(deserializer)?;
-        STANDARD.decode(encoded).map_err(serde::de::Error::custom)
     }
 }
 
@@ -135,7 +153,7 @@ type OcrTaskResult = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + S
 
 impl PageOcrOutcome {
     /// The outcome for `raster` before recognition: its page facts, no
-    /// results yet. Lets the pixels go to the engine while the small facts
+    /// results yet. Lets the image go to the engine while the small facts
     /// wait for the result.
     fn pending(raster: &OcrRaster) -> Self {
         Self {
@@ -143,6 +161,7 @@ impl PageOcrOutcome {
             dpi: raster.dpi,
             has_native_text: raster.has_native_text,
             image_rects: raster.image_rects.clone(),
+            replace_native: raster.replace_native,
             results: Vec::new(),
             error: None,
         }
@@ -225,18 +244,14 @@ impl OcrTaskPool {
         let options = OcrOptions {
             language: self.language.clone(),
             dpi: raster.dpi,
+            request_fields: raster.request_fields.clone(),
         };
         #[cfg(not(target_arch = "wasm32"))]
         {
             let runtime = tokio::runtime::Handle::current();
             let task = self.tasks.spawn(async move {
                 match tokio::task::spawn_blocking(move || {
-                    runtime.block_on(engine.recognize(
-                        &raster.pixels,
-                        raster.width,
-                        raster.height,
-                        &options,
-                    ))
+                    runtime.block_on(engine.recognize_image(&raster.image, &options))
                 })
                 .await
                 {
@@ -250,9 +265,7 @@ impl OcrTaskPool {
         {
             let order = self.submitted;
             self.tasks.push(Box::pin(async move {
-                let result = engine
-                    .recognize(&raster.pixels, raster.width, raster.height, &options)
-                    .await;
+                let result = engine.recognize_image(&raster.image, &options).await;
                 (order, pending.with_result(result))
             }));
         }
@@ -360,6 +373,11 @@ pub enum ComplexityReason {
     /// by `NoText` or `Scanned`; it tells a genuinely blank page apart from
     /// one whose body text simply lives out of reach.
     AnnotationText,
+    /// A scanned page (full-page raster) whose native text is an invisible
+    /// layer (render mode 3) - an earlier OCR pass baked into the PDF. Its
+    /// misreads cost as much as missing text, so the page is OCR'd again and
+    /// the new OCR replaces the layer.
+    InvisibleTextLayer,
 }
 
 impl ComplexityReason {
@@ -372,6 +390,7 @@ impl ComplexityReason {
             ComplexityReason::Garbled => "garbled",
             ComplexityReason::VectorText => "vector-text",
             ComplexityReason::AnnotationText => "annotation-text",
+            ComplexityReason::InvisibleTextLayer => "invisible-text-layer",
         }
     }
 }
@@ -419,6 +438,70 @@ pub struct PageComplexityStats {
     /// `is_complex()` and `include_complexity` parses populate it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layout: Option<LayoutComplexityStats>,
+}
+
+/// Share of a page's visible-glyph characters (whitespace and generated
+/// characters aside) at or above which its text counts as an invisible layer.
+const INVISIBLE_LAYER_MIN_SHARE: f32 = 0.9;
+
+/// Fraction of the page's top-level text objects painted before (under) its first
+/// full-page raster. Archive scans often carry their OCR text in render mode 0 but
+/// hidden beneath the page image, which the reader never sees; born-digital pages
+/// with a background image paint their text on top of it.
+fn hidden_under_scan_share(page_obj: &pdfium::Page) -> f32 {
+    let (pw, ph) = (page_obj.width(), page_obj.height());
+    let mut text_before = 0usize;
+    let mut text_total = 0usize;
+    let mut seen_scan = false;
+    for i in 0..page_obj.object_count() {
+        let Some(obj) = page_obj.object(i) else {
+            continue;
+        };
+        match obj.kind() {
+            pdfium::PageObjectKind::Image if !seen_scan => {
+                if let Some(b) = obj.bounds() {
+                    seen_scan = (b.right - b.left) > pw * MAX_IMAGE_PAGE_COVERAGE
+                        && (b.top - b.bottom).abs() > ph * MAX_IMAGE_PAGE_COVERAGE;
+                }
+            }
+            pdfium::PageObjectKind::Text => {
+                text_total += 1;
+                if !seen_scan {
+                    text_before += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    if !seen_scan || text_total == 0 {
+        0.0
+    } else {
+        text_before as f32 / text_total as f32
+    }
+}
+
+/// Fraction of the page's characters drawn invisibly (text render mode 3).
+fn invisible_text_share(page_obj: &pdfium::Page) -> f32 {
+    let Ok(tp) = page_obj.text() else {
+        return 0.0;
+    };
+    let (mut invisible, mut total) = (0usize, 0usize);
+    for ch in tp.chars() {
+        if ch.is_generated()
+            || char::from_u32(ch.unicode()).is_none_or(|c| c.is_whitespace() || c.is_control())
+        {
+            continue;
+        }
+        total += 1;
+        if ch.text_render_mode() == Some(3) {
+            invisible += 1;
+        }
+    }
+    if total == 0 {
+        0.0
+    } else {
+        invisible as f32 / total as f32
+    }
 }
 
 pub(crate) fn calculate_page_complexity(
@@ -503,8 +586,11 @@ pub(crate) fn calculate_page_complexity(
         if page_obj.has_annotation_text() {
             reasons.push(ComplexityReason::AnnotationText);
         }
-    } else if sparse_text {
-        // There is real text, but it's too thin to be the whole page.
+    } else if sparse_text && (full_page_image || text_length < SPARSE_TEXT_TRUSTED_LEN) {
+        // There is real text, but it's too thin to be the whole page. A page that already
+        // carries plenty of native text and no raster at all has nothing else for OCR to read
+        // but text drawn as vector outlines, which the vector check below measures; OCR'ing it
+        // anyway only re-reads the native text (every result then dropped as overlapping).
         reasons.push(ComplexityReason::SparseText);
     }
     if has_images {
@@ -512,6 +598,13 @@ pub(crate) fn calculate_page_complexity(
     }
     if is_garbled {
         reasons.push(ComplexityReason::Garbled);
+    }
+    if full_page_image
+        && text_length >= MIN_NATIVE_TEXT_LEN
+        && (invisible_text_share(page_obj) >= INVISIBLE_LAYER_MIN_SHARE
+            || hidden_under_scan_share(page_obj) >= INVISIBLE_LAYER_MIN_SHARE)
+    {
+        reasons.push(ComplexityReason::InvisibleTextLayer);
     }
     let mut needs_ocr = !reasons.is_empty();
 
@@ -863,6 +956,142 @@ fn count_columns(region: &Region, total_items: usize) -> usize {
 /// to avoid excessive memory usage.
 pub(crate) const MAX_OCR_RENDER_LONG_EDGE_PX: f32 = 4096.0;
 
+/// Despeckle thresholds for [`OcrRenderOptions::despeckle_scans`], in pixels at
+/// [`DESPECKLE_REF_DPI`] and scaled with the render dpi. Dot-screen backgrounds on
+/// 300 dpi 1-bit scans are blobs of 1 to 10 px area and at most 3 px across;
+/// periods, colon dots and decimal points start around 40 px area and 6 px across.
+const DESPECKLE_REF_DPI: f32 = 300.0;
+const DESPECKLE_MAX_AREA_PX: f32 = 10.0;
+const DESPECKLE_MAX_SIDE_PX: f32 = 5.0;
+/// Below this render dpi pdfium's downsampling already averages the dots into
+/// grey, and punctuation shrinks towards dot size, so the page is left alone.
+const DESPECKLE_MIN_DPI: f32 = 200.0;
+/// Speckles per square inch of page before a page counts as speckled. Dotted
+/// backgrounds run in the hundreds; a clean scan has a handful.
+const DESPECKLE_MIN_DENSITY_PER_SQ_IN: f32 = 50.0;
+
+/// True if a top-level 1-bpp image covers the page. Checks both orientations
+/// because object bounds ignore `/Rotate`.
+fn is_bilevel_scan(page_obj: &pdfium::Page) -> bool {
+    let (pw, ph) = (page_obj.width(), page_obj.height());
+    let covers = |w: f32, h: f32| {
+        (w > pw * MAX_IMAGE_PAGE_COVERAGE && h > ph * MAX_IMAGE_PAGE_COVERAGE)
+            || (w > ph * MAX_IMAGE_PAGE_COVERAGE && h > pw * MAX_IMAGE_PAGE_COVERAGE)
+    };
+    (0..page_obj.object_count()).any(|i| {
+        let Some(obj) = page_obj.object(i) else {
+            return false;
+        };
+        if !matches!(obj.kind(), pdfium::PageObjectKind::Image) {
+            return false;
+        }
+        let Some(b) = obj.bounds() else {
+            return false;
+        };
+        covers(b.right - b.left, (b.top - b.bottom).abs())
+            && obj.image_metadata().is_some_and(|m| m.bits_per_pixel == 1)
+    })
+}
+
+/// Remove the isolated specks of a dotted or dithered scan background from an
+/// interleaved 8-bit raster rendered at `dpi`, in place. A speck is an
+/// 8-connected blob of dark (mean < 128) pixels at most `DESPECKLE_MAX_AREA_PX`
+/// in area and `DESPECKLE_MAX_SIDE_PX` on each side, both scaled to `dpi`. Specks
+/// are painted white only when the page holds at least
+/// `DESPECKLE_MIN_DENSITY_PER_SQ_IN` of them, so a clean page, and the
+/// punctuation on it, is never touched. Returns how many specks were removed.
+fn despeckle(pixels: &mut [u8], width: usize, height: usize, channels: usize, dpi: f32) -> usize {
+    if width == 0 || height == 0 || dpi < DESPECKLE_MIN_DPI {
+        return 0;
+    }
+    let scale = dpi / DESPECKLE_REF_DPI;
+    let max_area = (DESPECKLE_MAX_AREA_PX * scale * scale).round() as usize;
+    let max_side = (DESPECKLE_MAX_SIDE_PX * scale).round() as usize;
+    let row = width * channels;
+    let dark = |y: usize, x: usize| {
+        let px = &pixels[y * row + x * channels..y * row + (x + 1) * channels];
+        px.iter().map(|&v| v as usize).sum::<usize>() < 128 * channels
+    };
+
+    // Runs of dark pixels, row by row: (y, x0, x1) inclusive.
+    let mut runs: Vec<(usize, usize, usize)> = Vec::new();
+    let mut row_start = Vec::with_capacity(height + 1);
+    for y in 0..height {
+        row_start.push(runs.len());
+        let mut x = 0;
+        while x < width {
+            if dark(y, x) {
+                let x0 = x;
+                while x < width && dark(y, x) {
+                    x += 1;
+                }
+                runs.push((y, x0, x - 1));
+            } else {
+                x += 1;
+            }
+        }
+    }
+    row_start.push(runs.len());
+
+    // Union runs that touch a run on the row above, diagonals included.
+    let mut parent: Vec<usize> = (0..runs.len()).collect();
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    for y in 1..height {
+        let (above, here) = (
+            row_start[y - 1]..row_start[y],
+            row_start[y]..row_start[y + 1],
+        );
+        let mut j = above.start;
+        for i in here {
+            let (_, x0, x1) = runs[i];
+            while j < above.end && runs[j].2 + 1 < x0 {
+                j += 1;
+            }
+            let mut k = j;
+            while k < above.end && runs[k].1 <= x1 + 1 {
+                let (a, b) = (find(&mut parent, i), find(&mut parent, k));
+                if a != b {
+                    parent[a] = b;
+                }
+                k += 1;
+            }
+        }
+    }
+
+    // Area and bounds per blob.
+    let mut stats: Vec<(usize, usize, usize, usize, usize)> =
+        vec![(0, usize::MAX, 0, usize::MAX, 0); runs.len()];
+    for (i, &(y, x0, x1)) in runs.iter().enumerate() {
+        let r = find(&mut parent, i);
+        let s = &mut stats[r];
+        s.0 += x1 - x0 + 1;
+        s.1 = s.1.min(x0);
+        s.2 = s.2.max(x1);
+        s.3 = s.3.min(y);
+        s.4 = s.4.max(y);
+    }
+    let speck = |s: &(usize, usize, usize, usize, usize)| {
+        s.0 > 0 && s.0 <= max_area && s.2 - s.1 < max_side && s.4 - s.3 < max_side
+    };
+    let specks = stats.iter().filter(|s| speck(s)).count();
+    let sq_in = (width as f32 / dpi) * (height as f32 / dpi);
+    if (specks as f32) < DESPECKLE_MIN_DENSITY_PER_SQ_IN * sq_in {
+        return 0;
+    }
+    for (i, &(y, x0, x1)) in runs.iter().enumerate() {
+        if speck(&stats[find(&mut parent, i)]) {
+            pixels[y * row + x0 * channels..y * row + (x1 + 1) * channels].fill(255);
+        }
+    }
+    specks
+}
+
 /// Render the pages in `pages[start..]` that need OCR from an already-open
 /// document, stopping once `options.max_rasters` of them have been rendered.
 /// Returns the rasters plus the index to resume scanning from, so a caller
@@ -879,6 +1108,37 @@ pub fn render_pages_for_ocr(
     render_pages_for_ocr_capped(document, pages, start, options, options.max_rasters)
 }
 
+/// Infer resolution from the full-page image and PDF viewport. The longer
+/// page axis minimizes relative raster rounding error; the other axis must
+/// agree within one pixel. Embedded image DPI metadata is not used.
+fn load_ocr_page_image(path: &str, page: &Page) -> Result<(OcrImage, f32), LiteParseError> {
+    let image = OcrImage::from_file(path)?;
+    let (width, height) = image.dimensions();
+    let pixels_per_point = if page.page_width >= page.page_height {
+        width as f32 / page.page_width
+    } else {
+        height as f32 / page.page_height
+    };
+    let dpi = pixels_per_point * 72.0;
+    if width == 0
+        || height == 0
+        || !page.page_width.is_finite()
+        || page.page_width <= 0.0
+        || !page.page_height.is_finite()
+        || page.page_height <= 0.0
+        || !dpi.is_finite()
+        || dpi <= 0.0
+        || (width as f32 - page.page_width * pixels_per_point).abs() > 1.0
+        || (height as f32 - page.page_height * pixels_per_point).abs() > 1.0
+    {
+        return Err(LiteParseError::Config(format!(
+            "OCR image for page {} is {}x{}; expected a full-page image matching the {:.1}x{:.1} point page in corrected viewport orientation",
+            page.page_number, width, height, page.page_width, page.page_height
+        )));
+    }
+    Ok((image, dpi))
+}
+
 /// [`render_pages_for_ocr`] with `max_rasters` overriding the one in
 /// `options`, so a caller sizing each round to its free OCR slots need not
 /// clone the options.
@@ -892,11 +1152,16 @@ pub(crate) fn render_pages_for_ocr_capped(
     let OcrRenderOptions {
         max_rasters: _,
         dpi,
+        page_images,
+        max_long_edge,
         grayscale,
         render_form_fields,
         continue_on_page_error,
         reflatten_pages: flatten_page_numbers,
         selection,
+        despeckle_scans,
+        request_fields,
+        page_request_fields,
     } = options;
     let (dpi, grayscale, render_form_fields, continue_on_page_error) = (
         *dpi,
@@ -945,6 +1210,7 @@ pub(crate) fn render_pages_for_ocr_capped(
             // caller's decision, so the page-object walk in
             // `calculate_page_complexity` is skipped and the signal is derived
             // from the text items alone (which is all those reasons read).
+            let mut replace_native = false;
             let has_native_text = match selection {
                 Some(_) => {
                     native_text_length(page) >= MIN_NATIVE_TEXT_LEN && !page_is_garbled(page)
@@ -954,6 +1220,9 @@ pub(crate) fn render_pages_for_ocr_capped(
                     if !page_complexity.needs_ocr {
                         return Ok(None);
                     }
+                    replace_native = page_complexity
+                        .reasons
+                        .contains(&ComplexityReason::InvisibleTextLayer);
                     !page_complexity.reasons.iter().any(|r| {
                         matches!(
                             r,
@@ -961,30 +1230,89 @@ pub(crate) fn render_pages_for_ocr_capped(
                                 | ComplexityReason::NoText
                                 | ComplexityReason::Garbled
                                 | ComplexityReason::AnnotationText
+                                | ComplexityReason::InvisibleTextLayer
                         )
                     })
                 }
             };
 
-            // Clamp the render DPI so the long edge stays within the raster budget.
-            let long_edge_pt = page.page_width.max(page.page_height);
-            let mut eff_dpi = dpi;
-            if long_edge_pt > 0.0 {
-                let max_dpi = MAX_OCR_RENDER_LONG_EDGE_PX * 72.0 / long_edge_pt;
-                if eff_dpi > max_dpi {
-                    eff_dpi = max_dpi;
-                }
-            }
-
-            let bitmap = page_obj.render_with_form(eff_dpi, form.as_ref())?;
-            let width = bitmap.width() as u32;
-            let height = bitmap.height() as u32;
-            // Grayscale or RGB per the engine; see `OcrEngine::prefers_grayscale`.
-            let pixels = if grayscale {
-                bitmap.to_luma()
+            // A page whose native text the merge keeps as is: blank that text out of the raster.
+            // The merge drops every OCR line overlapping kept native text, so reading those
+            // lines was wasted; OCR now only sees what the text layer doesn't cover (figures,
+            // scanned inserts, outlined text). Pages where OCR replaces native text (garbled
+            // fonts, an invisible OCR layer) keep the whole raster.
+            let mask_native = has_native_text
+                && !replace_native
+                && matches!(garbled_scope(page), GarbledScope::None);
+            let (mut image, eff_dpi) = if let Some(source) =
+                page_images.get(&(page.page_number as u32))
+            {
+                load_ocr_page_image(source, page)?
             } else {
-                bitmap.to_rgb()
+                // Fit the caller's cap, then clamp so the long edge stays within the raster budget.
+                let long_edge_pt = page.page_width.max(page.page_height);
+                let mut eff_dpi = fitting_dpi(
+                    page.page_width,
+                    page.page_height,
+                    dpi,
+                    max_long_edge.unwrap_or(0),
+                );
+                if long_edge_pt > 0.0 {
+                    let max_dpi = MAX_OCR_RENDER_LONG_EDGE_PX * 72.0 / long_edge_pt;
+                    if eff_dpi > max_dpi {
+                        eff_dpi = max_dpi;
+                    }
+                }
+                let bitmap = page_obj.render_with_form(eff_dpi, form.as_ref())?;
+                let width = bitmap.width() as u32;
+                let height = bitmap.height() as u32;
+                // Grayscale or RGB per the engine; see `OcrEngine::prefers_grayscale`.
+                let mut data = if grayscale {
+                    bitmap.to_luma()
+                } else {
+                    bitmap.to_rgb()
+                };
+                // A 1-bit scan on a dotted or dithered background: drop the specks before OCR.
+                // Rendered at the scan's resolution they read as diacritics and stray
+                // punctuation, and a server that downscales for detection aliases them.
+                if *despeckle_scans && eff_dpi >= DESPECKLE_MIN_DPI && is_bilevel_scan(&page_obj) {
+                    despeckle(
+                        &mut data,
+                        width as usize,
+                        height as usize,
+                        if grayscale { 1 } else { 3 },
+                        eff_dpi,
+                    );
+                }
+                (
+                    OcrImage::Pixels {
+                        data,
+                        width,
+                        height,
+                        grayscale,
+                    },
+                    eff_dpi,
+                )
             };
+            // Edits materialize pixels and replace the whole image, so the OCR
+            // engine can never receive stale encoded bytes after native masking.
+            if mask_native {
+                let (width, height) = image.dimensions();
+                let mut data = image.into_pixels(grayscale)?;
+                mask_native_text(
+                    &mut data,
+                    width,
+                    height,
+                    page,
+                    if grayscale { 1 } else { 3 },
+                );
+                image = OcrImage::Pixels {
+                    data,
+                    width,
+                    height,
+                    grayscale,
+                };
+            }
 
             let image_rects = if has_native_text {
                 let pw = page.page_width;
@@ -1009,12 +1337,22 @@ pub(crate) fn render_pages_for_ocr_capped(
 
             Ok(Some(OcrRaster {
                 page_number: page.page_number,
-                pixels,
-                width,
-                height,
+                image,
                 dpi: eff_dpi,
                 has_native_text,
                 image_rects,
+                replace_native,
+                // Later entries win, so the page's own fields override the base.
+                request_fields: request_fields
+                    .iter()
+                    .chain(
+                        page_request_fields
+                            .get(&(page.page_number as u32))
+                            .into_iter()
+                            .flatten(),
+                    )
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
             }))
         })();
         match page_render {
@@ -1038,6 +1376,17 @@ pub(crate) fn render_pages_for_ocr_capped(
     Ok((rendered, next_start))
 }
 
+/// The render dpi for a `width` x `height` pt page: `dpi`, lowered so the long
+/// edge (`pt * dpi / 72`, rounded as pdfium sizes the bitmap) is at most
+/// `max_long_edge` pixels. A cap of 0, or a page with no size, keeps `dpi`.
+fn fitting_dpi(width: f32, height: f32, dpi: f32, max_long_edge: u32) -> f32 {
+    let long_edge_pt = width.max(height);
+    if max_long_edge == 0 || long_edge_pt <= 0.0 {
+        return dpi;
+    }
+    dpi.min(max_long_edge as f32 * 72.0 / long_edge_pt)
+}
+
 /// One page's recognition outcome: what the engine returned for one
 /// [`OcrRaster`], plus the raster's page facts so the merge is a pure
 /// function of `(pages, outcomes)`. The pixels are gone — this is the small
@@ -1054,6 +1403,9 @@ pub struct PageOcrOutcome {
     pub dpi: f32,
     pub has_native_text: bool,
     pub image_rects: Vec<Rect>,
+    /// See [`OcrRaster::replace_native`].
+    #[serde(default)]
+    pub replace_native: bool,
     /// Engine output in raster pixel coordinates. Empty when the engine
     /// failed (see `error`) or found nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1086,20 +1438,17 @@ pub async fn recognize_rasters(
 ///
 /// Per page, unusable native text (garbled fonts, unmappable Type3) is dropped
 /// first so OCR can replace it; then each result is filtered against rule
-/// artifacts, chart figures and overlap with surviving native text before
+/// artifacts and overlap with surviving native text before
 /// being appended as an `OCR`-font [`TextItem`] in viewport points.
 ///
 /// Outcomes are matched to pages by `page_number`; an outcome for a page not
 /// in `pages` is an error rather than a panic, so a caller can merge a
 /// subset of pages or hand-built outcomes safely.
 ///
-/// `emit_word_boxes` must match what the extraction stage used
-/// (`LiteParseConfig::effective_emit_word_boxes`). An engine reports one
-/// [`OcrResult`] per word, so each surviving result becomes a one-word
-/// [`TextItem`]; the item's own word box is attached here, which is what lets
-/// the projection pass merge neighbouring OCR items into a run that still
-/// carries per-word boxes. When `false`, no box is attached, matching the
-/// zero-allocation promise the config makes for native text.
+/// `emit_word_boxes` must match `LiteParseConfig::effective_emit_word_boxes`
+/// from extraction. Each surviving result becomes one [`TextItem`] whose word
+/// boxes the projection preserves when merging neighbours. When `false`, no
+/// word boxes are allocated.
 pub fn merge_ocr_results(
     pages: &mut [Page],
     outcomes: Vec<PageOcrOutcome>,
@@ -1134,7 +1483,8 @@ pub fn merge_ocr_results(
             page_number,
             dpi: page_dpi,
             has_native_text,
-            image_rects,
+            image_rects: _,
+            replace_native,
             results: ocr_results,
             error,
         } = outcome;
@@ -1170,7 +1520,17 @@ pub fn merge_ocr_results(
         // output stuck with unreadable text. We apply per-item, per-font, and
         // per-page checks: short garbled labels ("GDWH", "XVG") can't be
         // flagged alone, but their font group or host page can.
-        match garbled_scope(page) {
+        // An invisible OCR layer on a scan steps aside for the new OCR (which
+        // came back non-empty, so the page keeps text either way).
+        let scope = if replace_native {
+            GarbledScope::WholePage
+        } else {
+            garbled_scope(page)
+        };
+        // Some fonts dropped, the rest kept: OCR fills lines the dropped fonts held, and a kept
+        // glyph inside such a line (a bullet, a drop cap) must not veto it (see below).
+        let partial = matches!(scope, GarbledScope::Fonts(_));
+        match scope {
             GarbledScope::None => page.text_items.retain(|item| !is_unusable_native(item)),
             GarbledScope::WholePage => page.text_items.clear(),
             // Only the corrupt font's items go; text in the page's healthy
@@ -1187,14 +1547,65 @@ pub fn merge_ocr_results(
         // OCR lines whose bounding boxes touched within tolerance to suppress each
         // other, dropping every second line on scanned pages.
         let native_count = page.text_items.len();
+        // Kept native items an OCR line superseded on a partial page (see `partial`).
+        let mut superseded = vec![false; native_count];
         let debug_ocr = std::env::var_os("LITEPARSE_DEBUG_OCR").is_some();
-        // Judge each embedded figure's OCR output as a group: a figure whose
-        // recognised text is mostly numbers and short tokens is a chart
-        // (axes, ticks, legend keys), and none of it belongs in the text flow.
-        let chart_images: Vec<bool> = if has_native_text {
-            chart_like_images(&image_rects, &ocr_results, scale_factor)
+        // A skewed scan: when all of the page's text is OCR, rotate the items upright about the
+        // page centre. Axis-aligned boxes of tilted lines overlap the lines above and below,
+        // and the projection then merges and reorders them. The tilt is recorded on the page
+        // and the output boxes are rotated back after layout (`stages::rotate_back_ocr_deskew`).
+        let deskew = if native_count == 0 {
+            ocr_page_skew(&ocr_results)
         } else {
-            Vec::new()
+            None
+        };
+        page.ocr_deskew = deskew;
+        let (cx, cy) = (page.page_width / 2.0, page.page_height / 2.0);
+        let upright = |x: f32, y: f32| -> (f32, f32) {
+            match deskew {
+                Some(deg) => rotate_about(x, y, cx, cy, -deg),
+                None => (x, y),
+            }
+        };
+        // An axis-aligned pixel box in page points. Under a deskew the box moves with its
+        // centre and keeps its size, so rotating the centre back restores it (parser.rs).
+        let to_page = |b: [f32; 4]| -> (f32, f32, f32, f32) {
+            let (w, h) = ((b[2] - b[0]) * scale_factor, (b[3] - b[1]) * scale_factor);
+            match deskew {
+                Some(_) => {
+                    let (mx, my) = upright(
+                        (b[0] + b[2]) / 2.0 * scale_factor,
+                        (b[1] + b[3]) / 2.0 * scale_factor,
+                    );
+                    (mx - w / 2.0, my - h / 2.0, w, h)
+                }
+                None => (b[0] * scale_factor, b[1] * scale_factor, w, h),
+            }
+        };
+        // Page-point bounds of a pixel box, or of its quad when the engine sent one. Without a
+        // deskew the quad's points stay in image pixels until the bounds are taken, so the
+        // boxes match the un-deskewed arithmetic exactly.
+        let page_bounds = |bbox: [f32; 4], poly: Option<[[f32; 2]; 4]>| {
+            let Some(poly) = poly else {
+                return to_page(bbox);
+            };
+            let (s, pts) = match deskew {
+                Some(_) => (
+                    1.0,
+                    poly.map(|[x, y]| upright(x * scale_factor, y * scale_factor)),
+                ),
+                None => (scale_factor, poly.map(|[x, y]| (x, y))),
+            };
+            let x_min = pts.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+            let x_max = pts.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+            let y_min = pts.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+            let y_max = pts.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+            (
+                x_min * s,
+                y_min * s,
+                (x_max - x_min) * s,
+                (y_max - y_min) * s,
+            )
         };
         if debug_ocr {
             eprintln!(
@@ -1210,35 +1621,13 @@ pub fn merge_ocr_results(
                 continue;
             }
 
-            // Prefer the screen-space axis-aligned bbox derived from the polygon
-            // (when present) so rotated detections carry a tight upright bbox.
-            // The polygon also lets us recover an explicit rotation angle so the
-            // projector can route rotated sidebar text through its rotation
-            // reading-order handler instead of mistaking it for body text.
-            let (ocr_x, ocr_y, ocr_w, ocr_h, rotation) = match r.polygon {
-                Some(poly) => {
-                    let xs = [poly[0][0], poly[1][0], poly[2][0], poly[3][0]];
-                    let ys = [poly[0][1], poly[1][1], poly[2][1], poly[3][1]];
-                    let x_min = xs.iter().copied().fold(f32::INFINITY, f32::min);
-                    let x_max = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                    let y_min = ys.iter().copied().fold(f32::INFINITY, f32::min);
-                    let y_max = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                    let rot = polygon_rotation_deg(&poly);
-                    (
-                        x_min * scale_factor,
-                        y_min * scale_factor,
-                        (x_max - x_min) * scale_factor,
-                        (y_max - y_min) * scale_factor,
-                        rot,
-                    )
-                }
-                None => (
-                    r.bbox[0] * scale_factor,
-                    r.bbox[1] * scale_factor,
-                    (r.bbox[2] - r.bbox[0]) * scale_factor,
-                    (r.bbox[3] - r.bbox[1]) * scale_factor,
-                    0.0,
-                ),
+            // The polygon's bounds give a rotated detection a tight upright box. The
+            // rotation (the engine's angle, else the polygon's point order) sends rotated
+            // sidebar text through the projector's rotation reading-order handler.
+            let (ocr_x, ocr_y, ocr_w, ocr_h) = page_bounds(r.bbox, r.polygon);
+            let rotation = match r.rotation {
+                Some(deg) => canonical_quarter(deg) as f32,
+                None => r.polygon.map_or(0.0, |p| polygon_rotation_deg(&p)),
             };
 
             // On pages that already have native text, OCR only enriches:
@@ -1256,27 +1645,33 @@ pub fn merge_ocr_results(
                 }
                 continue;
             }
-            if has_native_text
-                && chart_images
-                    .iter()
-                    .zip(&image_rects)
-                    .any(|(is_chart, rect)| {
-                        *is_chart && box_center_in(rect, ocr_x, ocr_y, ocr_w, ocr_h)
-                    })
-            {
-                if debug_ocr {
-                    eprintln!("[ocr-merge]   skip(chart-figure) {:?}", r.text);
+            // Native items inside a line that, on a partial page, supersedes them once added.
+            let mut inside = Vec::new();
+            let overlaps = if partial {
+                // On a partial page the line is the kept text's only when kept native text
+                // covers most of it; otherwise the native items inside it give way to it.
+                let natives = &page.text_items[..native_count];
+                let covered = native_width_coverage(natives, ocr_x, ocr_y, ocr_w, ocr_h);
+                if covered < PARTIAL_NATIVE_COVERAGE {
+                    inside = (0..native_count)
+                        .filter(|&i| {
+                            let it = &natives[i];
+                            let (cx, cy) = (it.x + it.width / 2.0, it.y + it.height / 2.0);
+                            cx >= ocr_x && cx <= ocr_x + ocr_w && cy >= ocr_y && cy <= ocr_y + ocr_h
+                        })
+                        .collect();
                 }
-                continue;
-            }
-            let overlaps = overlaps_existing_text(
-                &page.text_items[..native_count],
-                ocr_x,
-                ocr_y,
-                ocr_w,
-                ocr_h,
-                2.0,
-            );
+                covered >= PARTIAL_NATIVE_COVERAGE
+            } else {
+                overlaps_existing_text(
+                    &page.text_items[..native_count],
+                    ocr_x,
+                    ocr_y,
+                    ocr_w,
+                    ocr_h,
+                    2.0,
+                )
+            };
             if debug_ocr {
                 eprintln!(
                     "[ocr-merge]   {} conf={:.2} x={:.1} y={:.1} w={:.1} h={:.1} {:?}",
@@ -1302,23 +1697,37 @@ pub fn merge_ocr_results(
             // which for 90/270° rotations corresponds to the *narrow* screen
             // dimension. Use the perpendicular extent for rotated OCR text so
             // downstream font-size heuristics stay sane.
+            // A tilted line's axis-aligned box is taller than its glyphs (a 3° tilt over a
+            // 400 px line adds 20 px), which reads as a larger font and promotes body lines
+            // to headings; the polygon's own side is the line height.
+            let poly_h = r
+                .polygon
+                .map(|p| (p[3][0] - p[0][0]).hypot(p[3][1] - p[0][1]) * scale_factor);
             let font_size_hint = if rotation == 90.0 || rotation == 270.0 {
                 ocr_w.max(1.0)
             } else {
-                ocr_h
+                poly_h.filter(|h| *h > 0.0).map_or(ocr_h, |h| h.min(ocr_h))
             };
 
-            // The engine already segmented this result as a single word, so
-            // its box is the item's box. The clone only happens when the
-            // caller asked for word boxes.
             let words = if emit_word_boxes {
-                vec![WordBox {
-                    text: cleaned.clone(),
-                    x: ocr_x,
-                    y: ocr_y,
-                    width: ocr_w,
-                    height: ocr_h,
-                }]
+                let word = |text: &str, (x, y, width, height): (f32, f32, f32, f32)| WordBox {
+                    text: text.to_string(),
+                    x,
+                    y,
+                    width,
+                    height,
+                };
+                // Engine boxes move by their centres so the rotate-back after layout restores
+                // each one. A count mismatch after cleaning keeps the line's own box.
+                if cleaned.split_whitespace().count() == r.words.len() {
+                    cleaned
+                        .split_whitespace()
+                        .zip(&r.words)
+                        .map(|(text, measured)| word(text, to_page(measured.bbox)))
+                        .collect()
+                } else {
+                    vec![word(&cleaned, to_page(r.bbox))]
+                }
             } else {
                 Vec::new()
             };
@@ -1336,6 +1745,20 @@ pub fn merge_ocr_results(
                 words,
                 ..Default::default()
             });
+            for i in inside {
+                superseded[i] = true;
+            }
+        }
+        if superseded.iter().any(|&s| s) {
+            let mut i = 0;
+            page.text_items.retain(|_| {
+                let keep = i >= native_count || !superseded[i];
+                i += 1;
+                keep
+            });
+        }
+        if !has_native_text {
+            upright_rotated_scan(page);
         }
     }
 
@@ -1374,6 +1797,98 @@ pub fn merge_ocr_results(
     }
 
     Ok(())
+}
+
+/// Tilt range a page is deskewed over: below it rows already group correctly, above it the
+/// "tilt" is more likely rotated or curved text than a skewed scan.
+const DESKEW_MIN_DEG: f32 = 0.3;
+const DESKEW_MAX_DEG: f32 = 10.0;
+
+/// Share of a page's OCR text (by characters) that must share one quarter-turn rotation for the
+/// page to be read as a scan turned on its side or upside down.
+const ROTATED_SCAN_MIN_SHARE: f32 = 0.7;
+
+/// A scan whose text all runs one way other than upright (a page fed sideways or upside down):
+/// re-express every item in the upright page's frame and clear its rotation, so reading order and
+/// layout work on the page as written. The rotation handler in projection is built for a few
+/// rotated labels on an upright page (pin labels, margin stamps), not a whole rotated page, which
+/// came out reversed (180) or shredded into fake tables (90 / 270). Item boxes, and for quarter
+/// turns the page size, are then in the upright frame.
+fn upright_rotated_scan(page: &mut Page) {
+    let mut chars = [0usize; 4];
+    for it in &page.text_items {
+        chars[(canonical_quarter(it.rotation) / 90) as usize] += it.text.chars().count();
+    }
+    let total: usize = chars.iter().sum();
+    let (q, &top) = chars.iter().enumerate().max_by_key(|&(_, c)| *c).unwrap();
+    if q == 0 || total < 20 || (top as f32) < total as f32 * ROTATED_SCAN_MIN_SHARE {
+        return;
+    }
+    let (w, h) = (page.page_width, page.page_height);
+    let turn = |(x, y, bw, bh): (f32, f32, f32, f32)| match q {
+        // reading bottom-to-top: the page's top edge is on the left
+        1 => (h - (y + bh), x, bh, bw),
+        2 => (w - (x + bw), h - (y + bh), bw, bh),
+        // reading top-to-bottom: the page's top edge is on the right
+        _ => (y, w - (x + bw), bh, bw),
+    };
+    for it in &mut page.text_items {
+        (it.x, it.y, it.width, it.height) = turn((it.x, it.y, it.width, it.height));
+        it.rotation = 0.0;
+        for wb in &mut it.words {
+            (wb.x, wb.y, wb.width, wb.height) = turn((wb.x, wb.y, wb.width, wb.height));
+        }
+    }
+    if q != 2 {
+        (page.page_width, page.page_height) = (h, w);
+    }
+}
+
+/// 0, 90, 180 or 270 for an item rotation in degrees.
+fn canonical_quarter(rot: f32) -> u32 {
+    ((rot.rem_euclid(360.0) / 90.0).round() as u32 % 4) * 90
+}
+
+/// The page's tilt in degrees (image frame, y down: positive = lines descend to the right),
+/// as the length-weighted median angle of its long, near-horizontal OCR lines (length >= 4x
+/// height): a long line's angle is reliable, a short piece's (a list marker, one word) is
+/// often 0 or noise, and a plain median of a page with few long lines lands between the two.
+/// `None` below three such lines or outside the deskew range.
+fn ocr_page_skew(results: &[OcrResult]) -> Option<f32> {
+    let mut lines: Vec<(f32, f32)> = results
+        .iter()
+        .filter_map(|r| {
+            let p = r.polygon?;
+            let (dx, dy) = (p[1][0] - p[0][0], p[1][1] - p[0][1]);
+            let len = dx.hypot(dy);
+            let h = (p[3][0] - p[0][0]).hypot(p[3][1] - p[0][1]);
+            let deg = dy.atan2(dx).to_degrees();
+            (len >= 4.0 * h && len > 0.0 && deg.abs() <= 45.0).then_some((deg, len))
+        })
+        .collect();
+    if lines.len() < 3 {
+        return None;
+    }
+    lines.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let half = lines.iter().map(|l| l.1).sum::<f32>() / 2.0;
+    let mut acc = 0.0;
+    let mid = lines
+        .iter()
+        .find(|l| {
+            acc += l.1;
+            acc >= half
+        })
+        .map_or(0.0, |l| l.0);
+    (DESKEW_MIN_DEG..=DESKEW_MAX_DEG)
+        .contains(&mid.abs())
+        .then_some(mid)
+}
+
+/// Rotate (x, y) by `deg` degrees about (cx, cy), in the y-down page frame.
+pub(crate) fn rotate_about(x: f32, y: f32, cx: f32, cy: f32, deg: f32) -> (f32, f32) {
+    let (s, c) = deg.to_radians().sin_cos();
+    let (dx, dy) = (x - cx, y - cy);
+    (cx + dx * c - dy * s, cy + dx * s + dy * c)
 }
 
 /// True when the page's native (already-extracted) text is sparse enough that
@@ -1417,6 +1932,36 @@ fn native_text_length(page: &Page) -> usize {
 /// Unicode mapping failed outright (Type3 fonts with no ToUnicode — the text
 /// is a char-code fallback and the bbox comes from deceptive declared
 /// metrics), or its content looks substitution-cipher garbled.
+/// Paint the boxes of the native text items the merge keeps (`!is_unusable_native`) white in an
+/// OCR raster of `page` (`channels` 1 or 3, tightly packed), widened by `MASK_MARGIN_PT`.
+fn mask_native_text(pixels: &mut [u8], width: u32, height: u32, page: &Page, channels: usize) {
+    const MASK_MARGIN_PT: f32 = 1.0;
+    if page.page_width <= 0.0 || page.page_height <= 0.0 {
+        return;
+    }
+    let (w, h) = (width as usize, height as usize);
+    let (sx, sy) = (
+        width as f32 / page.page_width,
+        height as f32 / page.page_height,
+    );
+    for item in page
+        .text_items
+        .iter()
+        .filter(|i| !is_unusable_native(i) && !i.text.trim().is_empty())
+    {
+        let x0 = ((item.x - MASK_MARGIN_PT) * sx).floor().max(0.0) as usize;
+        let y0 = ((item.y - MASK_MARGIN_PT) * sy).floor().max(0.0) as usize;
+        let x1 = (((item.x + item.width + MASK_MARGIN_PT) * sx).ceil() as usize).min(w);
+        let y1 = (((item.y + item.height + MASK_MARGIN_PT) * sy).ceil() as usize).min(h);
+        if x0 >= x1 || y0 >= y1 {
+            continue;
+        }
+        for y in y0..y1 {
+            pixels[(y * w + x0) * channels..(y * w + x1) * channels].fill(255);
+        }
+    }
+}
+
 fn is_unusable_native(item: &TextItem) -> bool {
     item.has_unicode_map_error || is_likely_garbled(&item.text)
 }
@@ -1550,31 +2095,447 @@ fn garbled_scope(page: &Page) -> GarbledScope {
     let mut total_vowels = 0usize;
     // Keyed by font name, so text sharing a ToUnicode map is judged together.
     let mut per_font: HashMap<Option<&str>, (usize, usize)> = HashMap::new();
+    // Complex-script text with unmapped conjunct / ligature glyphs (see `script_intrusions`).
+    let mut per_font_script: HashMap<Option<&str>, (usize, usize)> = HashMap::new();
+    let (mut total_script, mut total_intrusions) = (0usize, 0usize);
+    // Legacy-encoded Indic fonts and cipher-like maps (see `symbol_intrusions`).
+    let mut per_font_symbol: HashMap<Option<&str>, (usize, usize)> = HashMap::new();
+    let (mut total_sym_letters, mut total_sym) = (0usize, 0usize);
+    // Control characters and malformed tokens (see `control_chars`, `token_is_malformed`).
+    let mut per_font_ctrl: HashMap<Option<&str>, (usize, usize)> = HashMap::new();
+    let (mut total_ctrl, mut total_chars) = (0usize, 0usize);
+    let mut per_font_tok: HashMap<Option<&str>, (usize, usize)> = HashMap::new();
+    let (mut total_judged, mut total_malformed) = (0usize, 0usize);
+    // Misread glyphs (see `misread_glyphs`), per base font: intruding char -> its distinct words
+    // and the distinct tails it opens.
+    let mut per_base_misread: HashMap<Option<&str>, MisreadByChar> = HashMap::new();
     for it in &page.text_items {
+        if !it.math && !is_symbol_font(it.font_name.as_deref()) {
+            let words = per_base_misread
+                .entry(it.font_name.as_deref().map(base_font_name))
+                .or_default();
+            for m in misread_glyphs(&it.text) {
+                let e = words.entry(m.ch).or_default();
+                e.0.insert(m.word);
+                e.1.insert(m.tail);
+            }
+        }
+        // math items carry the TeX pass's own LaTeX (and its fonts' control-position glyphs)
+        if !it.math && !is_symbol_font(it.font_name.as_deref()) {
+            let (c, n) = control_chars(&it.text);
+            total_ctrl += c;
+            total_chars += n;
+            let e = per_font_ctrl
+                .entry(it.font_name.as_deref())
+                .or_insert((0, 0));
+            e.0 += c;
+            e.1 += n;
+            let (j, m) = malformed_tokens(&it.text);
+            total_judged += j;
+            total_malformed += m;
+            let e = per_font_tok
+                .entry(it.font_name.as_deref())
+                .or_insert((0, 0));
+            e.0 += j;
+            e.1 += m;
+        }
         let (l, v) = count_letters_and_vowels(&it.text);
         total_letters += l;
         total_vowels += v;
         let entry = per_font.entry(it.font_name.as_deref()).or_insert((0, 0));
         entry.0 += l;
         entry.1 += v;
+        let (sc, intr) = script_intrusions(&it.text);
+        total_script += sc;
+        total_intrusions += intr;
+        let e = per_font_script
+            .entry(it.font_name.as_deref())
+            .or_insert((0, 0));
+        e.0 += sc;
+        e.1 += intr;
+        let (lt, sy) = symbol_intrusions(&it.text);
+        total_sym_letters += lt;
+        total_sym += sy;
+        let e = per_font_symbol
+            .entry(it.font_name.as_deref())
+            .or_insert((0, 0));
+        e.0 += lt;
+        e.1 += sy;
     }
 
-    if ratio_is_garbled(total_letters, total_vowels) {
+    if ratio_is_garbled(total_letters, total_vowels)
+        || intrusions_are_garbled(total_script, total_intrusions)
+        || symbols_are_garbled(total_sym_letters, total_sym)
+        || controls_are_garbled(total_ctrl, total_chars)
+        || tokens_are_garbled(total_judged, total_malformed)
+    {
         return GarbledScope::WholePage;
     }
 
     let min_share = (total_letters as f32 * GARBLE_MIN_FONT_SHARE).ceil() as usize;
-    let fonts: HashSet<Option<String>> = per_font
+    let mut fonts: HashSet<Option<String>> = per_font
         .into_iter()
         .filter(|&(_, (letters, vowels))| letters >= min_share && ratio_is_garbled(letters, vowels))
         .map(|(font, _)| font.map(str::to_string))
         .collect();
+    fonts.extend(
+        per_font_script
+            .into_iter()
+            .filter(|&(_, (sc, intr))| intrusions_are_garbled(sc, intr))
+            .map(|(font, _)| font.map(str::to_string)),
+    );
+    fonts.extend(
+        per_font_symbol
+            .into_iter()
+            .filter(|&(_, (lt, sy))| symbols_are_garbled(lt, sy))
+            .map(|(font, _)| font.map(str::to_string)),
+    );
+
+    fonts.extend(
+        per_font_ctrl
+            .into_iter()
+            .filter(|&(_, (c, n))| controls_are_garbled(c, n))
+            .map(|(font, _)| font.map(str::to_string)),
+    );
+    fonts.extend(
+        per_font_tok
+            .into_iter()
+            .filter(|&(_, (j, m))| tokens_are_garbled(j, m))
+            .map(|(font, _)| font.map(str::to_string)),
+    );
+    // A misread glyph condemns every subset of its base font on the page: a producer that
+    // wrote one subset's map wrong wrote the others the same way, and the body subset's few
+    // misreads ("maGor") are too sparse to judge alone.
+    let misread_bases: HashSet<Option<&str>> = per_base_misread
+        .into_iter()
+        .filter(|(_, words)| {
+            words
+                .values()
+                .any(|(w, tails)| w.len() >= MISREAD_MIN_WORDS && tails.len() >= MISREAD_MIN_TAILS)
+        })
+        .map(|(base, _)| base)
+        .collect();
+    if !misread_bases.is_empty() {
+        fonts.extend(
+            page.text_items
+                .iter()
+                .filter(|it| misread_bases.contains(&it.font_name.as_deref().map(base_font_name)))
+                .map(|it| it.font_name.clone()),
+        );
+    }
 
     if fonts.is_empty() {
         GarbledScope::None
     } else {
         GarbledScope::Fonts(fonts)
     }
+}
+
+/// Fewest stray ASCII characters inside complex-script words, and their least rate per script
+/// character, for a font's text to count as garbled (see [`script_intrusions`]).
+const INTRUSION_MIN: usize = 5;
+const INTRUSION_MIN_RATE: f32 = 0.015;
+
+/// Complex scripts whose shaped forms (Indic conjuncts and matras, Arabic / Hebrew joining
+/// forms and ligatures, Thai / Khmer / Myanmar clusters) a subset font draws from glyphs that
+/// often lack a ToUnicode entry.
+fn is_complex_script(c: char) -> bool {
+    matches!(c as u32,
+        0x0590..=0x05FF | 0x0600..=0x06FF | 0x0750..=0x077F | 0x08A0..=0x08FF | 0x0900..=0x0DFF
+        | 0x0E00..=0x0EFF | 0x1000..=0x109F | 0x1780..=0x17FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF)
+}
+
+/// (complex-script characters, ASCII intrusions) in `text`. An intrusion is a printable ASCII
+/// character wedged between two complex-script characters with no space: where a conjunct
+/// or ligature glyph has no Unicode mapping, PDF text extraction yields a stray `(`, `@`, `/`
+/// or Latin letter inside the word ("आ(का", "ب)مه", "خر/داران"). Correctly encoded text in
+/// these scripts essentially never mixes ASCII into a word.
+fn script_intrusions(text: &str) -> (usize, usize) {
+    let cs: Vec<char> = text.chars().collect();
+    let script = cs.iter().filter(|&&c| is_complex_script(c)).count();
+    let intrusions = (1..cs.len().saturating_sub(1))
+        .filter(|&i| {
+            cs[i].is_ascii_graphic() && is_complex_script(cs[i - 1]) && is_complex_script(cs[i + 1])
+        })
+        .count();
+    (script, intrusions)
+}
+
+/// Fewest symbol intrusions, and their least rate per letter, for text to count as garbled
+/// (see [`symbol_intrusions`]). On ParseBench v2 the garbled pages sit at 5.2-8.0%, the
+/// highest clean one at 2.2%.
+const SYMBOL_MIN: usize = 20;
+const SYMBOL_MIN_RATE: f32 = 0.03;
+
+/// (letters, symbol intrusions) in `text`: a symbol such as `$ ¥ © « @ § ¶ ®` wedged
+/// between two letters. Text drawn with a legacy 8-bit Indic font (the glyph codes are ASCII /
+/// Latin-1 positions, "H¥$VrH$m`©H«$_mMr") or a cipher-like ToUnicode map ("PFDKFCF@") is
+/// full of them; real text, code and URLs included, rarely puts them inside a word.
+fn symbol_intrusions(text: &str) -> (usize, usize) {
+    // Only symbols legacy / cipher fonts produce and real text doesn't put inside words. LaTeX and
+    // math symbols (^ { } \ ` ~ | ± × ÷ ° ² ³ µ ·) are out: the TeX math path writes `x^{2}`,
+    // `\alpha` into text items before this check runs, and with them every math page read as
+    // garbled (OPB math 53.6 -> 33.2, 2026-10-30).
+    const SYM: &str = "$¥©«»@¢£¤¦§¨ª¬®¯¶¸º¼½¾¿";
+    let cs: Vec<char> = text.chars().collect();
+    let letters = cs.iter().filter(|c| c.is_alphabetic()).count();
+    let n = (1..cs.len().saturating_sub(1))
+        .filter(|&i| SYM.contains(cs[i]) && cs[i - 1].is_alphabetic() && cs[i + 1].is_alphabetic())
+        .count();
+    (letters, n)
+}
+
+/// Dingbat / symbol fonts map their glyphs (bullets, arrows, checkboxes) to control and
+/// private codes by design; that is not a broken map, so they never count as garbled.
+fn is_symbol_font(name: Option<&str>) -> bool {
+    name.is_some_and(|n| {
+        let n = n.to_ascii_lowercase();
+        let base = n.split_once('+').map_or(n.as_str(), |(_, b)| b);
+        ["wingding", "webding", "dingbat", "symbol", "zapf", "math", "sym", "greekwith"]
+            .iter()
+            .any(|s| base.contains(s))
+            // TeX math fonts (Computer Modern / AMS / txfonts / xy-pic): glyph codes for
+            // operators and delimiters map to control positions by design.
+            || ["cmex", "cmsy", "cmmi", "msam", "msbm", "rtxm", "rtxs", "txex", "txsy", "xyatip",
+                "xydash", "eufm", "esint", "stmary", "wasy"]
+                .iter()
+                .any(|p| base.starts_with(p))
+    })
+}
+
+/// Control characters (other than tab / newline / carriage return) in extracted text. A
+/// correct ToUnicode map never yields them; a cipher-like or truncated map does, often as the
+/// space glyph (`\x03`), digits (`\x13\x14`) or punctuation ("$SULO \x15\x15\x0f" = "April 22,").
+fn control_chars(text: &str) -> (usize, usize) {
+    let mut ctrl = 0;
+    let mut visible = 0;
+    for c in text.chars() {
+        if c.is_control() && !matches!(c, '\t' | '\n' | '\r') {
+            ctrl += 1;
+        } else if !c.is_whitespace() {
+            visible += 1;
+        }
+    }
+    (ctrl, visible + ctrl)
+}
+
+const CONTROL_MIN: usize = 5;
+const CONTROL_MIN_RATE: f32 = 0.02;
+
+fn controls_are_garbled(ctrl: usize, chars: usize) -> bool {
+    ctrl >= CONTROL_MIN && ctrl as f32 >= chars as f32 * CONTROL_MIN_RATE
+}
+
+/// Coarse script of a letter for [`token_is_malformed`]: 0 Latin, 1 CJK (Han, kana, Hangul and
+/// their fullwidth forms, which share tokens with Latin and each other in unspaced text),
+/// otherwise an id per script from a table of the scripts we can tell apart (so Tamil and Telugu
+/// differ, while the blocks of one script agree); unlisted scripts share one id.
+fn script_of(c: char) -> u32 {
+    let o = c as u32;
+    match o {
+        0..=0x24F | 0x1E00..=0x1EFF | 0x2C60..=0x2C7F | 0xA720..=0xA7FF => 0,
+        0x1100..=0x11FF
+        | 0x3000..=0x30FF
+        | 0x3400..=0x9FFF
+        | 0xAC00..=0xD7AF
+        | 0xF900..=0xFAFF
+        | 0xFF00..=0xFFEF => 1,
+        // Scripts whose letters span several blocks are one script each: polytonic Greek and
+        // Coptic, Cyrillic extensions, Hebrew / Arabic presentation forms, Ethiopic, Georgian.
+        0x0370..=0x03FF | 0x1F00..=0x1FFF | 0x2C80..=0x2CFF => 0x370,
+        0x0400..=0x052F | 0x1C80..=0x1C8F | 0x2DE0..=0x2DFF | 0xA640..=0xA69F => 0x400,
+        0x0590..=0x05FF | 0xFB1D..=0xFB4F => 0x590,
+        0x0600..=0x06FF | 0x0750..=0x077F | 0x0860..=0x08FF | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF => {
+            0x600
+        }
+        0x1200..=0x139F | 0x2D80..=0x2DDF | 0xAB00..=0xAB2F => 0x1200,
+        0x10A0..=0x10FF | 0x1C90..=0x1CBF | 0x2D00..=0x2D2F => 0x10A0,
+        0x1780..=0x17FF | 0x19E0..=0x19FF => 0x1780,
+        0x1000..=0x109F | 0xA9E0..=0xA9FF | 0xAA60..=0xAA7F => 0x1000,
+        0x0530..=0x058F | 0xFB13..=0xFB17 => 0x530,
+        0x0700..=0x074F => 0x700,
+        // Indic scripts sit in exact 128-codepoint blocks
+        0x0900..=0x0DFF => o & !0x7F,
+        0x0E00..=0x0E7F => 0xE00,
+        0x0E80..=0x0EFF => 0xE80,
+        0x0F00..=0x0FFF => 0xF00,
+        // anything else is one bucket: never counted as a script mix
+        _ => 2,
+    }
+}
+
+/// A token whose shape no correctly decoded text has (see [`garbled_scope`]):
+/// - a case flip into a short lowercase run, or two flips, inside a word ("hZeY", "cVdaVTe",
+///   "ÞkusLkkykuÚke"); camelCase starts a real sub-word ("DataEncoder", "iPhone") and
+///   identifiers with `_` `.` `/` are skipped;
+/// - `;` or `=` between letters ("iNdm;s;=udf.a", legacy Sinhala / Tamil fonts);
+/// - letters of two different non-Latin, non-CJK scripts ("ࡶڜటర"), or an accented Latin letter
+///   glued to one ("ประสงคŤ", Thai tone marks mapped into Latin Extended).
+///
+/// `None` when the token is too short to judge.
+fn token_is_malformed(tok: &str) -> Option<bool> {
+    if tok.contains('$') || tok.contains('\\') {
+        return None; // LaTeX written by the TeX math pass
+    }
+    let t = tok.trim_matches(|c: char| !c.is_alphanumeric());
+    let cs: Vec<char> = t.chars().collect();
+    if cs.len() < 3 || cs.iter().filter(|c| c.is_alphabetic()).count() < 2 {
+        return None;
+    }
+    if !cs.iter().any(|&c| matches!(c, '_' | '.' | '/' | '@')) {
+        let mut flips = 0;
+        let mut short = false;
+        for i in 1..cs.len().saturating_sub(1) {
+            if cs[i - 1].is_lowercase() && cs[i].is_uppercase() && cs[i + 1].is_lowercase() {
+                flips += 1;
+                let run = cs[i + 1..].iter().take_while(|c| c.is_lowercase()).count();
+                short |= run < 3;
+            }
+        }
+        if flips >= 2 || short {
+            return Some(true);
+        }
+    }
+    if (1..cs.len().saturating_sub(1)).any(|i| {
+        matches!(cs[i], ';' | '=') && cs[i - 1].is_alphabetic() && cs[i + 1].is_alphabetic()
+    }) {
+        return Some(true);
+    }
+    let other =
+        |c: char| c.is_alphabetic() && !(0x300..=0x36F).contains(&(c as u32)) && script_of(c) > 1;
+    let mut seen: Option<u32> = None;
+    for &c in &cs {
+        if other(c) {
+            let s = script_of(c);
+            if seen.is_some_and(|p| p != s) {
+                return Some(true);
+            }
+            seen = Some(s);
+        }
+    }
+    let accented = |c: char| c.is_alphabetic() && (0xC0..=0x24F).contains(&(c as u32));
+    if cs
+        .windows(2)
+        .any(|w| (accented(w[0]) && other(w[1])) || (other(w[0]) && accented(w[1])))
+    {
+        return Some(true);
+    }
+    Some(false)
+}
+
+/// (judged tokens, malformed tokens) in `text`, control characters read as spaces.
+fn malformed_tokens(text: &str) -> (usize, usize) {
+    let clean: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    clean
+        .split_whitespace()
+        .filter_map(token_is_malformed)
+        .fold((0, 0), |(n, b), m| (n + 1, b + m as usize))
+}
+
+const MALFORMED_MIN: usize = 10;
+const MALFORMED_MIN_RATE: f32 = 0.2;
+
+fn tokens_are_garbled(judged: usize, malformed: usize) -> bool {
+    malformed >= MALFORMED_MIN && malformed as f32 >= judged as f32 * MALFORMED_MIN_RATE
+}
+
+fn symbols_are_garbled(letters: usize, intrusions: usize) -> bool {
+    intrusions >= SYMBOL_MIN && intrusions as f32 >= letters as f32 * SYMBOL_MIN_RATE
+}
+
+/// Fewest distinct words one misread character must turn up in for its font to count as
+/// garbled (see [`misread_glyphs`]). Brand and camel-case names ("arXiv", "iPad", "McRae")
+/// repeat one word; a wrong map entry hits every word with that glyph. On ParseBench v2 text,
+/// tables and opendataloader (1,210 pages) the broken fonts reach 3-50 words, clean text 2.
+const MISREAD_MIN_WORDS: usize = 3;
+
+/// ...and, for a misread capital, at least this many distinct tails it opens: compound names
+/// end in one repeated part ("HistoAge", "PhenoAge", "GrimAge"), a wrong map entry lands
+/// mid-word in different places ("executiMe", "achieMed").
+const MISREAD_MIN_TAILS: usize = 2;
+
+/// Per misread char: the distinct words it sits in and the distinct tails it opens.
+type MisreadByChar = HashMap<char, (HashSet<String>, HashSet<String>)>;
+
+/// One misread character (see [`misread_glyphs`]): the char, the word it sits in (letters,
+/// lowercased), and the text from it to the word's end (for a symbol, the whole word).
+#[derive(Debug)]
+struct Misread {
+    ch: char,
+    word: String,
+    tail: String,
+}
+
+/// A font's name without its subset tag ("AAAAAB+Futura" -> "Futura").
+fn base_font_name(name: &str) -> &str {
+    name.split_once('+').map_or(name, |(_, b)| b)
+}
+
+/// Characters a font map put where a letter belongs, each with the word (its letters,
+/// lowercased) it sits in. A map that is wrong for only a few glyphs leaves text that reads
+/// almost right, so none of the font-wide rates above catch it:
+/// - `! % *` between two Latin, Greek or Cyrillic letters ("va!í", "kter*ch": č, š, ý lost);
+/// - a capital inside a lowercase word whose lowercase tail (under 3 letters) ends the word
+///   ("maGor", "OecutiMe", "horiQon"). A capital in second place ("iPad"), words with digits
+///   ("dBm", "o9A") and identifiers are skipped.
+///
+/// `"` is no intruder: a quotation printed without its leading space ("expression"put") is real.
+fn misread_glyphs(text: &str) -> Vec<Misread> {
+    let mut out = Vec::new();
+    for tok in text.split_whitespace() {
+        let t = tok.trim_matches(|c: char| {
+            matches!(
+                c,
+                '.' | ',' | ';' | ':' | '(' | ')' | '[' | ']' | '{' | '}' | '\'' | '"' | '!' | '?'
+            ) || "«»“”‘’".contains(c)
+        });
+        if t.starts_with("http") || t.chars().any(|c| matches!(c, '_' | '@' | '\\' | '$' | '/')) {
+            continue;
+        }
+        let cs: Vec<char> = t.chars().collect();
+        if cs.len() < 3 {
+            continue;
+        }
+        let word = || -> String {
+            cs.iter()
+                .filter(|c| c.is_alphabetic())
+                .flat_map(|c| c.to_lowercase())
+                .collect()
+        };
+        let alphabetic = |c: char| c.is_alphabetic() && matches!(script_of(c), 0 | 0x370 | 0x400);
+        for i in 1..cs.len() - 1 {
+            if matches!(cs[i], '!' | '%' | '*') && alphabetic(cs[i - 1]) && alphabetic(cs[i + 1]) {
+                out.push(Misread {
+                    ch: cs[i],
+                    word: word(),
+                    tail: word(),
+                });
+            }
+        }
+        if cs.iter().any(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        for i in 2..cs.len() - 1 {
+            if cs[i - 1].is_lowercase() && cs[i].is_uppercase() && cs[i + 1].is_lowercase() {
+                let tail = cs[i + 1..].iter().take_while(|c| c.is_lowercase()).count();
+                if i + 1 + tail == cs.len() && tail < 3 {
+                    out.push(Misread {
+                        ch: cs[i],
+                        word: word(),
+                        tail: cs[i..].iter().collect(),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+fn intrusions_are_garbled(script: usize, intrusions: usize) -> bool {
+    intrusions >= INTRUSION_MIN && intrusions as f32 >= script as f32 * INTRUSION_MIN_RATE
 }
 
 /// Page-level garbled signal: substitution-cipher text (see [`garbled_scope`])
@@ -1625,9 +2586,7 @@ fn polygon_rotation_deg(poly: &[[f32; 2]; 4]) -> f32 {
     }
     let reading = if len0 >= len1 { e0 } else { e1 };
     // atan2 with screen-down y; negate to get the conventional CCW angle.
-    let angle_ccw = -reading[1].atan2(reading[0]).to_degrees();
-    let normalized = angle_ccw.rem_euclid(360.0);
-    ((normalized / 90.0).round() as i32 * 90).rem_euclid(360) as f32
+    canonical_quarter(-reading[1].atan2(reading[0]).to_degrees()) as f32
 }
 
 /// Check if an OCR bounding box overlaps with any existing text item.
@@ -1674,78 +2633,34 @@ fn is_rule_artifact(text: &str, w: f32, h: f32) -> bool {
     false
 }
 
-/// Minimum OCR results inside a figure before it is judged as a chart.
-const CHART_MIN_RESULTS: usize = 4;
-/// Fraction of a figure's OCR results that must be numeric or very short
-/// tokens for the figure to count as a chart.
-const CHART_LABEL_FRACTION: f32 = 0.5;
+/// Least share of an OCR line's width that kept native text must cover, on a page whose
+/// garbled fonts were dropped, for the line to count as already present (see `partial`).
+const PARTIAL_NATIVE_COVERAGE: f32 = 0.5;
 
-fn box_center_in(rect: &Rect, x: f32, y: f32, w: f32, h: f32) -> bool {
-    let cx = x + w / 2.0;
-    let cy = y + h / 2.0;
-    cx >= rect.x && cx <= rect.x + rect.width && cy >= rect.y && cy <= rect.y + rect.height
-}
-
-/// A chart label: a number (with separators/units) or a token of ≤ 3 chars.
-///
-/// The length rule only applies to text without CJK characters. Tesseract
-/// splits Chinese, Japanese and Korean text into words of one to three
-/// characters ("を", "変換", "します"), so in those scripts a short token is
-/// ordinary prose, not an axis tick or legend key.
-fn is_chart_label(text: &str) -> bool {
-    let t = text.trim();
-    if t.chars().count() <= 3 && !t.chars().any(is_cjk) {
-        return true;
+/// Share of the box's width covered by native items on its line (vertical overlap of at
+/// least half the shorter height), their horizontal extents merged.
+fn native_width_coverage(items: &[TextItem], x: f32, y: f32, w: f32, h: f32) -> f32 {
+    if w <= 0.0 {
+        return 1.0;
     }
-    t.chars().any(|c| c.is_ascii_digit())
-        && t.chars().all(|c| {
-            c.is_ascii_digit()
-                || matches!(
-                    c,
-                    ',' | '.' | '%' | '-' | '+' | '$' | '€' | '£' | ' ' | 'k' | 'K' | 'M' | 'x'
-                )
-        })
-}
-
-/// Han ideographs, kana and Hangul: scripts written without spaces between
-/// words, or with short syllable blocks, where OCR words are naturally short.
-fn is_cjk(c: char) -> bool {
-    matches!(c,
-        '\u{1100}'..='\u{11FF}'   // Hangul Jamo
-        | '\u{3040}'..='\u{30FF}' // Hiragana, Katakana
-        | '\u{3130}'..='\u{318F}' // Hangul Compatibility Jamo
-        | '\u{3400}'..='\u{4DBF}' // CJK Unified Ideographs Extension A
-        | '\u{4E00}'..='\u{9FFF}' // CJK Unified Ideographs
-        | '\u{AC00}'..='\u{D7AF}' // Hangul Syllables
-        | '\u{F900}'..='\u{FAFF}' // CJK Compatibility Ideographs
-        | '\u{FF66}'..='\u{FF9F}' // Halfwidth Katakana
-    )
-}
-
-/// For each figure rect, whether its OCR results look like a chart's
-/// axes/ticks/legend rather than text worth keeping.
-fn chart_like_images(rects: &[Rect], results: &[OcrResult], scale_factor: f32) -> Vec<bool> {
-    rects
+    let mut spans: Vec<(f32, f32)> = items
         .iter()
-        .map(|rect| {
-            let (mut n, mut labels) = (0usize, 0usize);
-            for r in results {
-                let (x, y, w, h) = (
-                    r.bbox[0] * scale_factor,
-                    r.bbox[1] * scale_factor,
-                    (r.bbox[2] - r.bbox[0]) * scale_factor,
-                    (r.bbox[3] - r.bbox[1]) * scale_factor,
-                );
-                if box_center_in(rect, x, y, w, h) {
-                    n += 1;
-                    if is_chart_label(&r.text) {
-                        labels += 1;
-                    }
-                }
-            }
-            n >= CHART_MIN_RESULTS && labels as f32 >= CHART_LABEL_FRACTION * n as f32
+        .filter(|it| {
+            let v = (y + h).min(it.y + it.height) - y.max(it.y);
+            v > 0.5 * h.min(it.height)
         })
-        .collect()
+        .map(|it| (it.x.max(x), (it.x + it.width).min(x + w)))
+        .filter(|(a, b)| b > a)
+        .collect();
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (mut covered, mut end) = (0.0f32, f32::NEG_INFINITY);
+    for (a, b) in spans {
+        if b > end {
+            covered += b - a.max(end);
+            end = b;
+        }
+    }
+    covered / w
 }
 
 fn overlaps_existing_text(
@@ -1815,7 +2730,112 @@ fn clean_ocr_table_artifacts(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ocr::OcrWord;
     use crate::types::Rect;
+
+    /// A 1-inch square 300 dpi grey raster: white, with 2x2 px dots every 8 px.
+    fn dotted_inch() -> Vec<u8> {
+        (0..300 * 300)
+            .map(|i| {
+                if (i % 300) % 8 < 2 && (i / 300) % 8 < 2 {
+                    0
+                } else {
+                    255
+                }
+            })
+            .collect()
+    }
+
+    fn paint(pixels: &mut [u8], x: usize, y: usize, w: usize, h: usize) {
+        for row in y..y + h {
+            pixels[row * 300 + x..row * 300 + x + w].fill(0);
+        }
+    }
+
+    #[test]
+    fn despeckle_removes_dots_and_keeps_punctuation_and_rules() {
+        let mut px = dotted_inch();
+        paint(&mut px, 100, 100, 7, 7); // a 300 dpi period
+        paint(&mut px, 20, 200, 260, 2); // a hairline rule
+        paint(&mut px, 150, 51, 1, 4); // a thin 1x4 mark touching a dot: still a speck
+        let removed = despeckle(&mut px, 300, 300, 1, 300.0);
+        assert!(removed > 1000, "{removed}");
+        let dark = |x: usize, y: usize| px[y * 300 + x] == 0;
+        assert!(dark(103, 103), "the period was removed");
+        assert!(dark(150, 201), "the rule was removed");
+        assert!(!dark(0, 0) && !dark(8, 8), "a dot survived");
+    }
+
+    #[test]
+    fn despeckle_leaves_a_clean_page_and_low_dpi_alone() {
+        // A few specks on a clean page are under the density gate.
+        let mut clean = vec![255u8; 300 * 300 * 3];
+        for i in 0..10 {
+            let o = (i * 20 * 300 + i * 20) * 3;
+            clean[o..o + 3].fill(0);
+        }
+        let before = clean.clone();
+        assert_eq!(despeckle(&mut clean, 300, 300, 3, 300.0), 0);
+        assert_eq!(clean, before);
+        // Below the minimum dpi nothing runs, however dotted.
+        let mut low = dotted_inch();
+        let before = low.clone();
+        assert_eq!(despeckle(&mut low, 300, 300, 1, 150.0), 0);
+        assert_eq!(low, before);
+    }
+
+    #[test]
+    fn malformed_tokens_flag_cipher_and_legacy_fonts() {
+        // Shifted / cipher ToUnicode maps (ParseBench v2 att10k, financial tables, legacy Indic).
+        for t in [
+            "hZeY",
+            "cVdaVTe",
+            "bViZgAVah",
+            "ÞkusLkkykuÚke",
+            "iNdm;s;=udf.a",
+            "ࡶڜటర",
+            "ประสงคŤ",
+        ] {
+            assert_eq!(token_is_malformed(t), Some(true), "{t}");
+        }
+        // camelCase, brand casing, identifiers, CJK with Latin, ordinary words and codes.
+        for t in [
+            "DataEncoder",
+            "ShannonOverbrook",
+            "iPhone",
+            "McDonald",
+            "fact_api.FactApi",
+            "ExpRatio_Excluded",
+            "iPhone発売",
+            "Washington",
+            "1G1FJ3D6&H",
+            "W3GG",
+            "ἀρχῇ",
+            "ⲁⲣⲭⲏ",
+            "ሀገርሰላም",
+            "Ϣⲁⲣⲉ",
+            "հոկտեմբերի",
+            "Հանրապետությունում",
+            "བསྟན་པའི",
+        ] {
+            assert_eq!(token_is_malformed(t), Some(false), "{t}");
+        }
+        assert_eq!(token_is_malformed("ab"), None);
+    }
+
+    #[test]
+    fn control_chars_flag_broken_maps_not_dingbats() {
+        // "April 22, 2025 - Page" through a -3 shift with digits mapped to control codes.
+        let (c, n) = control_chars("$SULO \u{15}\u{15}\u{f} \u{15}\u{13}\u{15}\u{18} \u{10} 3DJH");
+        assert!(controls_are_garbled(c, n));
+        assert_eq!(control_chars("Plain text\twith tabs\n"), (0, 17));
+        assert!(is_symbol_font(Some("ZQNKFZ+Wingdings2")));
+        assert!(is_symbol_font(Some("VTJFIN+Webdings")));
+        assert!(!is_symbol_font(Some("ArialMT")));
+        assert!(is_symbol_font(Some("ABCDEF+CMEX10")));
+        assert!(is_symbol_font(Some("Universal-GreekwithMathPi")));
+        assert!(!is_symbol_font(Some("TimesNewRomanPS-ItalicMT")));
+    }
 
     #[test]
     fn rule_artifact_catches_bars_and_decoration() {
@@ -1831,68 +2851,6 @@ mod tests {
         // Anything with letters/digits and more than one char is text.
         assert!(!is_rule_artifact("If", 1.0, 12.0));
         assert!(!is_rule_artifact("N/A", 12.0, 8.0));
-    }
-
-    #[test]
-    fn chart_labels_and_chart_like_figures() {
-        assert!(is_chart_label("140,000"));
-        assert!(is_chart_label("2016"));
-        assert!(is_chart_label("$1.5M"));
-        assert!(is_chart_label("0"));
-        assert!(is_chart_label("Yr"));
-        assert!(!is_chart_label("Year"));
-        assert!(!is_chart_label("Fruit Production in British Columbia"));
-        // Short CJK words are prose, not chart labels.
-        assert!(!is_chart_label("を"));
-        assert!(!is_chart_label("変換"));
-        assert!(!is_chart_label("します"));
-        assert!(!is_chart_label("中文"));
-        assert!(!is_chart_label("한국"));
-
-        let rect = Rect {
-            x: 50.0,
-            y: 100.0,
-            width: 200.0,
-            height: 150.0,
-        };
-        let mk = |text: &str, x: f32, y: f32| OcrResult {
-            text: text.to_string(),
-            bbox: [x, y, x + 20.0, y + 8.0],
-            confidence: 0.9,
-            polygon: None,
-        };
-        // Axis ticks + one title: mostly labels -> chart.
-        let chart = vec![
-            mk("100", 60.0, 110.0),
-            mk("80", 60.0, 130.0),
-            mk("60", 60.0, 150.0),
-            mk("2016", 100.0, 240.0),
-            mk("Fruit Production", 120.0, 105.0),
-        ];
-        assert_eq!(chart_like_images(&[rect.clone()], &chart, 1.0), vec![true]);
-        // An infographic with sentences: not a chart.
-        let prose = vec![
-            mk("Wash your hands", 60.0, 110.0),
-            mk("for twenty seconds", 60.0, 130.0),
-            mk("before every meal", 60.0, 150.0),
-            mk("2020", 100.0, 240.0),
-        ];
-        assert_eq!(chart_like_images(&[rect.clone()], &prose, 1.0), vec![false]);
-        // Japanese prose, which OCR returns as one- to three-character words:
-        // not a chart.
-        let japanese = vec![
-            mk("文書", 60.0, 110.0),
-            mk("を", 80.0, 110.0),
-            mk("変換", 100.0, 110.0),
-            mk("します", 120.0, 110.0),
-            mk("。", 140.0, 110.0),
-        ];
-        assert_eq!(
-            chart_like_images(&[rect.clone()], &japanese, 1.0),
-            vec![false]
-        );
-        // Too few results to judge.
-        assert_eq!(chart_like_images(&[rect], &chart[..3], 1.0), vec![false]);
     }
 
     fn leaf(n: usize) -> Region {
@@ -1980,6 +2938,7 @@ mod tests {
 
         fn page(items: Vec<TextItem>) -> Page {
             Page {
+                ocr_deskew: None,
                 page_number: 1,
                 page_label: None,
                 page_width: 612.0,
@@ -2085,6 +3044,47 @@ mod tests {
             assert!(!stats.has_substantial_images);
             assert!(!stats.needs_ocr);
         }
+    }
+
+    /// The bitmap size pdfium renders a `pt` edge to at `dpi`.
+    fn rendered_px(pt: f32, dpi: f32) -> u32 {
+        (pt * (dpi / 72.0)).round() as u32
+    }
+
+    #[test]
+    fn capped_page_renders_to_exactly_the_cap() {
+        // Letter, A4, Legal, a landscape slide, a tall receipt and a poster
+        // that is over the cap even at 72 dpi.
+        let sizes = [
+            (612.0, 792.0),
+            (595.28, 841.89),
+            (612.0, 1008.0),
+            (960.0, 540.0),
+            (226.77, 2834.65),
+            (2592.0, 3456.0),
+        ];
+        for cap in [300, 1600, 2400, 4000] {
+            for (w, h) in sizes {
+                let dpi = fitting_dpi(w, h, 300.0, cap);
+                let long_edge = rendered_px(w, dpi).max(rendered_px(h, dpi));
+                if dpi < 300.0 {
+                    assert_eq!(long_edge, cap, "{w}x{h} pt at cap {cap}");
+                } else {
+                    assert!(long_edge <= cap, "{w}x{h} pt at cap {cap}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn page_under_the_cap_keeps_the_configured_dpi() {
+        assert_eq!(fitting_dpi(612.0, 792.0, 150.0, 2400), 150.0);
+    }
+
+    #[test]
+    fn zero_cap_or_empty_page_keeps_the_configured_dpi() {
+        assert_eq!(fitting_dpi(612.0, 792.0, 300.0, 0), 300.0);
+        assert_eq!(fitting_dpi(0.0, 0.0, 300.0, 2400), 300.0);
     }
 
     #[test]
@@ -2278,6 +3278,7 @@ mod tests {
 
     fn make_blank_page(page_number: usize) -> Page {
         Page {
+            ocr_deskew: None,
             page_number,
             page_label: None,
             page_width: 100.0,
@@ -2461,6 +3462,74 @@ mod tests {
         assert!(!page_is_garbled(&page));
     }
 
+    /// A font map wrong for a few glyphs (č -> `"`, ý -> `*`, j -> `G`) leaves text that reads
+    /// almost right. One misread char across three or more words condemns every subset of
+    /// that base font on the page; the healthy font's text stays.
+    #[test]
+    fn misread_glyphs_flag_every_subset_of_the_base_font() {
+        let mut items: Vec<(&str, &str)> = HEALTHY_PARAGRAPH
+            .iter()
+            .map(|t| ("Helvetica", *t))
+            .collect();
+        items.push(("AAAAAB+Futura", "Tato kter*ch nabíječka je jednou z jin*m"));
+        items.push(("AAAAAC+Futura", "nejnověj*ch a b*t"));
+        items.push(("AAAAAD+Futura", "Kontakt"));
+        let page = make_font_page(&items);
+        match garbled_scope(&page) {
+            GarbledScope::Fonts(fonts) => {
+                assert!(fonts.contains(&Some("AAAAAB+Futura".to_string())));
+                assert!(fonts.contains(&Some("AAAAAD+Futura".to_string())));
+                assert!(!fonts.contains(&Some("Helvetica".to_string())));
+            }
+            _ => panic!("expected the Futura subsets to be flagged"),
+        }
+    }
+
+    /// Compound names ending in one repeated part are no broken map either.
+    #[test]
+    fn misread_glyphs_ignore_compound_names_with_one_tail() {
+        let mut items: Vec<(&str, &str)> = HEALTHY_PARAGRAPH
+            .iter()
+            .map(|t| ("Helvetica", *t))
+            .collect();
+        items.push((
+            "STIX-Regular",
+            "HistoAge PhenoAge GrimAge pTau acceleration",
+        ));
+        let page = make_font_page(&items);
+        assert!(matches!(garbled_scope(&page), GarbledScope::None));
+    }
+
+    /// Brand and camel-case names repeat one word, quotations lack a leading space, units carry
+    /// digits: none of them is a misread glyph.
+    #[test]
+    fn misread_glyphs_ignore_names_quotes_and_units() {
+        for text in [
+            "arXiv arXiv arXiv iPad iPad McRae McRae",
+            "the expression\"put out fire\" and emerging\"care in parentheses\"exemplified",
+            "70dBc -94dBc 21dBm 25dBm PubTabNet",
+        ] {
+            let found = misread_glyphs(text);
+            let words: HashSet<&str> = found.iter().map(|m| m.word.as_str()).collect();
+            assert!(words.len() < MISREAD_MIN_WORDS, "{text:?} -> {found:?}");
+        }
+        let found = misread_glyphs("maGor OecutiMe horiQon va!í");
+        assert_eq!(found.iter().map(|m| m.ch).collect::<String>(), "GMQ!");
+        assert_eq!(found[0].word, "magor");
+    }
+
+    /// Kept native glyphs inside an OCR line cover only a sliver of its width.
+    #[test]
+    fn native_width_coverage_merges_overlapping_spans() {
+        let items = vec![
+            make_item(0.0, 0.0, 10.0, 10.0),
+            make_item(5.0, 0.0, 10.0, 10.0),
+        ];
+        assert!((native_width_coverage(&items, 0.0, 0.0, 100.0, 10.0) - 0.15).abs() < 1e-4);
+        // a line above or below does not count
+        assert_eq!(native_width_coverage(&items, 0.0, 20.0, 100.0, 10.0), 0.0);
+    }
+
     /// A small run of low-vowel text (acronyms, tickers, part numbers) in its
     /// own font must not flag an otherwise healthy page.
     #[test]
@@ -2493,11 +3562,16 @@ mod tests {
         OcrRaster {
             has_native_text: false,
             image_rects: Vec::new(),
+            replace_native: false,
+            request_fields: Default::default(),
             page_number: idx + 1,
             // 1x1 grayscale pixel; the engine never inspects it.
-            pixels: vec![0u8],
-            width: 1,
-            height: 1,
+            image: OcrImage::Pixels {
+                data: vec![0u8],
+                width: 1,
+                height: 1,
+                grayscale: true,
+            },
             dpi: 72.0,
         }
     }
@@ -2522,6 +3596,7 @@ mod tests {
     // also contains an image.
     fn make_native_text_page(page_number: usize) -> Page {
         Page {
+            ocr_deskew: None,
             page_number,
             page_label: None,
             page_width: 100.0,
@@ -2551,6 +3626,7 @@ mod tests {
     // swallowed.
     fn make_low_coverage_text_page(page_number: usize) -> Page {
         Page {
+            ocr_deskew: None,
             page_number,
             page_label: None,
             page_width: 100.0,
@@ -2762,18 +3838,23 @@ mod tests {
             dpi: 72.0,
             has_native_text: false,
             image_rects: Vec::new(),
+            replace_native: false,
             results: vec![
                 OcrResult {
                     text: "hello".into(),
                     bbox: [10.0, 20.0, 60.0, 30.0],
                     confidence: 0.9,
                     polygon: None,
+                    rotation: None,
+                    words: Vec::new(),
                 },
                 OcrResult {
                     text: "world".into(),
                     bbox: [62.0, 20.0, 110.0, 30.0],
                     confidence: 0.9,
                     polygon: None,
+                    rotation: None,
+                    words: Vec::new(),
                 },
             ],
             error: None,
@@ -2804,5 +3885,231 @@ mod tests {
         merge_ocr_results(&mut disabled, vec![outcome(1)], false, false).unwrap();
         assert_eq!(disabled[0].text_items.len(), 2);
         assert!(disabled[0].text_items.iter().all(|i| i.words.is_empty()));
+    }
+
+    /// One page of OCR results merged with word boxes on, at `dpi`.
+    fn merge_ocr_page(results: Vec<OcrResult>, dpi: f32) -> Page {
+        let outcome = PageOcrOutcome {
+            page_number: 1,
+            dpi,
+            has_native_text: false,
+            image_rects: Vec::new(),
+            replace_native: false,
+            results,
+            error: None,
+        };
+        let mut pages = vec![make_blank_page(1)];
+        merge_ocr_results(&mut pages, vec![outcome], false, true).unwrap();
+        pages.remove(0)
+    }
+
+    fn word_rects(item: &TextItem) -> Vec<(&str, f32, f32, f32, f32)> {
+        item.words
+            .iter()
+            .map(|w| (w.text.as_str(), w.x, w.y, w.width, w.height))
+            .collect()
+    }
+
+    fn ocr_word(text: &str, bbox: [f32; 4]) -> OcrWord {
+        OcrWord {
+            text: text.into(),
+            bbox,
+        }
+    }
+
+    /// Measured words become the word boxes when they pair one per word of the
+    /// cleaned text. Any other count keeps one box for the line: no words,
+    /// fewer words, one fallback word for the whole line, or a measured `|`
+    /// border that table-artifact cleaning dropped from the text.
+    #[test]
+    fn test_measured_ocr_word_boxes_pair_one_per_word() {
+        let line = |text: &str, words: Vec<OcrWord>| OcrResult {
+            text: text.into(),
+            bbox: [10.0, 20.0, 200.0, 30.0],
+            confidence: 0.9,
+            polygon: None,
+            words,
+            rotation: None,
+        };
+        let measured = vec![
+            ocr_word("Invoice", [11.0, 21.0, 60.0, 29.0]),
+            ocr_word("total", [70.0, 21.0, 100.0, 29.0]),
+            ocr_word("42.50", [160.0, 22.0, 199.0, 29.0]),
+        ];
+        // 144 dpi pixels are half a point each.
+        let merged = |result: OcrResult| {
+            let page = merge_ocr_page(vec![result], 144.0);
+            word_rects(&page.text_items[0])
+                .into_iter()
+                .map(|(t, x, y, w, h)| (t.to_string(), x, y, w, h))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            merged(line("Invoice total 42.50", measured.clone())),
+            vec![
+                ("Invoice".to_string(), 5.5, 10.5, 24.5, 4.0),
+                ("total".to_string(), 35.0, 10.5, 15.0, 4.0),
+                ("42.50".to_string(), 80.0, 11.0, 19.5, 3.5),
+            ]
+        );
+        let whole_line = ocr_word("Invoice total 42.50", [10.0, 20.0, 200.0, 30.0]);
+        for words in [Vec::new(), measured[..2].to_vec(), vec![whole_line]] {
+            assert_eq!(
+                merged(line("Invoice total 42.50", words)),
+                vec![("Invoice total 42.50".to_string(), 5.0, 10.0, 95.0, 5.0)]
+            );
+        }
+        let bordered = vec![
+            ocr_word("|", [10.0, 20.0, 14.0, 30.0]),
+            ocr_word("1", [40.0, 20.0, 50.0, 30.0]),
+            ocr_word("9999999", [120.0, 20.0, 200.0, 30.0]),
+        ];
+        assert_eq!(
+            merged(line("| 1 9999999", bordered)),
+            vec![("1 9999999".to_string(), 5.0, 10.0, 95.0, 5.0)]
+        );
+    }
+
+    /// A scan fed sideways is turned upright as a whole page; each measured
+    /// word box turns with its line and keeps its own place along it.
+    #[test]
+    fn test_uprighted_scan_turns_each_measured_word_box() {
+        let line = OcrResult {
+            text: "Invoice total amount".into(),
+            bbox: [10.0, 5.0, 20.0, 95.0],
+            confidence: 0.9,
+            // Reads bottom to top: 90° counter-clockwise.
+            polygon: Some([[10.0, 95.0], [10.0, 5.0], [20.0, 5.0], [20.0, 95.0]]),
+            rotation: None,
+            words: vec![
+                ocr_word("Invoice", [10.0, 60.0, 20.0, 95.0]),
+                ocr_word("total", [10.0, 35.0, 20.0, 55.0]),
+                ocr_word("amount", [10.0, 5.0, 20.0, 30.0]),
+            ],
+        };
+        let page = merge_ocr_page(vec![line], 72.0);
+        let item = &page.text_items[0];
+        assert_eq!(
+            (item.rotation, item.x, item.y, item.width, item.height),
+            (0.0, 5.0, 10.0, 90.0, 10.0)
+        );
+        assert_eq!(
+            word_rects(item),
+            vec![
+                ("Invoice", 5.0, 10.0, 35.0, 10.0),
+                ("total", 45.0, 10.0, 20.0, 10.0),
+                ("amount", 70.0, 10.0, 25.0, 10.0)
+            ]
+        );
+    }
+
+    /// The engine's angle decides a line's rotation over its quad's point order,
+    /// including the 90/270 choice on a vertical line. A line read at 180° keeps
+    /// its quad's bounds and its words in reading order, right to left on
+    /// screen.
+    #[test]
+    fn test_engine_rotation_overrides_polygon_order() {
+        let merged = |polygon: [[f32; 2]; 4], words: Vec<OcrWord>, rotation: Option<f32>| {
+            let xs = polygon.map(|p| p[0]);
+            let ys = polygon.map(|p| p[1]);
+            let min = |v: [f32; 4]| v.into_iter().fold(f32::INFINITY, f32::min);
+            let max = |v: [f32; 4]| v.into_iter().fold(f32::NEG_INFINITY, f32::max);
+            let line = OcrResult {
+                text: "Invoice total".into(),
+                bbox: [min(xs), min(ys), max(xs), max(ys)],
+                confidence: 0.9,
+                polygon: Some(polygon),
+                words,
+                rotation,
+            };
+            merge_ocr_page(vec![line], 144.0).text_items.remove(0)
+        };
+        // Alone, each quad's point order reads as the angle in its name.
+        let flat_0 = [[10.0, 20.0], [210.0, 20.0], [210.0, 40.0], [10.0, 40.0]];
+        let up_90 = [[10.0, 200.0], [10.0, 20.0], [20.0, 20.0], [20.0, 200.0]];
+        let down_270 = [[20.0, 20.0], [20.0, 200.0], [10.0, 200.0], [10.0, 20.0]];
+
+        let read_turned = vec![
+            ocr_word("Invoice", [110.0, 20.0, 210.0, 40.0]),
+            ocr_word("total", [10.0, 20.0, 100.0, 40.0]),
+        ];
+        let turned = merged(flat_0, read_turned, Some(180.0));
+        assert_eq!(turned.rotation, 180.0);
+        assert_eq!(
+            (turned.x, turned.y, turned.width, turned.height),
+            (5.0, 10.0, 100.0, 10.0)
+        );
+        assert_eq!(
+            word_rects(&turned)
+                .into_iter()
+                .map(|(t, x, _, w, _)| (t, x, w))
+                .collect::<Vec<_>>(),
+            vec![("Invoice", 55.0, 50.0), ("total", 5.0, 45.0)]
+        );
+
+        assert_eq!(merged(up_90, Vec::new(), Some(270.0)).rotation, 270.0);
+        assert_eq!(merged(down_270, Vec::new(), Some(90.0)).rotation, 90.0);
+        assert_eq!(merged(up_90, Vec::new(), None).rotation, 90.0);
+    }
+
+    /// A scanned figure on a page with a typed footer keeps all its OCR text,
+    /// even when most recognised words are short ("et", "de", "la") or noise.
+    /// A chart filter that dropped such figures wholesale lost the body of
+    /// scanned French cover pages (#538).
+    #[test]
+    fn test_figure_ocr_with_short_words_is_kept() {
+        let mut page = make_blank_page(1);
+        page.text_items.push(TextItem {
+            text: "Guide de Performance".into(),
+            x: 10.0,
+            y: 92.0,
+            width: 60.0,
+            height: 4.0,
+            ..Default::default()
+        });
+        let word = |text: &str, x: f32, y: f32| OcrResult {
+            text: text.into(),
+            bbox: [x, y, x + 8.0, y + 4.0],
+            confidence: 0.9,
+            polygon: None,
+            rotation: None,
+            words: Vec::new(),
+        };
+        let results = vec![
+            word("Logement", 10.0, 10.0),
+            word("et", 20.0, 10.0),
+            word("de", 30.0, 10.0),
+            word("la", 40.0, 10.0),
+            word("ES", 10.0, 20.0),
+            word("à", 20.0, 20.0),
+            word("Abordable", 30.0, 20.0),
+        ];
+        let outcome = PageOcrOutcome {
+            page_number: 1,
+            dpi: 72.0,
+            has_native_text: true,
+            image_rects: vec![Rect {
+                x: 5.0,
+                y: 5.0,
+                width: 80.0,
+                height: 60.0,
+            }],
+            replace_native: false,
+            results,
+            error: None,
+        };
+        let mut pages = vec![page];
+        merge_ocr_results(&mut pages, vec![outcome], false, false).unwrap();
+        let texts: Vec<&str> = pages[0]
+            .text_items
+            .iter()
+            .map(|i| i.text.as_str())
+            .collect();
+        for w in ["Logement", "et", "de", "la", "ES", "à", "Abordable"] {
+            assert!(
+                texts.contains(&w),
+                "figure word {w:?} was dropped: {texts:?}"
+            );
+        }
     }
 }

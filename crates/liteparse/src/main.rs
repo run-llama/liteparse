@@ -135,6 +135,12 @@ struct ParseCommand {
     #[arg(long)]
     keep_headers_footers: bool,
 
+    /// Keep text hidden by rectangular clips (e.g. overflow from a
+    /// fixed-height table cell). By default words drawn entirely outside
+    /// their clip are dropped.
+    #[arg(long)]
+    keep_clipped_text: bool,
+
     /// Include document annotations as page-scoped structured JSON/API data.
     #[arg(long)]
     extract_annotations: bool,
@@ -437,6 +443,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 image_output_dir: cmd.image_output_dir.clone(),
                 extract_links: !cmd.no_links,
                 keep_headers_footers: cmd.keep_headers_footers,
+                keep_clipped_text: cmd.keep_clipped_text,
                 extract_annotations: cmd.extract_annotations,
                 extract_form_fields: cmd.extract_form_fields,
                 extract_structure_tree: cmd.extract_structure_tree,

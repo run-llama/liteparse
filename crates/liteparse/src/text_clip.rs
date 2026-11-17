@@ -1,12 +1,18 @@
 //! Conservative glyph visibility under rectangular PDF graphics-state clips.
 //! Clip points already include the object's CTM; only ancestor form matrices
 //! remain. Unknown paths/transforms preserve text, including OCR text layers.
+//!
+//! Visibility is decided per word: a word with any glyph inside its clip is kept
+//! whole, so a mostly hidden line never loses just its low punctuation
+//! (`1234.56` -> `1234 56`). Only leader runs (`......`) are trimmed per glyph.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use pdfium::{Matrix, Page, PageObject, PageObjectKind, RawPathSegment, RectF, SegmentKind};
+use pdfium::{
+    Matrix, Page, PageObject, PageObjectKind, RawPathSegment, RectF, SegmentKind, TextPage,
+};
 
-use crate::extract::CharView;
+use crate::extract::{CharInfoChunks, CharView};
 
 const IDENTITY: Matrix = Matrix {
     a: 1.0,
@@ -17,14 +23,134 @@ const IDENTITY: Matrix = Matrix {
     f: 0.0,
 };
 
-/// Only objects whose complete path stack is understood have an entry.
-/// Bounds are y-up page coordinates; inverted bounds mean an empty intersection.
+/// Char indices of a text page hidden by rectangular clips.
 pub(crate) struct TextClip {
-    objects: HashMap<usize, RectF>,
+    hidden: HashSet<i32>,
 }
 
 impl TextClip {
-    pub(crate) fn new(page: &Page) -> Self {
+    /// `keep` (the `keep_clipped_text` option) disables the filter.
+    pub(crate) fn new(page: &Page, text_page: &TextPage, keep: bool) -> Self {
+        let mut hidden = HashSet::new();
+        if keep {
+            return Self { hidden };
+        }
+        let clips = ObjectClips::new(page);
+        // Most pages clip no text: skip the char pass entirely.
+        if clips.objects.is_empty() {
+            return Self { hidden };
+        }
+        let mut chunks = CharInfoChunks::new(text_page);
+        let mut word = Word::default();
+        // The loose box and clip of the word's last glyph.
+        let mut last: Option<RectF> = None;
+        let mut last_clip: Option<RectF> = None;
+        for i in 0..text_page.char_count() {
+            let ch = text_page.char_at_unchecked(i);
+            let cv = CharView {
+                ch: &ch,
+                rec: chunks.as_mut().and_then(|chunks| chunks.record(i)),
+            };
+            let c = char::from_u32(cv.unicode());
+            if cv.is_generated() || c.is_some_and(char::is_whitespace) {
+                word.close(&mut hidden);
+                last = None;
+                // A space is judged on its own loose box.
+                if clips.hides(&cv) {
+                    hidden.insert(i);
+                }
+                continue;
+            }
+            // pdfium emits no separator at every line break or between objects drawn
+            // over each other, so a word also ends where its glyphs stop touching or
+            // its clip changes (overflow from one cell running into the next).
+            let loose = cv.loose_char_box();
+            let clip = clips.bounds(&cv);
+            if !word.glyphs.is_empty()
+                && (clip != last_clip
+                    || matches!((last, loose), (Some(prev), Some(cur)) if !adjacent(prev, cur)))
+            {
+                word.close(&mut hidden);
+            }
+            last = loose;
+            last_clip = clip;
+            word.glyphs.push((i, c, clips.hides(&cv)));
+        }
+        word.close(&mut hidden);
+        Self { hidden }
+    }
+
+    pub(crate) fn hides(&self, index: i32) -> bool {
+        self.hidden.contains(&index)
+    }
+}
+
+/// A run of touching glyphs under one clip: each glyph's char index, char and own verdict.
+#[derive(Default)]
+struct Word {
+    glyphs: Vec<(i32, Option<char>, bool)>,
+}
+
+impl Word {
+    /// A word with any visible glyph is kept whole, except a leader run inside it
+    /// (`775……………`): leaders carry no value to corrupt, so their dots keep their own
+    /// verdicts and a leader that overflows its cell is trimmed at the clip.
+    fn close(&mut self, hidden: &mut HashSet<i32>) {
+        let visible = self.glyphs.iter().any(|&(_, _, h)| !h);
+        let leaders = leader_runs(&self.glyphs);
+        for (&(i, _, h), leader) in self.glyphs.iter().zip(leaders) {
+            if h && (!visible || leader) {
+                hidden.insert(i);
+            }
+        }
+        self.glyphs.clear();
+    }
+}
+
+/// Leader characters in a row that make a leader (`...` and longer).
+const MIN_LEADER_RUN: usize = 3;
+
+/// Marks the glyphs in runs of [`MIN_LEADER_RUN`] or more leader characters.
+fn leader_runs(glyphs: &[(i32, Option<char>, bool)]) -> Vec<bool> {
+    let is_leader = |c: Option<char>| {
+        matches!(
+            c,
+            Some(
+                '.' | '\u{2026}'
+                    | '_'
+                    | '-'
+                    | '\u{2013}'
+                    | '\u{2014}'
+                    | '\u{00B7}'
+                    | '\u{2025}'
+                    | '\u{22EF}'
+            )
+        )
+    };
+    let mut marks = vec![false; glyphs.len()];
+    let mut start = 0;
+    while start < glyphs.len() {
+        let end = start
+            + glyphs[start..]
+                .iter()
+                .take_while(|&&(_, c, _)| is_leader(c))
+                .count();
+        if end - start >= MIN_LEADER_RUN {
+            marks[start..end].fill(true);
+        }
+        start = end + 1;
+    }
+    marks
+}
+
+/// Only objects whose complete path stack is understood have an entry.
+/// Bounds are y-up page coordinates; inverted bounds mean an empty intersection.
+struct ObjectClips {
+    objects: HashMap<usize, RectF>,
+}
+
+impl ObjectClips {
+    fn new(page: &Page) -> Self {
         let mut clips = Self {
             objects: HashMap::new(),
         };
@@ -91,17 +217,21 @@ impl TextClip {
         }
     }
 
+    /// The clip bounds of the glyph's text object, `None` when it is unclipped.
+    fn bounds(&self, cv: &CharView<'_, '_>) -> Option<RectF> {
+        cv.text_object()
+            .and_then(|obj| self.objects.get(&(obj as usize)))
+            .copied()
+    }
+
     /// Generated separators have no reliable source object and are preserved.
-    /// A glyph is kept whole when its ink box, widened by [`INK_MARGIN`] of its em
+    /// A glyph is visible when its ink box, widened by [`INK_MARGIN`] of its em
     /// extent, meets the clip; glyphs without ink are judged by their loose box.
-    pub(crate) fn hides(&self, cv: &CharView<'_, '_>) -> bool {
+    fn hides(&self, cv: &CharView<'_, '_>) -> bool {
         if cv.is_generated() {
             return false;
         }
-        let Some(bounds) = cv
-            .text_object()
-            .and_then(|obj| self.objects.get(&(obj as usize)))
-        else {
+        let Some(bounds) = self.bounds(cv) else {
             return false;
         };
         // The ink (strict) box decides: a loose box carries the font's side bearings and
@@ -141,6 +271,13 @@ impl TextClip {
 /// as visible. PDFium's strict box can understate the painted outline (a substituted
 /// font, quantised glyph bounds) by about 1% of the font size; that edge of ink is drawn.
 const INK_MARGIN: f64 = 0.02;
+
+/// Whether two loose glyph boxes touch, within a quarter em, at any rotation.
+fn adjacent(a: RectF, b: RectF) -> bool {
+    let gap_x = (b.left - a.right).max(a.left - b.right);
+    let gap_y = (b.bottom - a.top).max(a.bottom - b.top);
+    f64::from(gap_x.max(gap_y)) <= 0.25 * em_extent(a).max(em_extent(b))
+}
 
 /// The larger side of the loose box, about one em (ascent to descent) at any rotation.
 fn em_extent(loose: RectF) -> f64 {

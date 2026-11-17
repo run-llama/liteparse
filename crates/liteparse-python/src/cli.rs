@@ -83,6 +83,10 @@ struct ParseCommand {
     /// repeated page-band lines and page chrome.
     #[arg(long)]
     keep_headers_footers: bool,
+    /// Keep text hidden by rectangular clips (e.g. overflow from a
+    /// fixed-height table cell) instead of dropping it.
+    #[arg(long)]
+    keep_clipped_text: bool,
     /// Include all PDF annotations as page-scoped structured data.
     #[arg(long)]
     extract_annotations: bool,
@@ -295,6 +299,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 image_output_dir: cmd.image_output_dir.clone(),
                 extract_links: !cmd.no_links,
                 keep_headers_footers: cmd.keep_headers_footers,
+                keep_clipped_text: cmd.keep_clipped_text,
                 extract_annotations: cmd.extract_annotations,
                 extract_form_fields: cmd.extract_form_fields,
                 extract_structure_tree: cmd.extract_structure_tree,

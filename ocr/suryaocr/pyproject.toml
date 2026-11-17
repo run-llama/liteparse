@@ -8,7 +8,7 @@ dependencies = [
     "surya-ocr>=0.20.0,<0.21.0",
     "fastapi>=0.131.0",
     "uvicorn>=0.41.0",
-    "pillow>=10.2.0,<11",
+    "pillow>=13.0.0",
     "python-multipart>=0.0.22",
 ]
 
@@ -17,3 +17,8 @@ dev = [
     "httpx>=0.27.0,<0.28",
     "pytest>=9.0.2",
 ]
+
+[tool.uv]
+# surya-ocr pins pillow<11 and filelock<4, both of which carry open CVEs
+# (patched in pillow 13.0.0 / filelock 4.2.1). Override to the patched lines.
+override-dependencies = ["pillow>=13.0.0", "filelock>=4.2.1"]

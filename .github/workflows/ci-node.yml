@@ -5,12 +5,16 @@ on:
     branches: [main]
     paths:
       - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "packages/node/**"
       - ".github/workflows/ci-node.yml"
   pull_request:
     branches: [main]
     paths:
       - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "packages/node/**"
       - ".github/workflows/ci-node.yml"
 

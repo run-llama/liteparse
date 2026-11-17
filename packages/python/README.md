@@ -64,6 +64,7 @@ parser = LiteParse(
     image_output_dir="./images",   # Write images and return name/path metadata (optional)
     extract_links=True,            # Render [text](url) links in markdown output
     keep_headers_footers=False,    # Keep running headers/footers in markdown output
+    keep_clipped_text=False,       # Keep text hidden by clips (e.g. table-cell overflow)
     extract_vector_graphics=False, # Opt-in shapes + merged H/V lines per page
     extract_annotations=False,     # Include page annotations in structured output
     extract_form_fields=False,      # Include AcroForm widget fields and values

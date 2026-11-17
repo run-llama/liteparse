@@ -227,6 +227,9 @@ pub struct PdfFormField {
     pub value: Option<String>,
     pub export_value: Option<String>,
     pub field_flags: i32,
+    /// The widget annotation's `/F` flags (`FPDF_ANNOT_FLAG_*`), which say
+    /// whether a viewer shows the widget: Invisible, Hidden, NoView.
+    pub annotation_flags: i32,
     pub control_count: Option<i32>,
     pub control_index: Option<i32>,
     pub checked: Option<bool>,
@@ -1345,6 +1348,7 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
                 value,
                 export_value,
                 field_flags: unsafe { ffi!(FPDFAnnot_GetFormFieldFlags(form.handle, annot)) },
+                annotation_flags: unsafe { ffi!(FPDFAnnot_GetFlags(annot)) },
                 control_count,
                 control_index,
                 checked,

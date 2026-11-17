@@ -127,6 +127,32 @@ pub struct TextItem {
     /// markdown emitter to wrap the text in `~~…~~`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub strike: bool,
+    /// Whether a thin horizontal stroke/rect runs just under this item's
+    /// baseline and spans its text (an underline). Populated in `extract.rs`;
+    /// the markdown emitter wraps the text in `<u>…</u>`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub underline: bool,
+    /// Raised (superscript) or lowered (subscript) small text relative to its
+    /// line, e.g. a footnote marker. Set in projection; the markdown emitter
+    /// wraps it in `<sup>…</sup>` / `<sub>…</sub>`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sup: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sub: bool,
+    /// The pieces an item was merged from, when their emphasis differs (bold / italic / struck /
+    /// monospace / underline / script): the markdown renderer styles each piece, while lines,
+    /// tables and blocks see the one merged item. Empty otherwise. Internal.
+    #[serde(skip)]
+    pub style_pieces: Vec<TextItem>,
+    /// A super/subscript run split from its line at a size step: its own glyph box `(y, height)`.
+    /// `y` / `height` then hold the host text's band, so lines and tables group the run with its
+    /// host as before the split; script detection reads this box. Internal.
+    #[serde(skip)]
+    pub script_geom: Option<(f32, f32)>,
+    /// Whether this item is LaTeX rebuilt from TeX math fonts (`$…$`).
+    /// Populated in `extract.rs`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub math: bool,
     /// Per-word sub-boxes within this item, split on the inter-word spaces seen
     /// during segment building. A segment groups several words together (it only
     /// breaks at line/column boundaries), so this exposes the finer word-level
@@ -219,6 +245,11 @@ pub struct WordBox {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Page {
     pub page_number: usize,
+    /// Tilt (degrees) the OCR merge removed from this page's OCR items: on a skewed scan the
+    /// items are rotated upright about the page centre so lines group into rows correctly,
+    /// and their output boxes are rotated back after layout (see `ParsedPage::ocr_deskew`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocr_deskew: Option<f32>,
     /// The document's `/PageLabels` entry for this page ("iv", "A-1"), when
     /// the PDF defines one. This is what a reader displays for the page and
     /// is not always its position in the document; `None` means the PDF has
@@ -455,8 +486,8 @@ pub struct ParsedPage {
     /// the public JSON/text outputs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub projected_lines: Vec<ProjectedLine>,
-    /// Root of the XY-cut region tree for this page. Leaves correspond to the
-    /// `region_path` on each `ProjectedLine`. Internal-only.
+    /// Body XY-cut region tree. Isolated numeric footer lines are detached
+    /// from this tree; other lines use its leaves as their `region_path`. Internal-only.
     #[serde(default)]
     pub regions: Region,
     /// Vector graphics on the page (decomposed paths) used by the markdown
@@ -516,6 +547,13 @@ pub struct ParsedPage {
     /// without the font metadata the classifier needs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<crate::layout::LayoutBlock>>,
+    /// Tilt (degrees) the OCR merge removed from this page's OCR items
+    /// (`Page::ocr_deskew`), carried through projection. While set, the OCR item,
+    /// word, block and table-cell boxes are still in the upright frame;
+    /// [`stages::rotate_back_ocr_deskew`](crate::stages::rotate_back_ocr_deskew)
+    /// moves them back onto the image and clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocr_deskew: Option<f32>,
 }
 
 /// One embedded raster image on a page. `id` is a stable, page-scoped slug
@@ -858,6 +896,7 @@ mod tests {
     #[test]
     fn page_serializes() {
         let p = Page {
+            ocr_deskew: None,
             page_number: 1,
             page_label: None,
             page_width: 100.0,

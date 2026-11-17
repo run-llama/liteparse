@@ -119,6 +119,25 @@ fn canonical_rotation(rotation: f32) -> i32 {
     }
 }
 
+/// Append `right` (the item to the right on the page) to `left` in reading order: after it for
+/// a left-to-right pair, before it when the pair reads right to left (Hebrew / Arabic words
+/// PDFium emitted as separate runs). Joining in x order reversed RTL word order.
+fn join_in_reading_order(left: &mut String, right: &str, sep: &str) {
+    if crate::bidi::is_rtl_pieces([left.as_str(), right]) {
+        let mut joined = right.trim_end().to_string();
+        if !sep.is_empty() && !joined.is_empty() {
+            joined.push_str(sep);
+        }
+        joined.push_str(left.trim_start());
+        *left = joined;
+    } else {
+        if !sep.is_empty() && !left.ends_with(' ') {
+            left.push_str(sep);
+        }
+        left.push_str(right);
+    }
+}
+
 fn handle_rotation_reading_order(items: &mut [ProjectedTextItem], page_height: f32) {
     if !items
         .iter()
@@ -168,6 +187,8 @@ fn handle_rotation_reading_order(items: &mut [ProjectedTextItem], page_height: f
         group.sort_by(|a, b| items[*a].item.y.total_cmp(&items[*b].item.y));
     }
 
+    // Groups are already y-sorted. Break x ties by their topmost item,
+    // then by that item's input index for coincident groups.
     bbox_groups.sort_by(|a, b| {
         let min_x_a = a
             .iter()
@@ -177,7 +198,10 @@ fn handle_rotation_reading_order(items: &mut [ProjectedTextItem], page_height: f
             .iter()
             .map(|idx| items[*idx].item.x)
             .fold(f32::INFINITY, |acc, v| acc.min(v));
-        min_x_a.total_cmp(&min_x_b)
+        min_x_a
+            .total_cmp(&min_x_b)
+            .then_with(|| items[a[0]].item.y.total_cmp(&items[b[0]].item.y))
+            .then_with(|| a[0].cmp(&b[0]))
     });
 
     for group_idx in 0..bbox_groups.len() {
@@ -369,12 +393,64 @@ fn handle_rotation_reading_order(items: &mut [ProjectedTextItem], page_height: f
     items.sort_by(|a, b| a.item.y.total_cmp(&b.item.y));
 }
 
-fn clean_projected_items(items: &mut Vec<ProjectedTextItem>, page_width: f32) {
-    // Rust equivalent of cleanRawText margin cleanup.
-    // Keep this conservative: only remove likely margin line numbers when they appear isolated.
-    let midpoint = page_width * 0.5;
-    let margin_left = midpoint - 5.0;
-    let margin_right = midpoint + 20.0;
+// Three distinct baselines support native gutter numbering. This recurrence
+// threshold is a layout heuristic. Isolated footers are exempted independently.
+const MIN_GUTTER_ROWS: usize = 3;
+
+/// Candidate numbers use the existing two-column gutter tolerances: their center
+/// is strictly between 5 pt left and 20 pt right of the page midpoint, and their
+/// width is below 15 pt. These are layout heuristics, not PDF format limits.
+///
+/// Keep one or two ASCII digits, optionally followed by an OCR `O` for zero.
+/// The three-character limit allows that suffix after two digits. Footer
+/// detection below uses the same horizontal band but requires actual digits.
+fn is_gutter_number_candidate(item: &ProjectedTextItem, page_width: f32) -> bool {
+    let center = item.item.x + item.item.width * 0.5;
+    let chars: Vec<_> = item.item.text.trim().chars().collect();
+    if !(center > page_width * 0.5 - 5.0
+        && center < page_width * 0.5 + 20.0
+        && item.item.width < 15.0)
+        || chars.is_empty()
+        || chars.len() > 3
+    {
+        return false;
+    }
+    let mut digits = 0;
+    for (idx, c) in chars.iter().enumerate() {
+        if c.is_ascii_digit() {
+            digits += 1;
+        } else if *c != 'O' || idx != chars.len() - 1 {
+            return false;
+        }
+    }
+    (1..=2).contains(&digits)
+}
+
+/// Text on both sides of a separated number is direct evidence that it occupies
+/// the space between columns, even without a repeated vertical sequence.
+/// Half the smaller glyph height is the existing same-baseline tolerance; using
+/// the smaller height prevents a tall font box from spanning adjacent rows.
+fn between_text_on_baseline(items: &[ProjectedTextItem], idx: usize) -> bool {
+    let number = &items[idx].item;
+    let mut left = false;
+    let mut right = false;
+    for (j, other) in items.iter().enumerate() {
+        let text = &other.item;
+        if j == idx
+            || text.text.trim().is_empty()
+            || (text.y - number.y).abs() > number.height.min(text.height) * 0.5
+        {
+            continue;
+        }
+        left |= text.x + text.width <= number.x;
+        right |= text.x >= number.x + number.width;
+    }
+    left && right
+}
+
+fn clean_projected_items(items: &mut Vec<ProjectedTextItem>, page_width: f32, page_height: f32) {
+    // Apply the native recurrence requirement after grid rendering. Preserve
+    // the earlier OCR/baseline flags and the existing same-line body-text guard.
 
     let mut has_non_margin_by_line: HashMap<i32, bool> = HashMap::new();
     for item in items.iter() {
@@ -384,42 +460,31 @@ fn clean_projected_items(items: &mut Vec<ProjectedTextItem>, page_width: f32) {
         }
     }
 
+    let likely_margin = |item: &ProjectedTextItem| {
+        item.is_margin_line_number || is_gutter_number_candidate(item, page_width)
+    };
+    // Keep the gutter heuristic's row count unchanged for body numbers.
+    // Isolated footers are exempted at removal, regardless of that count.
+    let rows: HashSet<_> = items
+        .iter()
+        .filter(|item| likely_margin(item))
+        .map(|item| item.item.y.round() as i32)
+        .collect();
+    let footers: HashSet<_> = (0..items.len())
+        .filter(|&i| isolated_numeric_footer(items, i, page_width, page_height))
+        .collect();
+    let mut idx = 0;
     items.retain(|item| {
-        let line_key = item.item.y.round() as i32;
+        let footer = footers.contains(&idx);
+        idx += 1;
         let line_has_content = has_non_margin_by_line
-            .get(&line_key)
+            .get(&(item.item.y.round() as i32))
             .copied()
             .unwrap_or(false);
-        let center = item.item.x + item.item.width * 0.5;
-        let text = item.item.text.trim();
-        let looks_like_line_number = {
-            let chars: Vec<char> = text.chars().collect();
-            if chars.is_empty() || chars.len() > 3 {
-                false
-            } else {
-                let mut digit_count = 0usize;
-                let mut valid = true;
-                for (idx, c) in chars.iter().enumerate() {
-                    if c.is_ascii_digit() {
-                        digit_count += 1;
-                    } else if *c == 'O' && idx == chars.len() - 1 {
-                        // OCR confusion 0->O
-                    } else {
-                        valid = false;
-                        break;
-                    }
-                }
-                valid && (1..=2).contains(&digit_count)
-            }
-        };
-
-        let likely_margin = item.is_margin_line_number
-            || (center > margin_left
-                && center < margin_right
-                && looks_like_line_number
-                && item.item.width < 15.0);
-
-        !likely_margin || line_has_content
+        footer
+            || (rows.len() < MIN_GUTTER_ROWS && !item.is_margin_line_number)
+            || !likely_margin(item)
+            || line_has_content
     });
 }
 
@@ -428,6 +493,8 @@ fn form_lines(
     median_width: f32,
     median_height: f32,
     page_width: f32,
+    page_height: f32,
+    style_runs: bool,
 ) -> Vec<Vec<ProjectedTextItem>> {
     // Y-tolerance for sorting: items within this threshold are considered same line
     let y_sort_tolerance: f32 = (median_height * 0.5).max(5.0);
@@ -463,38 +530,15 @@ fn form_lines(
         }
     };
 
-    // For two-column documents, detect and mark margin line numbers
+    // A lone centered footer has the same shape as a gutter number. Require
+    // a repeated column or text on both sides before marking it for removal.
     if page_width > 0.0 {
-        let midpoint = page_width / 2.0;
-        let margin_left = midpoint - 5.0;
-        let margin_right = midpoint + 20.0;
-
-        fn is_margin_line_number_text(text: &str) -> bool {
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
-                return false;
-            }
-            let chars: Vec<char> = trimmed.chars().collect();
-            if chars.len() > 3 {
-                return false;
-            }
-
-            let mut digit_count = 0usize;
-            for (idx, c) in chars.iter().enumerate() {
-                if c.is_ascii_digit() {
-                    digit_count += 1;
-                } else if *c == 'O' && idx == chars.len() - 1 {
-                    // OCR confusion: 0 -> O
-                } else {
-                    return false;
-                }
-            }
-            (1..=2).contains(&digit_count)
-        }
-
         // A real gutter line number is isolated on its baseline. An item that
         // abuts a neighbour is a fragment of a larger token, e.g. the "7" of a
         // table cell PDFium emits as "7" + ".7" (issue #465).
+        /// Preserve the existing token-fragment guard: a quarter glyph height
+        /// admits a tight join, and half a height restricts it to one baseline.
+        /// The 0.5 pt overlap tolerance accommodates rounded box widths.
         fn abuts_neighbour(items: &[ProjectedTextItem], idx: usize) -> bool {
             let it = &items[idx].item;
             let max_gap = it.height * 0.25;
@@ -514,17 +558,24 @@ fn form_lines(
 
         let margin_idxs: Vec<usize> = (0..items.len())
             .filter(|&i| {
-                let item = &items[i];
-                let center = item.item.x + item.item.width / 2.0;
-                center > margin_left
-                    && center < margin_right
-                    && is_margin_line_number_text(&item.item.text)
-                    && item.item.width < 15.0
-                    && !abuts_neighbour(items, i)
+                is_gutter_number_candidate(&items[i], page_width) && !abuts_neighbour(items, i)
             })
             .collect();
+        let rows: HashSet<_> = margin_idxs
+            .iter()
+            .map(|&i| items[i].item.y.round() as i32)
+            .collect();
         for i in margin_idxs {
-            items[i].is_margin_line_number = true;
+            // Exempt the footer before flagging. Preserve existing OCR gutter
+            // filtering: short OCR numerals may be recognition noise. Native
+            // digits need repeated rows or text on both sides.
+            if !isolated_numeric_footer(items, i, page_width, page_height)
+                && (items[i].item.confidence.is_some()
+                    || rows.len() >= MIN_GUTTER_ROWS
+                    || between_text_on_baseline(items, i))
+            {
+                items[i].is_margin_line_number = true;
+            }
         }
     }
 
@@ -543,17 +594,86 @@ fn form_lines(
         ya.cmp(&yb).then_with(|| a.item.x.total_cmp(&b.item.x))
     });
 
+    // Keep bidirectional ordering and punctuation on the established grid path.
+    let use_native_gaps = !items
+        .iter()
+        .any(|p| p.item.text.chars().any(crate::bidi::is_rtl_char));
+
+    const WORD_GAP_ALIGNMENT_TOLERANCE: f32 = 0.1;
+    // Sheared boxes can hide small word spaces. Only subpixel residuals bridge
+    // those gaps, while upright text keeps the existing 0.1 pt merge allowance.
+    const GLYPH_GAP_HEIGHT_RATIO: f32 = 0.001;
+    const GLYPH_OVERLAP_HEIGHT_RATIO: f32 = 0.04;
+
+    fn gap_height(a: &ProjectedTextItem, b: &ProjectedTextItem) -> f32 {
+        let height = |p: &ProjectedTextItem| p.item.font_height.unwrap_or(p.orig_height);
+        height(a).min(height(b)).max(0.0)
+    }
+
+    /// Measure aligned native Latin runs before whole-point width rounding.
+    /// OCR, scripts and unreliable font mappings retain their grid checks.
+    fn native_gap(a: &ProjectedTextItem, b: &ProjectedTextItem) -> Option<f32> {
+        let latin = |p: &ProjectedTextItem| {
+            !p.rotated
+                && p.item.confidence.is_none()
+                && !p.item.font_is_buggy
+                && !p.item.has_unicode_map_error
+                && !(p.item.sup || p.item.sub || p.item.script_geom.is_some())
+                && p.item.text.chars().filter(|c| c.is_alphabetic()).all(
+                    |c| matches!(c as u32, 0x0000..=0x024F | 0x1E00..=0x1EFF | 0xFB00..=0xFB06),
+                )
+        };
+        if !latin(a)
+            || !latin(b)
+            || a.item.font_size != b.item.font_size
+            || a.item.font_height != b.item.font_height
+            || (a.orig_y - b.orig_y).abs() > WORD_GAP_ALIGNMENT_TOLERANCE
+            || (a.orig_height - b.orig_height).abs() > WORD_GAP_ALIGNMENT_TOLERANCE
+        {
+            return None;
+        }
+        let gap = b.orig_x - (a.orig_x + a.orig_width);
+        // Monospace and sheared boxes can overlap across genuine word spaces.
+        if gap < 0.0
+            && (is_mono_item(&a.item)
+                || is_mono_item(&b.item)
+                || canonical_rotation(a.item.rotation) != 0
+                || canonical_rotation(b.item.rotation) != 0)
+        {
+            return None;
+        }
+        (gap >= -(gap_height(a, b) * GLYPH_OVERLAP_HEIGHT_RATIO).min(0.5)).then_some(gap)
+    }
+
     fn can_merge(
         prev: &ProjectedTextItem,
         cur: &ProjectedTextItem,
         y_tolerance: f32,
         h_tolerance: f32,
+        use_native_gaps: bool,
     ) -> bool {
+        // A script run shares its host's line band. Keep it separate until script flagging
+        // can preserve it as a styled piece, even when its grid gap is zero.
+        if prev.item.script_geom.is_some() || cur.item.script_geom.is_some() {
+            return false;
+        }
         if (cur.item.y - prev.item.y).abs() <= y_tolerance
             && (cur.item.height - prev.item.height).abs() <= h_tolerance
         {
-            let delta_x = cur.item.x - (prev.item.x + prev.item.width);
-            return (-0.5..0.0).contains(&delta_x) || (0.0..0.1).contains(&delta_x);
+            // This early merge keeps one style. Preserve its grid behavior across style changes.
+            let measured = (use_native_gaps && same_emphasis(&prev.item, &cur.item))
+                .then(|| native_gap(prev, cur))
+                .flatten();
+            let delta_x = measured.unwrap_or(cur.item.x - (prev.item.x + prev.item.width));
+            let max_gap = if measured.is_some()
+                && (canonical_rotation(prev.item.rotation) != 0
+                    || canonical_rotation(cur.item.rotation) != 0)
+            {
+                (gap_height(prev, cur) * GLYPH_GAP_HEIGHT_RATIO).min(0.1)
+            } else {
+                0.1
+            };
+            return (-0.5..0.0).contains(&delta_x) || (0.0..max_gap).contains(&delta_x);
         }
 
         false
@@ -579,14 +699,16 @@ fn form_lines(
         prev.orig_height = y2 - y1;
     }
 
-    // Every joiner goes through here so the merged item always inherits
-    // `next`'s trailing-space state; a stale flag would add a space later.
-    fn append_text(prev: &mut ProjectedTextItem, next: &ProjectedTextItem, space: bool) {
-        if space && !prev.item.text.ends_with(' ') {
-            prev.item.text.push(' ');
-        }
-        prev.item.text.push_str(&next.item.text);
+    // Every joiner must leave the merged item with `next`'s trailing-space
+    // state; a stale flag would add a space later. The line pass joins
+    // through here; the bbox pass below appends in stream order.
+    fn append_text(prev: &mut ProjectedTextItem, next: &ProjectedTextItem, sep: &str) {
+        join_in_reading_order(&mut prev.item.text, &next.item.text, sep);
         prev.item.followed_by_space = next.item.followed_by_space;
+    }
+
+    fn trailing_sep(prev: &ProjectedTextItem) -> &'static str {
+        if prev.item.followed_by_space { " " } else { "" }
     }
 
     // Merge continuous bbox items in a single linear pass.
@@ -597,13 +719,25 @@ fn form_lines(
     for mut cur in items.drain(..) {
         let should_merge = merged_items
             .last()
-            .map(|prev| can_merge(prev, &cur, merge_y_tolerance, merge_h_tolerance))
+            .map(|prev| {
+                can_merge(
+                    prev,
+                    &cur,
+                    merge_y_tolerance,
+                    merge_h_tolerance,
+                    use_native_gaps,
+                )
+            })
             .unwrap_or(false);
 
         if should_merge {
             if let Some(prev) = merged_items.last_mut() {
                 let merged = merge_bbox(prev, &cur);
-                append_text(prev, &cur, prev.item.followed_by_space);
+                if prev.item.followed_by_space && !prev.item.text.ends_with(' ') {
+                    prev.item.text.push(' ');
+                }
+                prev.item.text.push_str(&cur.item.text);
+                prev.item.followed_by_space = cur.item.followed_by_space;
                 prev.item.words.append(&mut cur.item.words);
                 prev.item.x = merged.0;
                 prev.item.y = merged.1;
@@ -715,6 +849,10 @@ fn form_lines(
         line.sort_by(|a, b| a.item.x.total_cmp(&b.item.x));
     }
 
+    for line in lines.iter_mut() {
+        mark_script_items(line);
+    }
+
     // sort lines by y
     lines.sort_by(|a, b| {
         let ay = a.first().map(|v| v.item.y).unwrap_or(f32::INFINITY);
@@ -804,8 +942,15 @@ fn form_lines(
                         cs.next() == Some('.') && cs.next().is_some_and(|c| c.is_ascii_digit())
                     };
                 if is_decimal_continuation {
+                    // Markdown renders the pieces, so a numeric suffix must join both views.
+                    if style_runs
+                        && (!prev.item.style_pieces.is_empty()
+                            || !same_emphasis(&prev.item, &item.item))
+                    {
+                        record_style_piece(&mut prev.item, &item.item, "");
+                    }
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
-                    append_text(prev, &item, false);
+                    append_text(prev, &item, "");
                     prev.item.words.append(&mut item.item.words);
                     merge_orig_bbox(prev, &item);
                     continue;
@@ -820,7 +965,11 @@ fn form_lines(
                 // builder inserts a space based on `gap > space_threshold`.
                 // Punctuation joins (`Standards`+`.`, `width`+`)`, etc.)
                 // and overlapping/negative-gap merges still go through.
-                let alpha_alpha_gap = delta_x > 0.0
+                let gap = use_native_gaps
+                    .then(|| native_gap(prev, &item))
+                    .flatten()
+                    .unwrap_or(delta_x);
+                let alpha_alpha_gap = gap > 0.0
                     && prev
                         .item
                         .text
@@ -833,13 +982,23 @@ fn form_lines(
                         .chars()
                         .next()
                         .is_some_and(|c| c.is_alphabetic());
+                // Items merge whatever their emphasis, so lines, tables and blocks see the same
+                // items in every output; for markdown a merge across an emphasis change keeps
+                // the pieces, so each renders in its own style (`record_style_piece`).
+                let keep_pieces = style_runs
+                    && (!prev.item.style_pieces.is_empty()
+                        || !same_emphasis(&prev.item, &item.item));
                 if y_compatible
                     && !both_are_numbers
                     && !alpha_alpha_gap
                     && delta_x <= MERGE_THRESHOLD
                 {
+                    let sep = trailing_sep(prev);
+                    if keep_pieces {
+                        record_style_piece(&mut prev.item, &item.item, sep);
+                    }
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
-                    append_text(prev, &item, prev.item.followed_by_space);
+                    append_text(prev, &item, sep);
                     prev.item.words.append(&mut item.item.words);
                     merge_orig_bbox(prev, &item);
                     continue;
@@ -848,8 +1007,11 @@ fn form_lines(
                 let prev_len = prev.item.text.chars().count().max(1) as f32;
                 let avg_char_width = prev.item.width / prev_len;
                 if y_compatible && !both_are_numbers && delta_x < avg_char_width {
+                    if keep_pieces {
+                        record_style_piece(&mut prev.item, &item.item, " ");
+                    }
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
-                    append_text(prev, &item, true);
+                    append_text(prev, &item, " ");
                     prev.item.words.append(&mut item.item.words);
                     merge_orig_bbox(prev, &item);
                     continue;
@@ -1759,6 +1921,7 @@ fn detect_and_render_flowing_lines(
 fn project_to_grid(
     page: &Page,
     mut projection_boxes: Vec<ProjectedTextItem>,
+    style_runs: bool,
 ) -> (Vec<ProjectedTextItem>, String) {
     if projection_boxes.is_empty() {
         return (Vec::new(), String::new());
@@ -1805,6 +1968,8 @@ fn project_to_grid(
         median_width,
         median_height,
         page.page_width,
+        page.page_height,
+        style_runs,
     );
     if lines.is_empty() {
         return (Vec::new(), String::new());
@@ -2826,7 +2991,7 @@ fn project_to_grid(
         }
     }
 
-    clean_projected_items(&mut flattened, page.page_width);
+    clean_projected_items(&mut flattened, page.page_width, page.page_height);
 
     let text = raw_lines
         .into_iter()
@@ -2884,6 +3049,16 @@ fn clean_rendered_text(text: &str) -> String {
 }
 
 pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
+    project_pages(pages, false)
+}
+
+/// [`project_pages_to_grid`] for markdown output: items whose emphasis differs stay apart, so
+/// each run renders in its own style.
+pub fn project_pages_for_markdown(pages: Vec<Page>) -> Vec<ParsedPage> {
+    project_pages(pages, true)
+}
+
+fn project_pages(pages: Vec<Page>, style_runs: bool) -> Vec<ParsedPage> {
     pages
         .into_iter()
         .map(|page| {
@@ -2909,7 +3084,7 @@ pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
                 })
                 .collect();
 
-            let (projected_items, text) = project_to_grid(&page, projection_boxes);
+            let (projected_items, text) = project_to_grid(&page, projection_boxes, style_runs);
             // Detect figure regions from the page's vector graphics before
             // XY-cut runs so the layout recursion can treat them as obstacles
             // (partition the page around figures rather than slicing through).
@@ -2972,6 +3147,7 @@ pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
                 // Filled in after classification, which needs the finished
                 // page (and whole-document signals) to run.
                 blocks: None,
+                ocr_deskew: page.ocr_deskew,
             }
         })
         .collect()
@@ -3043,37 +3219,185 @@ fn name_contains_any(name: &str, hints: &[&str]) -> bool {
     hints.iter().any(|h| name.contains(h))
 }
 
+/// Flag the line's short items set clearly smaller than its body text and raised above its
+/// baseline (superscripts: footnote markers, ordinals) or dropped below it (subscripts). The
+/// body is the line's tallest-run text by character count; OCR and math items are left alone
+/// (OCR boxes are too loose to tell a raised glyph from jitter).
+fn mark_script_items(line: &mut [ProjectedTextItem]) {
+    let native = |p: &ProjectedTextItem| p.item.confidence.is_none() && !p.item.math;
+    // an item's own glyph box: a run split off at a size step carries its host's band
+    let geom = |it: &TextItem| it.script_geom.unwrap_or((it.y, it.height));
+    let mut hs: Vec<(f32, usize)> = line
+        .iter()
+        .filter(|p| native(p) && geom(&p.item).1 > 0.0)
+        .map(|p| {
+            (
+                geom(&p.item).1,
+                p.item.text.chars().filter(|c| !c.is_whitespace()).count(),
+            )
+        })
+        .collect();
+    let total: usize = hs.iter().map(|h| h.1).sum();
+    if total < 4 {
+        return;
+    }
+    hs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (mut acc, mut body_h) = (0, 0.0);
+    for (h, n) in hs {
+        acc += n;
+        if acc * 2 >= total {
+            body_h = h;
+            break;
+        }
+    }
+    let mut bottoms: Vec<f32> = line
+        .iter()
+        .filter(|p| native(p) && geom(&p.item).1 >= body_h * 0.9)
+        .map(|p| geom(&p.item).0 + geom(&p.item).1)
+        .collect();
+    if bottoms.is_empty() || body_h <= 0.0 {
+        return;
+    }
+    bottoms.sort_by(f32::total_cmp);
+    let base = bottoms[bottoms.len() / 2];
+    for p in line.iter_mut().filter(|p| native(p)) {
+        let it = &mut p.item;
+        let n = it.text.trim().chars().count();
+        let (gy, gh) = geom(it);
+        if n == 0 || n > 6 || gh > body_h * 0.78 {
+            continue;
+        }
+        let bottom = gy + gh;
+        if bottom <= base - body_h * 0.2 {
+            it.sup = true;
+        } else if bottom >= base + body_h * 0.1 && gy >= base - body_h * 0.6 {
+            it.sub = true;
+        }
+    }
+    // A script hugs the text it marks ("Taha¹", "CO₂", "substrate⁴¹"): a flagged run of three or
+    // more items or over 8 characters is a smaller-type phrase on a mixed line (a byline next
+    // to a drop cap), and a flagged item with no unflagged neighbour within half the body height
+    // is no script either.
+    let mut order: Vec<usize> = (0..line.len()).collect();
+    order.sort_by(|&a, &b| line[a].item.x.total_cmp(&line[b].item.x));
+    let script = |p: &ProjectedTextItem| p.item.sup || p.item.sub;
+    let mut k = 0;
+    while k < order.len() {
+        if !script(&line[order[k]]) {
+            k += 1;
+            continue;
+        }
+        let mut e = k;
+        while e + 1 < order.len() && script(&line[order[e + 1]]) {
+            e += 1;
+        }
+        let chars: usize = order[k..=e]
+            .iter()
+            .map(|&i| {
+                line[i]
+                    .item
+                    .text
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .count()
+            })
+            .sum();
+        let near = |i: Option<&usize>, left: bool| {
+            i.is_some_and(|&i| {
+                let (a, b) = (&line[order[k]].item, &line[order[e]].item);
+                let n = &line[i].item;
+                let gap = if left {
+                    a.x - (n.x + n.width)
+                } else {
+                    n.x - (b.x + b.width)
+                };
+                !script(&line[i]) && gap <= body_h * 0.5
+            })
+        };
+        let hugs = near(k.checked_sub(1).and_then(|j| order.get(j)), true)
+            || near(order.get(e + 1), false);
+        if e - k + 1 >= 3 || chars > 8 || !hugs {
+            for &i in &order[k..=e] {
+                line[i].item.sup = false;
+                line[i].item.sub = false;
+            }
+        }
+        k = e + 1;
+    }
+}
+
+/// Keep every merged character in the pieces Markdown renders. Leading-dot
+/// continuations with the same style stay in one piece, preserving URLs and numbers.
+fn record_style_piece(prev: &mut TextItem, next: &TextItem, sep: &str) {
+    if prev.style_pieces.is_empty() {
+        let mut first = prev.clone();
+        first.words.clear();
+        prev.style_pieces.push(first);
+    }
+    let mut pieces = if next.style_pieces.is_empty() {
+        let mut piece = next.clone();
+        piece.words.clear();
+        vec![piece]
+    } else {
+        next.style_pieces.clone()
+    };
+    if let (Some(last), Some(first)) = (prev.style_pieces.last_mut(), pieces.first())
+        && sep.is_empty()
+        && first.text.starts_with('.')
+        && same_emphasis(last, first)
+        && last.link == first.link
+        && !crate::bidi::is_rtl_pieces([last.text.as_str(), first.text.as_str()])
+    {
+        let right = (last.x + last.width).max(first.x + first.width);
+        let bottom = (last.y + last.height).max(first.y + first.height);
+        last.x = last.x.min(first.x);
+        last.y = last.y.min(first.y);
+        last.width = right - last.x;
+        last.height = bottom - last.y;
+        last.text.push_str(&first.text);
+        pieces.remove(0);
+    }
+    prev.style_pieces.extend(pieces);
+}
+
+/// Whether two items render with the same inline emphasis.
+fn same_emphasis(a: &TextItem, b: &TextItem) -> bool {
+    is_bold_item(a) == is_bold_item(b)
+        && is_italic_item(a) == is_italic_item(b)
+        && is_strike_item(a) == is_strike_item(b)
+        && is_mono_item(a) == is_mono_item(b)
+        && a.underline == b.underline
+        && a.sup == b.sup
+        && a.sub == b.sub
+}
+
+/// Bold: for an item merged from differently-styled pieces, only when every piece is (a bold
+/// run-in lead merged with the plain sentence after it is not a bold line).
 pub(crate) fn is_bold_item(item: &TextItem) -> bool {
-    if let Some(flags) = item.font_flags
-        && flags & PDF_FONT_FLAG_FORCE_BOLD != 0
-    {
-        return true;
+    if !item.style_pieces.is_empty() {
+        return item.style_pieces.iter().all(is_bold_item);
     }
-    if let Some(w) = item.font_weight
-        && w >= 600
-    {
-        return true;
-    }
-    if let Some(n) = &item.font_name
-        && name_contains_any(n, BOLD_NAME_HINTS)
-    {
-        return true;
-    }
-    false
+    font_is_bold(item.font_name.as_deref(), item.font_weight, item.font_flags)
 }
 
 pub(crate) fn is_italic_item(item: &TextItem) -> bool {
-    if let Some(flags) = item.font_flags
-        && flags & PDF_FONT_FLAG_ITALIC != 0
-    {
-        return true;
+    if !item.style_pieces.is_empty() {
+        return item.style_pieces.iter().all(is_italic_item);
     }
-    if let Some(n) = &item.font_name
-        && name_contains_any(n, ITALIC_NAME_HINTS)
-    {
-        return true;
-    }
-    false
+    font_is_italic(item.font_name.as_deref(), item.font_flags)
+}
+
+/// Bold from a font's flags (ForceBold), weight (600+) or name.
+pub(crate) fn font_is_bold(name: Option<&str>, weight: Option<i32>, flags: Option<i32>) -> bool {
+    flags.is_some_and(|f| f & PDF_FONT_FLAG_FORCE_BOLD != 0)
+        || weight.is_some_and(|w| w >= 600)
+        || name.is_some_and(|n| name_contains_any(n, BOLD_NAME_HINTS))
+}
+
+/// Italic from a font's flags or name.
+pub(crate) fn font_is_italic(name: Option<&str>, flags: Option<i32>) -> bool {
+    flags.is_some_and(|f| f & PDF_FONT_FLAG_ITALIC != 0)
+        || name.is_some_and(|n| name_contains_any(n, ITALIC_NAME_HINTS))
 }
 
 pub(crate) fn is_strike_item(item: &TextItem) -> bool {
@@ -3174,6 +3498,31 @@ const XY_COLUMN_PEAK_BALANCE_RATIO: f32 = 0.4;
 /// detector) on sparse tabular layouts.
 const XY_COLUMN_MIN_FILL: f32 = 0.55;
 
+/// An equation number set at a column edge: "(22)", "(3.14)", "(A.2)".
+fn is_equation_number(text: &str) -> bool {
+    let t = text.trim();
+    let Some(inner) = t.strip_prefix('(').and_then(|r| r.strip_suffix(')')) else {
+        return false;
+    };
+    !inner.is_empty()
+        && inner.len() <= 6
+        && inner.chars().any(|c| c.is_ascii_digit())
+        && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '.')
+}
+
+/// Text with no run of three letters: a matrix entry, a bracket piece or an
+/// accent the math pass left behind ("0", "¯", ", B =").
+fn is_formula_fragment(text: &str) -> bool {
+    let mut run = 0;
+    for c in text.chars() {
+        run = if c.is_alphabetic() { run + 1 } else { 0 };
+        if run >= 3 {
+            return false;
+        }
+    }
+    !text.trim().is_empty()
+}
+
 /// A peak whose band count is below this fraction of the most-banded column's
 /// is treated as a figure-scatter "phantom" (axis tick labels, a point cloud
 /// spread across x) rather than a real column. Real table columns have one
@@ -3198,12 +3547,18 @@ fn xy_item_weight(it: &TextItem) -> f32 {
     it.text.chars().count().max(1) as f32
 }
 
-fn xy_root_bbox(items: &[ProjectedTextItem], page_width: f32, page_height: f32) -> Rect {
+fn xy_root_bbox(
+    items: &[ProjectedTextItem],
+    indices: &[usize],
+    page_width: f32,
+    page_height: f32,
+) -> Rect {
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;
     let mut max_x = f32::NEG_INFINITY;
     let mut max_y = f32::NEG_INFINITY;
-    for it in items {
+    for &idx in indices {
+        let it = &items[idx];
         if it.item.text.is_empty() {
             continue;
         }
@@ -3592,15 +3947,8 @@ fn xy_find_column_cut(
     median_h: f32,
     tabular: &mut bool,
 ) -> Option<CutCandidate> {
-    let dbg = std::env::var("LITEPARSE_DEBUG_XY").is_ok();
-    macro_rules! reject {
-        ($($t:tt)*) => {{
-            if dbg { eprintln!("[xy col-reject] {}", format!($($t)*)); }
-            return None;
-        }};
-    }
     if bbox.width <= 1.0 || idxs.len() < 8 {
-        reject!("preflight: width={:.1} items={}", bbox.width, idxs.len());
+        return None;
     }
 
     // Identify "line-start" items: within each y-band, the first item of
@@ -3612,7 +3960,20 @@ fn xy_find_column_cut(
     // column) because the inter-column gutter exceeds `gutter_gap`, so we
     // don't collapse a band to its single leftmost item.
     let band_tol = (median_h * 0.5).max(2.0);
-    let gutter_gap = median_h.max(4.0);
+    // OCR items are whole detected lines, not PDF word fragments: two of them in one band
+    // are split at a column gutter (or a cell boundary, which the fill gate below handles),
+    // never at a word space. Scans' tight gutters (~0.6-0.8 line heights on newspaper pages)
+    // fail the native one-line-height test, and the near-start rescue needs sub-point edge
+    // alignment that OCR boxes don't have, so N-column scans were read row by row.
+    let ocr_items = idxs
+        .iter()
+        .filter(|&&i| items[i].item.confidence.is_some())
+        .count();
+    let gutter_gap = if ocr_items * 2 > idxs.len() {
+        (median_h * 0.5).max(4.0)
+    } else {
+        median_h.max(4.0)
+    };
 
     let mut sorted: Vec<usize> = idxs.to_vec();
     sorted.sort_by(|&a, &b| {
@@ -3660,11 +4021,7 @@ fn xy_find_column_cut(
     }
 
     if line_starts.len() < 8 {
-        reject!(
-            "line_starts={} < 8 (items={})",
-            line_starts.len(),
-            idxs.len()
-        );
+        return None;
     }
 
     // Histogram extent uses full item bounds so `XY_COLUMN_MIN_GAP_FRACTION`
@@ -3680,7 +4037,7 @@ fn xy_find_column_cut(
         }
     }
     if !min_x.is_finite() || max_x <= min_x + 1.0 {
-        reject!("degenerate extent min_x={min_x:.1} max_x={max_x:.1}");
+        return None;
     }
     let total_w = max_x - min_x;
     let bucket_pt = XY_COLUMN_BUCKET_PT;
@@ -3719,11 +4076,6 @@ fn xy_find_column_cut(
                 }
             }
         }
-        if dbg && rescued > 0 {
-            eprintln!(
-                "[xy col-rescue] {rescued} near-gap starts (gap in [{near_gap_floor:.1},{gutter_gap:.1}]) exactly aligned to >=2 strict starts"
-            );
-        }
     }
     let n_starts = line_starts.len() + rescued;
 
@@ -3760,7 +4112,6 @@ fn xy_find_column_cut(
     // Keep only "strong" peaks. A real column edge is sat-stacked by many
     // lines at the same left x; spurious peaks (a stray indented quote, a
     // numbered marker, etc.) carry only a few lines.
-    let strong_before = peaks.len();
     let raw_counts: Vec<(f32, usize)> = peaks.clone();
     // Adaptive minimum: scale with how many line-starts the band actually has.
     // The static `XY_COLUMN_MIN_LINES_PER_PEAK = 10` floor is meant to drop
@@ -3802,30 +4153,7 @@ fn xy_find_column_cut(
                 if sparse {
                     *tabular = true;
                 }
-                if dbg {
-                    eprintln!(
-                        "[xy col-weak-peaks] {} balanced raw peaks (min={raw_min} max={raw_max}) dominance={dominance:.2} min_fill={min_fill:.2} avg_fill={avg_fill:.2} — {}",
-                        raw_counts.len(),
-                        if sparse {
-                            "tabular, no cut"
-                        } else {
-                            "filled (prose), not tabular"
-                        }
-                    );
-                }
             }
-        }
-        if dbg {
-            let preview: Vec<String> = raw_counts
-                .iter()
-                .take(8)
-                .map(|(x, c)| format!("({x:.0}:{c})"))
-                .collect();
-            eprintln!(
-                "[xy col-reject] peaks<2 after min_per_peak={adaptive_min} (raw={strong_before} strong={}): {}",
-                peaks.len(),
-                preview.join(",")
-            );
         }
         return None;
     }
@@ -3861,40 +4189,17 @@ fn xy_find_column_cut(
             // whose cells don't tightly left-cluster (numeric columns are
             // typically right-aligned / centered, so they never form
             // strong left-edge peaks and fail dominance here).
-            let before = peaks.len();
             peaks.retain(|(_, c)| {
                 largest <= 0.0 || (*c as f32) / largest >= XY_COLUMN_PEAK_BALANCE_RATIO
             });
             if peaks.len() < 2 {
-                reject!("peaks>2 but <2 balanced (largest={largest})");
-            }
-            if dbg {
-                eprintln!(
-                    "[xy col-keep-N] kept {} of {} balanced peaks (N-column); xs=[{}]",
-                    peaks.len(),
-                    before,
-                    peaks
-                        .iter()
-                        .map(|(x, c)| format!("{x:.0}:{c}"))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                );
+                return None;
             }
         } else {
             // Top-2 dominate → assume real columns + weak floats. Keep
             // top-2 (re-sorted left→right) and continue.
             let mut top2 = vec![by_count[0], by_count[1]];
             top2.sort_by(|a, b| a.0.total_cmp(&b.0));
-            if dbg {
-                eprintln!(
-                    "[xy col-keep-top2] dropped {} weak peaks; kept xs=[{:.0}:{},{:.0}:{}]",
-                    peaks.len() - 2,
-                    top2[0].0,
-                    top2[0].1,
-                    top2[1].0,
-                    top2[1].1
-                );
-            }
             peaks = top2;
         }
     }
@@ -3909,6 +4214,11 @@ fn xy_find_column_cut(
         let mut n = peaks.len();
         let mut covered_sum = vec![0.0f32; n];
         let mut band_count = vec![0usize; n];
+        // Bands where everything in the column is display math or an
+        // equation number (`math_bands`), or that plus formula fragments the
+        // math pass left as text (`formula_bands`).
+        let mut math_bands = vec![0usize; n];
+        let mut formula_bands = vec![0usize; n];
         let mut kk = 0;
         while kk < sorted.len() {
             let by = items[sorted[kk]].item.y;
@@ -3918,6 +4228,8 @@ fn xy_find_column_cut(
             }
             let mut lo_x = vec![f32::INFINITY; n];
             let mut hi_x = vec![f32::NEG_INFINITY; n];
+            let mut all_math = vec![true; n];
+            let mut all_formula = vec![true; n];
             for &idx in &sorted[kk..jj] {
                 let it = &items[idx].item;
                 if !it.x.is_finite() {
@@ -3933,6 +4245,9 @@ fn xy_find_column_cut(
                 }
                 lo_x[c] = lo_x[c].min(it.x);
                 hi_x[c] = hi_x[c].max(it.x + it.width.max(0.0));
+                let math = it.math || is_equation_number(&it.text);
+                all_math[c] &= math;
+                all_formula[c] &= math || is_formula_fragment(&it.text);
             }
             for c in 0..n {
                 if hi_x[c] > lo_x[c] {
@@ -3944,6 +4259,12 @@ fn xy_find_column_cut(
                     if col_w > 1.0 {
                         covered_sum[c] += ((hi_x[c] - lo_x[c]) / col_w).min(1.0);
                         band_count[c] += 1;
+                        if all_math[c] {
+                            math_bands[c] += 1;
+                        }
+                        if all_formula[c] {
+                            formula_bands[c] += 1;
+                        }
                     }
                 }
             }
@@ -3984,21 +4305,6 @@ fn xy_find_column_cut(
         } else {
             f32::INFINITY
         };
-        if dbg {
-            eprintln!(
-                "[xy col-fill] avg_fill={avg_fill:.2} min_fill={min_fill:.2} (gate={XY_COLUMN_MIN_FILL}) per_col=[{}] band_counts=[{}]",
-                per_col_fill
-                    .iter()
-                    .map(|f| format!("{f:.2}"))
-                    .collect::<Vec<_>>()
-                    .join(","),
-                band_count
-                    .iter()
-                    .map(|c| c.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            );
-        }
         const MIN_FILL_HARD_FLOOR: f32 = 0.38;
         // Figure-scatter phantom column: on a 2-column page with an embedded
         // plot (scatter cloud, axis tick labels), the plot's x-spread items
@@ -4021,9 +4327,20 @@ fn xy_find_column_cut(
                         0.0
                     }
                 };
-                let survivors: Vec<usize> = (0..n)
-                    .filter(|&c| !(band_count[c] < band_floor && col_fill(c) < MIN_FILL_HARD_FLOOR))
-                    .collect();
+                // Note: display equations and their numbers inside a prose
+                // column line up into the same sparse, low-fill peak (a
+                // two-column paper read as a table); a column made mostly
+                // of math bands is a phantom at any band count.
+                // Dropping still needs the surviving columns to read as
+                // prose, so a numeric table column keeps the region tabular.
+                let display_math = |c: usize| {
+                    math_bands[c] * 3 >= band_count[c] && formula_bands[c] * 3 >= band_count[c] * 2
+                };
+                let phantom = |c: usize| {
+                    col_fill(c) < MIN_FILL_HARD_FLOOR
+                        && (band_count[c] < band_floor || display_math(c))
+                };
+                let survivors: Vec<usize> = (0..n).filter(|&c| !phantom(c)).collect();
                 let survivors_filled = survivors
                     .iter()
                     .all(|&c| col_fill(c) >= MIN_FILL_HARD_FLOOR);
@@ -4037,16 +4354,6 @@ fn xy_find_column_cut(
                         new_min = new_min.min(f);
                         wsum += f * band_count[c] as f32;
                         wn += band_count[c] as f32;
-                    }
-                    if dbg {
-                        eprintln!(
-                            "[xy col-phantom] dropped {} sparse low-fill peak(s) (band_floor={band_floor}); kept xs=[{}]",
-                            n - survivors.len(),
-                            kept.iter()
-                                .map(|(x, _)| format!("{x:.0}"))
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        );
                     }
                     peaks = kept;
                     n = peaks.len();
@@ -4063,14 +4370,11 @@ fn xy_find_column_cut(
         // needed column split AND the density V via the tabular flag.
         if n > 2 && min_fill.is_finite() && min_fill < MIN_FILL_HARD_FLOOR {
             *tabular = true;
-            reject!("N-column min fill {min_fill:.2} < {MIN_FILL_HARD_FLOOR} (tabular column)");
+            return None;
         }
         if avg_fill.is_finite() && avg_fill < XY_COLUMN_MIN_FILL {
             *tabular = true;
-            reject!(
-                "N-column avg fill {avg_fill:.2} < {} (tabular)",
-                XY_COLUMN_MIN_FILL
-            );
+            return None;
         }
     }
     // Require the two peaks to together dominate the histogram — a real
@@ -4080,10 +4384,7 @@ fn xy_find_column_cut(
     let peak_sum: usize = peaks.iter().map(|(_, c)| *c).sum();
     let dominance = (peak_sum as f32) / (n_starts as f32);
     if dominance < XY_COLUMN_PEAK_DOMINANCE {
-        reject!(
-            "dominance {dominance:.2} < {} (peak_sum={peak_sum} line_starts={n_starts})",
-            XY_COLUMN_PEAK_DOMINANCE
-        );
+        return None;
     }
     // Require the peaks to be roughly balanced in size. A real multi-column
     // layout has comparable line counts in each column; a long-single-column
@@ -4099,11 +4400,7 @@ fn xy_find_column_cut(
         0.0
     };
     if balance < XY_COLUMN_PEAK_BALANCE_RATIO {
-        reject!(
-            "balance {balance:.2} < {} (min={smallest} max={largest} npeaks={})",
-            XY_COLUMN_PEAK_BALANCE_RATIO,
-            peaks.len()
-        );
+        return None;
     }
 
     // Cut at the leftmost gutter that clears `XY_COLUMN_MIN_GAP_FRACTION ×
@@ -4123,14 +4420,7 @@ fn xy_find_column_cut(
     }
     let li = match best {
         Some((_, li)) => li,
-        None => reject!(
-            "no gap >= {:.0} (min_gap_frac={} total_w={total_w:.0}); peak_xs=[{:.0},{:.0}] gap={:.0}",
-            min_gap,
-            XY_COLUMN_MIN_GAP_FRACTION,
-            peaks[0].0,
-            peaks[1].0,
-            peaks[1].0 - peaks[0].0
-        ),
+        None => return None,
     };
     // Place the cut at the actual gutter, not midway between peak centers.
     // Peaks mark column LEFT edges, so the center midpoint lands inside the
@@ -4170,7 +4460,7 @@ fn xy_find_column_cut(
     // off the items (some PDFs have content with negative x), fall back to
     // an item-relative midpoint check.
     if cut_x <= min_x + 1.0 || cut_x >= max_x - 1.0 {
-        reject!("cut_x {cut_x:.0} outside extent [{min_x:.0},{max_x:.0}]");
+        return None;
     }
     // High finite score so this beats every density cut but stays below
     // banner's infinity.
@@ -4210,6 +4500,57 @@ fn x_extent(items: &[ProjectedTextItem], idxs: &[usize]) -> (f32, f32) {
         hi = hi.max(it.x + it.width.max(0.0));
     }
     (lo, hi)
+}
+
+/// Horizontal cut that isolates lines crossing a vertical gutter at `gutter_x` (see
+/// `xy_cut_rec`). A band crosses when one of its items reaches at least three line heights past
+/// the gutter on both sides (a heading or float spanning the columns, not a line of the left
+/// column overhanging a misplaced gutter), and at most a third of the bands cross. Cuts above the first crossing band that has non-crossing bands
+/// above it; when the crossing bands only open the region, cuts below them.
+fn xy_find_crossing_line_cut(
+    items: &[ProjectedTextItem],
+    idxs: &[usize],
+    gutter_x: f32,
+    median_h: f32,
+) -> Option<CutCandidate> {
+    let mut sorted: Vec<usize> = idxs.to_vec();
+    sorted.sort_by(|&a, &b| items[a].item.y.total_cmp(&items[b].item.y));
+    let band_tol = (median_h * 0.5).max(2.0);
+    let reach = 3.0 * median_h.max(4.0);
+    // (y_min, y_max, crosses)
+    let mut bands: Vec<(f32, f32, bool)> = Vec::new();
+    for &i in &sorted {
+        let it = &items[i].item;
+        let (y0, y1) = (it.y, it.y + it.height.max(0.0));
+        let crosses = it.x < gutter_x - reach && it.x + it.width > gutter_x + reach;
+        match bands.last_mut() {
+            Some(last)
+                if y0 <= last.1 - band_tol || (y0 - (last.0 + last.1) * 0.5).abs() <= band_tol =>
+            {
+                last.0 = last.0.min(y0);
+                last.1 = last.1.max(y1);
+                last.2 |= crosses;
+            }
+            _ => bands.push((y0, y1, crosses)),
+        }
+    }
+    // Spanning lines are a minority of a region's lines; when most lines cross, the gutter is
+    // misplaced (inside a column), not crossed.
+    let crossing = bands.iter().filter(|b| b.2).count();
+    if bands.len() < 3 || crossing == 0 || crossing * 3 > bands.len() {
+        return None;
+    }
+    let between = |a: usize| CutCandidate {
+        axis: CutAxis::Horizontal,
+        position: (bands[a].1 + bands[a + 1].0) * 0.5,
+        score: f32::INFINITY,
+    };
+    let first = bands.iter().position(|b| b.2)?;
+    if first > 0 {
+        return Some(between(first - 1));
+    }
+    let last_opening = bands.iter().position(|b| !b.2)? - 1;
+    Some(between(last_opening))
 }
 
 fn xy_find_banner_cut(
@@ -4339,6 +4680,7 @@ fn xy_cut_rec(
     let banner = xy_find_banner_cut(items, &idxs, &bbox, median_h);
     let h = xy_find_best_cut(items, &idxs, &bbox, CutAxis::Horizontal, median_h, figures);
     let v = xy_find_best_cut(items, &idxs, &bbox, CutAxis::Vertical, median_h, figures);
+
     // Fallback column-start histogram. Only consulted when BOTH density
     // cuts returned None — those are the cases (wide-heading filled gutter,
     // figure-straddle layouts) where the column structure is real but the
@@ -4356,54 +4698,7 @@ fn xy_cut_rec(
     } else {
         None
     };
-    let debug_xy = std::env::var("LITEPARSE_DEBUG_XY").is_ok();
     let disable_vcut_minlines = std::env::var("LITEPARSE_DISABLE_VCUT_MINLINES").is_ok();
-    if debug_xy && depth == 0 && std::env::var("LITEPARSE_DEBUG_ITEMS").is_ok() {
-        for &i in &idxs {
-            let it = &items[i].item;
-            eprintln!(
-                "[xy item] x={:.1} w={:.1} y={:.1} h={:.1} text={:?}",
-                it.x,
-                it.width,
-                it.y,
-                it.height,
-                &it.text.chars().take(80).collect::<String>()
-            );
-        }
-    }
-    if debug_xy {
-        // Also probe what the column histogram WOULD return if we ran it
-        // unconditionally — this is the diagnostic that tells us whether
-        // reordering V/H/column priority would unlock more column splits.
-        let column_probe = column_full;
-        let pad = "  ".repeat(depth as usize);
-        let fmt = |c: &Option<CutCandidate>| {
-            c.as_ref()
-                .map(|c| format!("{:?}@{:.1}/{:.3}", c.axis, c.position, c.score))
-                .unwrap_or_else(|| "-".to_string())
-        };
-        let fmt_pos = |p: &Option<f32>| {
-            p.as_ref()
-                .map(|p| format!("{p:.1}"))
-                .unwrap_or_else(|| "-".to_string())
-        };
-        let (ex0, ex1) = x_extent(items, &idxs);
-        let lines = xy_distinct_lines(items, &idxs, median_h);
-        eprintln!(
-            "[xy d={depth}]{pad} bbox=({:.0},{:.0} {:.0}x{:.0}) items={} lines={} x_ext=[{ex0:.1},{ex1:.1}] banner={} h={} v={} col={} col_probe={}",
-            bbox.x,
-            bbox.y,
-            bbox.width,
-            bbox.height,
-            idxs.len(),
-            lines,
-            fmt(&banner),
-            fmt(&h),
-            fmt(&v),
-            fmt_pos(&column.as_ref().map(|c| c.position)),
-            fmt_pos(&column_probe.as_ref().map(|c| c.position)),
-        );
-    }
     // Build a priority-ordered candidate list.
     //
     // **Primary** is the cut chosen by the main resolution order
@@ -4425,6 +4720,17 @@ fn xy_cut_rec(
     if let Some(bc) = banner {
         candidates.push(bc);
     }
+    // A line that crosses the would-be gutter (a section heading, a spanning float) separates
+    // column runs; the gutter is the density valley's when there is one (nothing crosses it, so
+    // the check stays quiet), else the column histogram's, which crossing lines don't block.
+    // Cut above it before cutting columns, or the columns of every section join into one
+    // page-long column and a heading is sliced in two.
+    if !effective_tabular
+        && let Some(x) = v.as_ref().or(column_full.as_ref()).map(|c| c.position)
+        && let Some(hc) = xy_find_crossing_line_cut(items, &idxs, x, median_h)
+    {
+        candidates.push(hc);
+    }
     if let Some(cc) = column {
         candidates.push(cc);
     }
@@ -4436,20 +4742,7 @@ fn xy_cut_rec(
     // When the histogram fill gate classified this region as tabular, a
     // density V valley here is a table gutter, not a column boundary —
     // suppress it so the table reaches the table detectors row-major.
-    let v = if effective_tabular {
-        if debug_xy && v.is_some() {
-            let pad = "  ".repeat(depth as usize);
-            let reason = if region_tabular {
-                "region tabular"
-            } else {
-                "region tabular, inherited"
-            };
-            eprintln!("[xy d={depth}]{pad} -> SUPPRESS density V ({reason})");
-        }
-        None
-    } else {
-        v
-    };
+    let v = if effective_tabular { None } else { v };
     if prefer_h_over_v {
         if let Some(hc) = h {
             candidates.push(hc);
@@ -4477,13 +4770,6 @@ fn xy_cut_rec(
     }
 
     for cut in candidates {
-        if debug_xy {
-            let pad = "  ".repeat(depth as usize);
-            eprintln!(
-                "[xy d={depth}]{pad} -> TRY {:?}@{:.1}/{:.3}",
-                cut.axis, cut.position, cut.score
-            );
-        }
         let mut left: Vec<usize> = Vec::new();
         let mut right: Vec<usize> = Vec::new();
         // Column-histogram V-cuts (score = 1.0e9) split between two column
@@ -4564,15 +4850,6 @@ fn xy_cut_rec(
             const STRADDLE_PARTITION_FRACTION: f32 = 0.25;
             let partition_by_item = rows_total > 0
                 && (rows_straddle as f32) / (rows_total as f32) >= STRADDLE_PARTITION_FRACTION;
-            if debug_xy {
-                let pad = "  ".repeat(depth as usize);
-                eprintln!(
-                    "[xy d={depth}]{pad}    hist-v straddle={}/{} → partition_by_{}",
-                    rows_straddle,
-                    rows_total,
-                    if partition_by_item { "item" } else { "row" }
-                );
-            }
 
             if partition_by_item {
                 for &i in &idxs {
@@ -4622,19 +4899,7 @@ fn xy_cut_rec(
                 }
             }
         }
-        if debug_xy {
-            let pad = "  ".repeat(depth as usize);
-            eprintln!(
-                "[xy d={depth}]{pad}    partition: left={} right={}",
-                left.len(),
-                right.len()
-            );
-        }
         if left.is_empty() || right.is_empty() {
-            if debug_xy {
-                let pad = "  ".repeat(depth as usize);
-                eprintln!("[xy d={depth}]{pad}    -> degenerate, try next");
-            }
             continue;
         }
         let (left_bbox, right_bbox) = xy_split_bbox(&bbox, &cut);
@@ -4683,12 +4948,6 @@ fn xy_cut_rec(
                 })
             };
             if (lc < XY_MIN_LINES_PER_H_SIDE || rc < XY_MIN_LINES_PER_H_SIDE) && !spanning_rescue {
-                if debug_xy {
-                    let pad = "  ".repeat(depth as usize);
-                    eprintln!(
-                        "[xy d={depth}]{pad}    -> min-lines fail (lc={lc} rc={rc}), try next"
-                    );
-                }
                 continue;
             }
         }
@@ -4706,23 +4965,10 @@ fn xy_cut_rec(
             let lc = xy_distinct_lines(items, &left, median_h);
             let rc = xy_distinct_lines(items, &right, median_h);
             if lc < XY_MIN_LINES_PER_H_SIDE || rc < XY_MIN_LINES_PER_H_SIDE {
-                if debug_xy {
-                    let pad = "  ".repeat(depth as usize);
-                    eprintln!(
-                        "[xy d={depth}]{pad}    -> v-cut min-lines fail (lc={lc} rc={rc}), try next"
-                    );
-                }
                 continue;
             }
         }
 
-        if debug_xy {
-            let pad = "  ".repeat(depth as usize);
-            eprintln!(
-                "[xy d={depth}]{pad} -> COMMIT {:?}@{:.1}",
-                cut.axis, cut.position
-            );
-        }
         let child_inherited_tabular = effective_tabular && cut.axis == CutAxis::Horizontal;
         let left_region = xy_cut_rec(
             items,
@@ -4751,17 +4997,60 @@ fn xy_cut_rec(
         };
     }
 
-    if debug_xy {
-        let pad = "  ".repeat(depth as usize);
-        eprintln!("[xy d={depth}]{pad} -> LEAF (no valid cut)");
-    }
     Region {
         bbox,
         kind: RegionKind::Leaf { item_indices: idxs },
     }
 }
 
-/// Build the page's XY-cut region tree.
+/// Reserved path for footer lines outside the XY-cut tree. Normal paths contain
+/// child indices; `u16::MAX` marks a detached line while preserving every body
+/// path. Markdown classification recognizes this marker and emits the line last.
+pub(crate) const NUMERIC_FOOTER_PATH: &[u16] = &[u16::MAX];
+
+/// A footer is a centered one- to three-digit item below every other text item.
+/// Use original glyph geometry so grid snapping cannot change this decision.
+///
+/// The lower half limits the search to the page end. In the bottom tenth, the
+/// half-height gap only requires a distinct baseline. Above that band, require
+/// two smaller-glyph heights, leaving a blank line between body and footer.
+/// This stronger gap handles large blank bottom margins without detaching a
+/// nearby numeric table value. These fractions are conservative layout rules.
+fn isolated_numeric_footer(
+    items: &[ProjectedTextItem],
+    idx: usize,
+    page_width: f32,
+    page_height: f32,
+) -> bool {
+    let item = &items[idx];
+    let text = item.item.text.trim();
+    let center = item.orig_x + item.orig_width * 0.5;
+    if item.is_margin_line_number
+        || !(1..=3).contains(&text.len())
+        || !text.bytes().all(|b| b.is_ascii_digit())
+        || item.orig_y < page_height * 0.5
+        || center <= page_width * 0.5 - 5.0
+        || center >= page_width * 0.5 + 20.0
+    {
+        return false;
+    }
+    let gap_ratio = if item.orig_y < page_height * 0.9 {
+        2.0
+    } else {
+        0.5
+    };
+    items.iter().enumerate().all(|(other_idx, other)| {
+        other_idx == idx
+            || other.item.text.trim().is_empty()
+            || other.orig_y + item.orig_height.min(other.orig_height) * gap_ratio < item.orig_y
+    })
+}
+
+/// Build the page's XY-cut body region tree.
+///
+/// Exclude isolated footer numbers from both density/banner cuts and the root
+/// bounds. One extra bottom line can change which column split is accepted and
+/// alter reading order. Retain the original items for a detached footer line.
 ///
 /// `figures` is an optional set of figure-region bounding rectangles (from
 /// `figure_cluster::detect_figure_rects`); pass `&[]` to disable obstacle
@@ -4775,7 +5064,9 @@ pub(crate) fn xy_cut(
     let all: Vec<usize> = items
         .iter()
         .enumerate()
-        .filter(|(_, it)| !it.item.text.is_empty())
+        .filter(|(i, it)| {
+            !it.item.text.is_empty() && !isolated_numeric_footer(items, *i, page_width, page_height)
+        })
         .map(|(i, _)| i)
         .collect();
     if all.is_empty() {
@@ -4791,7 +5082,7 @@ pub(crate) fn xy_cut(
             },
         };
     }
-    let bbox = xy_root_bbox(items, page_width, page_height);
+    let bbox = xy_root_bbox(items, &all, page_width, page_height);
     let median_h = xy_median_line_height(items, &all);
     xy_cut_rec(items, all, bbox, 0, false, median_h, figures)
 }
@@ -4931,6 +5222,20 @@ pub(crate) fn build_projected_lines(
                 items,
                 &current,
                 path.clone(),
+                &heading_excl_figures,
+                page_has_native_text,
+            ));
+        }
+    }
+
+    // Reuse the original item to preserve its text and word boxes. Its detached
+    // path lets Markdown keep it outside global and cross-region table passes.
+    for idx in 0..items.len() {
+        if isolated_numeric_footer(items, idx, page_width, page_height) {
+            out.push(build_one_line(
+                items,
+                &[idx],
+                NUMERIC_FOOTER_PATH.to_vec(),
                 &heading_excl_figures,
                 page_has_native_text,
             ));
@@ -5245,6 +5550,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn equation_numbers_and_formula_fragments() {
+        assert!(is_equation_number("(22)"));
+        assert!(is_equation_number(" (3.14) "));
+        assert!(is_equation_number("(A.2)"));
+        assert!(!is_equation_number("(see above)"));
+        assert!(!is_equation_number("(a)"));
+        assert!(is_formula_fragment("0"));
+        assert!(is_formula_fragment(", B ="));
+        assert!(!is_formula_fragment("which defines the"));
+        assert!(!is_formula_fragment(" "));
+    }
+
+    #[test]
     fn compress_wide_spaces_preserves_utf8_text() {
         assert_eq!(
             compress_wide_spaces("売上高    1,234 Café  Größe", 4, 2),
@@ -5300,6 +5618,7 @@ mod tests {
     #[test]
     fn project_to_grid_handles_text_sparse_zero_width_items() {
         let page = Page {
+            ocr_deskew: None,
             page_number: 1,
             page_label: None,
             page_width: 612.0,
@@ -5319,7 +5638,7 @@ mod tests {
             projected_item("", 30.0, 0.0, 20.0),
         ];
 
-        let (_, text) = project_to_grid(&page, projection_boxes);
+        let (_, text) = project_to_grid(&page, projection_boxes, false);
 
         assert!(text.is_empty());
     }
@@ -5362,7 +5681,7 @@ mod tests {
             item_at(".7", 316.478, 149.76, 4.66, 8.42),
             item_at("2.3", 370.9, 149.76, 10.6, 8.42),
         ];
-        let lines = form_lines(&mut items, 10.0, 8.42, 612.0);
+        let lines = form_lines(&mut items, 10.0, 8.42, 612.0, 792.0, true);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].iter().any(|i| i.item.text == "7.7"));
         assert!(lines[0].iter().all(|i| !i.is_margin_line_number));
@@ -5379,7 +5698,7 @@ mod tests {
             item_at("estimates", 33.0, 100.0, 45.0, 10.0),
             item_at(".", 78.0, 101.0, 2.0, 9.0),
         ];
-        let lines = form_lines(&mut items, 10.0, 10.0, 612.0);
+        let lines = form_lines(&mut items, 10.0, 10.0, 612.0, 792.0, true);
         let texts: Vec<_> = lines[0].iter().map(|i| i.item.text.as_str()).collect();
         assert_eq!(texts, ["case estimates."]);
     }
@@ -5393,7 +5712,7 @@ mod tests {
             item_at("12", 310.0, 100.0, 8.0, 10.0),
             item_at("right column text", 330.0, 100.0, 230.0, 10.0),
         ];
-        let lines = form_lines(&mut items, 10.0, 10.0, 612.0);
+        let lines = form_lines(&mut items, 10.0, 10.0, 612.0, 792.0, true);
         let flagged: Vec<_> = lines
             .iter()
             .flatten()
@@ -5401,6 +5720,105 @@ mod tests {
             .map(|i| i.item.text.as_str())
             .collect();
         assert_eq!(flagged, vec!["12"]);
+    }
+
+    #[test]
+    fn lone_footer_number_survives_but_gutter_number_column_is_removed() {
+        for positions in [vec![760.0], vec![100.0, 120.0, 140.0]] {
+            let column = positions.len() >= 3;
+            let mut items = positions
+                .into_iter()
+                .map(|y| item_at("12", 310.0, y, 8.0, 10.0))
+                .collect();
+            let lines = form_lines(&mut items, 10.0, 10.0, 612.0, 792.0, true);
+            let mut projected: Vec<_> = lines.into_iter().flatten().collect();
+            assert!(
+                projected
+                    .iter()
+                    .all(|item| item.is_margin_line_number == column)
+            );
+            clean_projected_items(&mut projected, 612.0, 792.0);
+            if column {
+                assert!(projected.is_empty());
+            } else {
+                assert_eq!(projected.len(), 1);
+                assert_eq!(projected[0].item.text, "12");
+            }
+        }
+    }
+
+    #[test]
+    fn unrelated_centered_numbers_do_not_turn_a_footer_into_gutter_numbering() {
+        // Cover both aligned chart ticks and numbers spread across the gutter band.
+        for xs in [[310.0, 310.0], [299.0, 321.0]] {
+            let mut items = vec![
+                item_at("10", xs[0], 100.0, 8.0, 10.0),
+                item_at("20", xs[1], 120.0, 8.0, 10.0),
+                item_at("body text", 50.0, 600.0, 200.0, 10.0),
+                item_at("12", 310.0, 760.0, 8.0, 10.0),
+            ];
+            let lines = form_lines(&mut items, 10.0, 10.0, 612.0, 792.0, true);
+            let mut projected: Vec<_> = lines.into_iter().flatten().collect();
+            assert!(
+                !projected
+                    .iter()
+                    .find(|item| item.item.text == "12")
+                    .unwrap()
+                    .is_margin_line_number
+            );
+            clean_projected_items(&mut projected, 612.0, 792.0);
+            assert!(projected.iter().any(|item| item.item.text == "12"));
+        }
+    }
+
+    #[test]
+    fn ocr_gutter_filtering_keeps_its_footer_exception() {
+        let mut items = vec![
+            item_at("body text", 50.0, 100.0, 200.0, 10.0),
+            item_at("12", 310.0, 120.0, 8.0, 10.0),
+            item_at("34", 310.0, 760.0, 8.0, 10.0),
+        ];
+        for item in &mut items {
+            item.item.confidence = Some(0.4);
+        }
+        let lines = form_lines(&mut items, 10.0, 10.0, 612.0, 792.0, true);
+        let mut projected: Vec<_> = lines.into_iter().flatten().collect();
+        assert!(
+            projected
+                .iter()
+                .find(|item| item.item.text == "12")
+                .unwrap()
+                .is_margin_line_number
+        );
+        assert!(
+            !projected
+                .iter()
+                .find(|item| item.item.text == "34")
+                .unwrap()
+                .is_margin_line_number
+        );
+        clean_projected_items(&mut projected, 612.0, 792.0);
+        assert!(!projected.iter().any(|item| item.item.text == "12"));
+        assert!(projected.iter().any(|item| item.item.text == "34"));
+    }
+
+    #[test]
+    fn three_digit_footer_preserves_body_layout() {
+        let mut items = vec![item_at("body text", 50.0, 600.0, 200.0, 10.0)];
+        let (body, regions) = build_projected_lines(&items, 612.0, 792.0, &[]);
+        items.push(item_at("100", 300.0, 760.0, 18.0, 10.0));
+        assert!(!is_gutter_number_candidate(&items[1], 612.0));
+        let (lines, with_footer) = build_projected_lines(&items, 612.0, 792.0, &[]);
+        assert_eq!(
+            serde_json::to_value(regions).unwrap(),
+            serde_json::to_value(with_footer).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(body).unwrap(),
+            serde_json::to_value(&lines[..1]).unwrap()
+        );
+        assert_eq!(lines[1].text, "100");
+        assert_eq!(lines[1].region_path, NUMERIC_FOOTER_PATH);
     }
 
     #[test]
@@ -5432,6 +5850,56 @@ mod tests {
             }
             _ => panic!("expected a vertical split, got {:?}", region.kind),
         }
+    }
+
+    #[test]
+    fn footer_above_blank_bottom_margin_is_detached_but_table_value_is_not() {
+        let mut items = vec![
+            item_at("description", 50.0, 560.0, 200.0, 10.0),
+            item_at("67", 294.0, 605.0, 8.0, 10.0),
+        ];
+        let (lines, _) = build_projected_lines(&items, 595.0, 842.0, &[]);
+        assert_eq!(lines.last().unwrap().region_path, NUMERIC_FOOTER_PATH);
+        items[1].orig_y = 575.0;
+        items[1].item.y = 575.0;
+        let (lines, _) = build_projected_lines(&items, 595.0, 842.0, &[]);
+        assert!(lines.iter().all(|l| l.region_path != NUMERIC_FOOTER_PATH));
+    }
+
+    #[test]
+    fn isolated_footer_preserves_body_regions_and_lines() {
+        let mut items = Vec::new();
+        for row in 0..5 {
+            let y = 100.0 + row as f32 * 14.0;
+            items.push(item_at("left column", 50.0, y, 200.0, 10.0));
+            items.push(item_at("right column", 350.0, y, 200.0, 10.0));
+        }
+        let (body_lines, body_regions) = build_projected_lines(&items, 612.0, 792.0, &[]);
+        let mut footer_item = item_at("12", 304.0, 760.0, 8.0, 10.0);
+        footer_item.item.words.push(WordBox {
+            text: "12".into(),
+            x: 304.0,
+            y: 760.0,
+            width: 8.0,
+            height: 10.0,
+        });
+        items.push(footer_item);
+        let (lines, regions) = build_projected_lines(&items, 612.0, 792.0, &[]);
+        assert_eq!(
+            serde_json::to_value(regions).unwrap(),
+            serde_json::to_value(body_regions).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&lines[..body_lines.len()]).unwrap(),
+            serde_json::to_value(body_lines).unwrap()
+        );
+        let footer = lines.last().unwrap();
+        assert_eq!(footer.text, "12");
+        assert_eq!(footer.region_path, NUMERIC_FOOTER_PATH);
+        assert_eq!(
+            serde_json::to_value(&footer.spans[0]).unwrap(),
+            serde_json::to_value(&items.last().unwrap().item).unwrap()
+        );
     }
 
     #[test]
@@ -5689,7 +6157,7 @@ mod tests {
         }
 
         let all: Vec<usize> = (0..items.len()).collect();
-        let bbox = xy_root_bbox(&items, 612.0, 792.0);
+        let bbox = xy_root_bbox(&items, &all, 612.0, 792.0);
         let median_h = xy_median_line_height(&items, &all);
         let mut root_tabular = false;
         assert!(xy_find_column_cut(&items, &all, &bbox, median_h, &mut root_tabular).is_none());
@@ -5834,6 +6302,7 @@ mod tests {
     #[test]
     fn project_pages_to_grid_handles_page_with_no_text_items() {
         let pages = vec![Page {
+            ocr_deskew: None,
             page_number: 1,
             page_label: None,
             page_width: 612.0,
@@ -5860,6 +6329,7 @@ mod tests {
     fn project_pages_to_grid_unions_original_bbox_when_word_items_merge() {
         let y = 50.25;
         let pages = vec![Page {
+            ocr_deskew: None,
             page_number: 1,
             page_label: None,
             page_width: 612.0,
@@ -5912,6 +6382,7 @@ mod tests {
         // second item's `words` were silently dropped, truncating `words`.
         let y = 50.25;
         let pages = vec![Page {
+            ocr_deskew: None,
             page_number: 1,
             page_label: None,
             page_width: 612.0,
@@ -5972,6 +6443,7 @@ mod tests {
     #[test]
     fn project_pages_to_grid_unions_original_bbox_when_continuous_items_merge() {
         let pages = vec![Page {
+            ocr_deskew: None,
             page_number: 1,
             page_label: None,
             page_width: 612.0,
@@ -6008,13 +6480,239 @@ mod tests {
         let item = parsed[0]
             .text_items
             .iter()
-            .find(|item| item.text == "ab cd")
+            .find(|item| item.text == "abcd")
             .expect("merged continuous text item");
 
         assert!((item.x - 40.0).abs() < 0.001);
         assert!((item.y - 100.0).abs() < 0.001);
         assert!((item.width - 22.5).abs() < 0.01);
         assert!((item.height - 9.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn projection_joins_glyph_residuals_and_preserves_word_gaps() {
+        let mut page = Page {
+            page_number: 1,
+            page_width: 612.0,
+            page_height: 792.0,
+            ocr_deskew: None,
+            page_label: None,
+            content_bounds: None,
+            text_items: Vec::new(),
+            graphics: Vec::new(),
+            vector_graphics: None,
+            struct_nodes: Vec::new(),
+            image_refs: Vec::new(),
+            annotations: None,
+            form_fields: None,
+            structure_tree: None,
+        };
+        let mut x = 40.0;
+        for (text, width, gap) in [
+            ("F", 4.26848, 0.006),
+            ("inancials", 28.2, 1.95),
+            ("Sector", 20.4, 0.0),
+        ] {
+            page.text_items.push(TextItem {
+                text: text.into(),
+                x,
+                y: 100.0,
+                width,
+                height: 6.9975,
+                ..Default::default()
+            });
+            x += width + gap;
+        }
+        let parsed = project_pages_to_grid(vec![page]);
+        assert_eq!(
+            parsed[0].text.split_whitespace().collect::<Vec<_>>(),
+            ["Financials", "Sector"]
+        );
+    }
+
+    #[test]
+    fn font_scaled_gap_checks_preserve_word_spaces_and_kerning() {
+        for (left, right, height, width, gap, rotation, mono, expected) in [
+            ("word", "next", 12.75, 35.4, -0.222, 0.0, true, "word next"),
+            ("word", "next", 8.0, 15.885, 0.063, 10.0, false, "word next"),
+            (
+                "word",
+                "next",
+                6.745,
+                38.1856,
+                -0.0706,
+                12.0,
+                false,
+                "word next",
+            ),
+            ("r", "e", 6.9975, 2.4281, -0.0979, 0.0, false, "re"),
+            ("W", "ord", 6.9975, 6.602, -0.2537, 0.0, false, "Word"),
+            (
+                "acti viti",
+                "es",
+                16.0,
+                49.7824,
+                0.0960,
+                0.0,
+                false,
+                "acti vities",
+            ),
+            (
+                "Operati",
+                "ng",
+                27.0,
+                86.5485,
+                -0.2592,
+                0.0,
+                false,
+                "Operating",
+            ),
+        ] {
+            let mut items = vec![
+                item_at(left, 40.0, 100.0, width, height),
+                item_at(right, 40.0 + width + gap, 100.0, 20.0, height),
+            ];
+            for item in &mut items {
+                item.item.font_height = Some(height);
+                item.item.rotation = rotation;
+                if mono {
+                    item.item.font_name = Some("Courier".into());
+                }
+                item.item.width = item.item.width.round();
+                item.item.height = item.item.height.round();
+            }
+            let lines = form_lines(&mut items, 5.0, height, 500.0, 800.0, true);
+            let text: String = lines[0].iter().map(|p| p.item.text.as_str()).collect();
+            assert_eq!(text, expected);
+        }
+    }
+
+    #[test]
+    fn decimal_continuation_preserves_styled_text() {
+        let mut items = vec![
+            item_at("Reference", 10.0, 100.0, 29.8, 9.0),
+            item_at("doi.org/10", 40.2, 100.0, 39.8, 9.0),
+            item_at(".1234/example", 80.4, 100.0, 40.0, 9.0),
+        ];
+        items[1].item.underline = true;
+        items[2].item.underline = true;
+        for item in &mut items {
+            item.item.width = item.item.width.round();
+        }
+        let lines = form_lines(&mut items, 5.0, 9.0, 500.0, 800.0, true);
+        let merged = &lines[0][0].item;
+        assert!(merged.text.contains("doi.org/10.1234/example"));
+        let pieces: String = merged
+            .style_pieces
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect();
+        assert!(pieces.contains("doi.org/10.1234/example"));
+    }
+
+    #[test]
+    fn overlapping_ocr_detections_keep_the_following_label_separate() {
+        let mut items = vec![
+            item_at("b", 9.12218, 34.08, 5.2812614, 4.799999),
+            item_at("h", 9.12218, 34.56, 3.6008606, 3.8400002),
+            item_at("Label", 13.6832695, 33.36, 60.2544, 5.040001),
+        ];
+        for item in &mut items {
+            item.item.font_name = Some("OCR".into());
+            item.item.font_size = Some(item.item.height);
+            item.item.confidence = Some(0.98);
+            item.item.width = item.item.width.round();
+            item.item.height = item.item.height.round();
+        }
+        let lines = form_lines(&mut items, 5.0, 5.0, 500.0, 800.0, true);
+        let text: Vec<_> = lines
+            .iter()
+            .flatten()
+            .map(|item| item.item.text.as_str())
+            .collect();
+        assert_eq!(text, ["bh Label"]);
+    }
+
+    #[test]
+    fn ocr_and_mixed_pairs_keep_rounded_gaps_in_both_merge_checks() {
+        for confidences in [
+            (Some(0.98), Some(0.98)),
+            (Some(0.98), None),
+            (None, Some(0.98)),
+        ] {
+            let mut items = vec![
+                item_at("first", 40.0, 100.0, 10.4, 9.0),
+                item_at("second", 50.2, 100.0, 12.3, 9.0),
+            ];
+            items[0].item.confidence = confidences.0;
+            items[1].item.confidence = confidences.1;
+            for item in &mut items {
+                item.item.width = item.item.width.round();
+            }
+            let lines = form_lines(&mut items, 5.0, 9.0, 500.0, 800.0, true);
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0].len(), 1);
+            assert_eq!(lines[0][0].item.text, "first second");
+        }
+    }
+
+    #[test]
+    fn original_gap_does_not_silently_join_scripts_or_mismatched_native_runs() {
+        for case in 0..6 {
+            let mut items = vec![
+                item_at("word", 40.0, 100.0, 10.2, 9.0),
+                item_at("a", 50.2, 100.0, 3.3, 9.0),
+            ];
+            let marker = &mut items[1].item;
+            match case {
+                0 => marker.script_geom = Some((98.0, 6.0)),
+                1 => marker.sup = true,
+                2 => marker.sub = true,
+                3 => marker.font_size = Some(6.0),
+                4 => marker.font_height = Some(6.0),
+                _ => {
+                    marker.y += 0.2;
+                    items[1].orig_y += 0.2;
+                }
+            }
+            for item in &mut items {
+                item.item.width = item.item.width.round();
+                item.item.height = item.item.height.round();
+            }
+            let lines = form_lines(&mut items, 5.0, 9.0, 500.0, 800.0, true);
+            let text: Vec<_> = lines
+                .iter()
+                .flatten()
+                .map(|p| p.item.text.as_str())
+                .collect();
+            assert_eq!(text, ["word a"], "case {case}");
+        }
+    }
+
+    #[test]
+    fn tied_rotated_groups_follow_spatial_then_input_order() {
+        // Both rotations have top and bottom clusters at the same x.
+        // Clusters at the same y retain the order of their first input item.
+        let mut items = Vec::new();
+        for (text, y, rotation) in [
+            ("bottom-first", 300.0, 90.0),
+            ("top-first", 20.0, 270.0),
+            ("top-second", 20.0, 90.0),
+            ("bottom-second", 300.0, 270.0),
+        ] {
+            let mut item = item_at(text, 500.0, y, 5.0, 50.0);
+            item.item.rotation = rotation;
+            items.push(item);
+        }
+
+        handle_rotation_reading_order(&mut items, 100.0);
+        items.sort_by(|a, b| a.item.y.total_cmp(&b.item.y));
+
+        let order: Vec<_> = items.iter().map(|p| p.item.text.as_str()).collect();
+        assert_eq!(
+            order,
+            ["top-first", "top-second", "bottom-first", "bottom-second"]
+        );
     }
 
     #[test]

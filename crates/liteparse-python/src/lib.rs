@@ -1240,6 +1240,10 @@ struct PyLiteParseConfig {
     #[pyo3(get)]
     ocr_server_headers: Option<HashMap<String, String>>,
     #[pyo3(get)]
+    ocr_request_fields: HashMap<String, String>,
+    #[pyo3(get)]
+    ocr_page_request_fields: HashMap<u32, HashMap<String, String>>,
+    #[pyo3(get)]
     tessdata_path: Option<String>,
     #[pyo3(get)]
     max_pages: usize,
@@ -1268,6 +1272,8 @@ struct PyLiteParseConfig {
     #[pyo3(get)]
     keep_headers_footers: bool,
     #[pyo3(get)]
+    keep_clipped_text: bool,
+    #[pyo3(get)]
     extract_annotations: bool,
     #[pyo3(get)]
     extract_form_fields: bool,
@@ -1287,6 +1293,8 @@ struct PyLiteParseConfig {
     render_form_fields: bool,
     #[pyo3(get)]
     ocr_failure_fatal: bool,
+    #[pyo3(get)]
+    ocr_despeckle_scans: bool,
     #[pyo3(get)]
     ocr_hedge_delays_ms: Vec<u64>,
     #[pyo3(get)]
@@ -1330,6 +1338,8 @@ impl PyLiteParseConfig {
             } else {
                 Some(cfg.ocr_server_headers.iter().cloned().collect())
             },
+            ocr_request_fields: cfg.ocr_request_fields.clone(),
+            ocr_page_request_fields: cfg.ocr_page_request_fields.clone(),
             tessdata_path: cfg.tessdata_path.clone(),
             max_pages: cfg.max_pages,
             target_pages: cfg.target_pages.clone(),
@@ -1352,6 +1362,7 @@ impl PyLiteParseConfig {
             },
             extract_links: cfg.extract_links,
             keep_headers_footers: cfg.keep_headers_footers,
+            keep_clipped_text: cfg.keep_clipped_text,
             extract_annotations: cfg.extract_annotations,
             extract_form_fields: cfg.extract_form_fields,
             extract_structure_tree: cfg.extract_structure_tree,
@@ -1362,6 +1373,7 @@ impl PyLiteParseConfig {
             detect_screenshot_rects: cfg.detect_screenshot_rects,
             render_form_fields: cfg.render_form_fields,
             ocr_failure_fatal: cfg.ocr_failure_fatal,
+            ocr_despeckle_scans: cfg.ocr_despeckle_scans,
             ocr_hedge_delays_ms: cfg.ocr_hedge_delays_ms.clone(),
             emit_word_boxes: cfg.emit_word_boxes,
             crop_box: cfg
@@ -1478,6 +1490,8 @@ impl LiteParse {
         ocr_enabled = None,
         ocr_server_url = None,
         ocr_server_headers = None,
+        ocr_request_fields = None,
+        ocr_page_request_fields = None,
         tessdata_path = None,
         max_pages = None,
         target_pages = None,
@@ -1494,6 +1508,7 @@ impl LiteParse {
         image_output_dir = None,
         extract_links = None,
         keep_headers_footers = None,
+        keep_clipped_text = None,
         extract_annotations = None,
         extract_form_fields = None,
         extract_structure_tree = None,
@@ -1504,6 +1519,7 @@ impl LiteParse {
         detect_screenshot_rects = None,
         render_form_fields = None,
         ocr_failure_fatal = None,
+        ocr_despeckle_scans = None,
         ocr_hedge_delays_ms = None,
         emit_word_boxes = None,
         extract_text_metadata = None,
@@ -1518,6 +1534,8 @@ impl LiteParse {
         ocr_enabled: Option<bool>,
         ocr_server_url: Option<String>,
         ocr_server_headers: Option<HashMap<String, String>>,
+        ocr_request_fields: Option<HashMap<String, String>>,
+        ocr_page_request_fields: Option<HashMap<u32, HashMap<String, String>>>,
         tessdata_path: Option<String>,
         max_pages: Option<usize>,
         target_pages: Option<String>,
@@ -1534,6 +1552,7 @@ impl LiteParse {
         image_output_dir: Option<String>,
         extract_links: Option<bool>,
         keep_headers_footers: Option<bool>,
+        keep_clipped_text: Option<bool>,
         extract_annotations: Option<bool>,
         extract_form_fields: Option<bool>,
         extract_structure_tree: Option<bool>,
@@ -1544,6 +1563,7 @@ impl LiteParse {
         detect_screenshot_rects: Option<bool>,
         render_form_fields: Option<bool>,
         ocr_failure_fatal: Option<bool>,
+        ocr_despeckle_scans: Option<bool>,
         ocr_hedge_delays_ms: Option<Vec<u64>>,
         emit_word_boxes: Option<bool>,
         extract_text_metadata: Option<bool>,
@@ -1565,6 +1585,12 @@ impl LiteParse {
         }
         if let Some(v) = ocr_server_headers {
             cfg.ocr_server_headers = v.into_iter().collect();
+        }
+        if let Some(v) = ocr_request_fields {
+            cfg.ocr_request_fields = v;
+        }
+        if let Some(v) = ocr_page_request_fields {
+            cfg.ocr_page_request_fields = v;
         }
         if let Some(v) = tessdata_path {
             cfg.tessdata_path = Some(v);
@@ -1618,6 +1644,9 @@ impl LiteParse {
         if let Some(v) = keep_headers_footers {
             cfg.keep_headers_footers = v;
         }
+        if let Some(v) = keep_clipped_text {
+            cfg.keep_clipped_text = v;
+        }
         if let Some(v) = extract_annotations {
             cfg.extract_annotations = v;
         }
@@ -1647,6 +1676,9 @@ impl LiteParse {
         }
         if let Some(v) = ocr_failure_fatal {
             cfg.ocr_failure_fatal = v;
+        }
+        if let Some(v) = ocr_despeckle_scans {
+            cfg.ocr_despeckle_scans = v;
         }
         if let Some(v) = ocr_hedge_delays_ms {
             cfg.ocr_hedge_delays_ms = v;

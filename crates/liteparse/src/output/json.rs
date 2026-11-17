@@ -263,6 +263,7 @@ mod tests {
             form_fields: None,
             structure_tree: None,
             blocks: None,
+            ocr_deskew: None,
         }
     }
 

@@ -275,6 +275,326 @@ impl PositionedBlock {
     }
 }
 
+/// Rejoin a paragraph that a figure cut in two. Figures are placed by their top edge, so one set
+/// beside a paragraph lands between two of its lines ("... including ![](img) glasses, ...").
+/// When a paragraph is followed by figures and then a paragraph that continues it (the first
+/// does not end a sentence, the second starts lowercase, both share the paragraph style), the
+/// halves join (de-hyphenated) and the figures follow the joined paragraph.
+pub fn rejoin_paragraphs_around_figures(blocks: Vec<PositionedBlock>) -> Vec<PositionedBlock> {
+    let mut out: Vec<PositionedBlock> = Vec::with_capacity(blocks.len());
+    let mut it = blocks.into_iter().peekable();
+    while let Some(pb) = it.next() {
+        let Block::Paragraph { text, bold, italic } = pb.block else {
+            out.push(pb);
+            continue;
+        };
+        let (mut text, mut bbox) = (text, pb.bbox);
+        let mut held: Vec<PositionedBlock> = Vec::new();
+        loop {
+            // figures directly after this paragraph
+            let mut figs: Vec<PositionedBlock> = Vec::new();
+            while it
+                .peek()
+                .is_some_and(|b| matches!(b.block, Block::Figure { .. }))
+            {
+                figs.push(it.next().unwrap());
+            }
+            let continues = !figs.is_empty()
+                && !ends_sentence(&text)
+                && it.peek().is_some_and(|b| match &b.block {
+                    Block::Paragraph {
+                        text: t,
+                        bold: b2,
+                        italic: i2,
+                    } => *b2 == bold && *i2 == italic && starts_continuation(t),
+                    _ => false,
+                });
+            if !continues {
+                held.extend(figs);
+                break;
+            }
+            let next = it.next().unwrap();
+            if let Block::Paragraph { text: t, .. } = next.block {
+                let raw = super::paragraphs::collapse_whitespace(&t);
+                super::inline::append_inline_continuation(&mut text, &raw, &t);
+            }
+            if let Some(r) = &next.bbox {
+                Rect::extend(&mut bbox, r);
+            }
+            held.extend(figs);
+        }
+        out.push(PositionedBlock {
+            block: Block::Paragraph { text, bold, italic },
+            bbox,
+        });
+        out.extend(held);
+    }
+    out
+}
+
+fn ends_sentence(text: &str) -> bool {
+    let t = text
+        .trim_end()
+        .trim_end_matches(['*', '_', '~', '`', ')', '"', '\'', '”', '’', ']']);
+    t.ends_with(['.', '!', '?', ':', ';']) || t.is_empty()
+}
+
+fn starts_continuation(text: &str) -> bool {
+    text.trim_start()
+        .trim_start_matches(['*', '_', '~'])
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_lowercase())
+}
+
+/// Split tables whose rows repeat an earlier column-header row: several tables with the same
+/// columns, stacked (rate tables per scenario, one schedule per year), that table detection read
+/// as one. A header-like row (three or more filled cells, at most a third of them numbers) that
+/// repeats one of the current table's first three rows starts a new table, taking with it a
+/// one-cell title row just above it ("Proposed Base Rate"). Tables set side by side with the
+/// same columns split at their shared empty gutter column ([`side_by_side_gutter`]).
+/// ParseBench v1 tables 65.6 -> 66.8; OPB, odl unchanged; ParseBench v2 tables 63.8 -> 63.7 core,
+/// 55.3 -> 55.5 full.
+pub fn split_repeated_header_tables(blocks: Vec<PositionedBlock>) -> Vec<PositionedBlock> {
+    let mut out = Vec::with_capacity(blocks.len());
+    for pb in blocks {
+        match pb.block {
+            Block::Table { header, rows } => {
+                let mut all: Vec<Vec<Cell>> = header.into_iter().collect();
+                let had_header = !all.is_empty();
+                all.extend(rows);
+                // side by side first: each half is then checked for stacked repeats
+                if let Some(gutter) = side_by_side_gutter(&all) {
+                    let (mut left, mut right): (Vec<Vec<Cell>>, Vec<Vec<Cell>>) =
+                        (Vec::new(), Vec::new());
+                    for mut r in all {
+                        r.resize(r.len().max(gutter + 1), Cell::from(""));
+                        let tail = r.split_off(gutter + 1);
+                        r.truncate(gutter);
+                        left.push(r);
+                        right.push(tail);
+                    }
+                    for part in [left, right] {
+                        let bbox =
+                            union_cells(part.iter().flatten().filter_map(|c| c.bbox.as_ref()))
+                                .or(pb.bbox.clone());
+                        let mut it = part.into_iter();
+                        let header = if had_header { it.next() } else { None };
+                        out.extend(split_repeated_header_tables(vec![PositionedBlock {
+                            block: Block::Table {
+                                header,
+                                rows: it.collect(),
+                            },
+                            bbox,
+                        }]));
+                    }
+                    continue;
+                }
+                let texts: Vec<Vec<&str>> = all
+                    .iter()
+                    .map(|r| r.iter().map(|c| c.as_str()).collect())
+                    .collect();
+                let cuts = repeated_header_cuts(&texts, &vec![false; all.len()]);
+                if cuts.is_empty() {
+                    let mut it = all.into_iter();
+                    let header = if had_header { it.next() } else { None };
+                    out.push(PositionedBlock {
+                        block: Block::Table {
+                            header,
+                            rows: it.collect(),
+                        },
+                        bbox: pb.bbox,
+                    });
+                    continue;
+                }
+                let mut start = 0;
+                for (k, end) in cuts.iter().copied().chain([all.len()]).enumerate() {
+                    let seg: Vec<Vec<Cell>> = all[start..end].to_vec();
+                    let bbox = union_cells(seg.iter().flatten().filter_map(|c| c.bbox.as_ref()))
+                        .or(pb.bbox.clone());
+                    let mut it = seg.into_iter();
+                    let header = if k > 0 || had_header { it.next() } else { None };
+                    out.push(PositionedBlock {
+                        block: Block::Table {
+                            header,
+                            rows: it.collect(),
+                        },
+                        bbox,
+                    });
+                    start = end;
+                }
+            }
+            Block::MergedTable { rows, header_rows } => {
+                // a cut may not fall inside a row span
+                let mut spanned = vec![false; rows.len()];
+                for (r, row) in rows.iter().enumerate() {
+                    for c in row {
+                        let end = (r + c.rowspan.max(1) as usize).min(rows.len());
+                        for s in spanned.iter_mut().take(end).skip(r + 1) {
+                            *s = true;
+                        }
+                    }
+                }
+                let texts: Vec<Vec<&str>> = rows
+                    .iter()
+                    .map(|r| r.iter().map(|c| c.text.as_str()).collect())
+                    .collect();
+                let cuts = repeated_header_cuts(&texts, &spanned);
+                if cuts.is_empty() {
+                    out.push(PositionedBlock {
+                        block: Block::MergedTable { rows, header_rows },
+                        bbox: pb.bbox,
+                    });
+                    continue;
+                }
+                let mut start = 0;
+                for (k, end) in cuts.iter().copied().chain([rows.len()]).enumerate() {
+                    let seg: Vec<Vec<SpanCell>> = rows[start..end].to_vec();
+                    let bbox = union_cells(seg.iter().flatten().filter_map(|c| c.bbox.as_ref()))
+                        .or(pb.bbox.clone());
+                    // later parts: their title row and repeated header row head the part
+                    let hr = if k == 0 {
+                        header_rows.min(seg.len())
+                    } else {
+                        (end - start).min(
+                            if seg
+                                .first()
+                                .is_some_and(|r| nonempty(r.iter().map(|c| c.text.as_str())) == 1)
+                            {
+                                2
+                            } else {
+                                1
+                            },
+                        )
+                    };
+                    out.push(PositionedBlock {
+                        block: Block::MergedTable {
+                            rows: seg,
+                            header_rows: hr,
+                        },
+                        bbox,
+                    });
+                    start = end;
+                }
+            }
+            block => out.push(PositionedBlock {
+                block,
+                bbox: pb.bbox,
+            }),
+        }
+    }
+    out
+}
+
+/// A column empty in every row that separates two tables set side by side: each side keeps at
+/// least two columns and the sides' first rows share at least half of the smaller side's
+/// non-empty header cells (the same columns repeated), so a spacer column inside one table
+/// (empty between a currency sign and its figures) is never a cut.
+fn side_by_side_gutter(rows: &[Vec<Cell>]) -> Option<usize> {
+    let width = rows.iter().map(|r| r.len()).max()?;
+    let empty = |c: usize| {
+        rows.iter()
+            .all(|r| r.get(c).is_none_or(|x| x.as_str().trim().is_empty()))
+    };
+    let norm = |s: &str| {
+        s.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    let head = rows.first()?;
+    (2..width.saturating_sub(2)).find(|&g| {
+        if !empty(g) || (0..g).all(empty) || (g + 1..width).all(empty) {
+            return false;
+        }
+        let left: Vec<String> = head
+            .iter()
+            .take(g)
+            .map(|c| norm(c.as_str()))
+            .filter(|s| !s.is_empty())
+            .collect();
+        let right: Vec<String> = head
+            .iter()
+            .skip(g + 1)
+            .map(|c| norm(c.as_str()))
+            .filter(|s| !s.is_empty())
+            .collect();
+        let shared = right.iter().filter(|s| left.contains(s)).count();
+        left.len() >= 2 && right.len() >= 2 && shared * 2 >= left.len().min(right.len())
+    })
+}
+
+fn nonempty<'a>(cells: impl Iterator<Item = &'a str>) -> usize {
+    cells.filter(|c| !c.trim().is_empty()).count()
+}
+
+/// Row indices where a new table starts (see [`split_repeated_header_tables`]); a row with
+/// `blocked[i]` (inside a row span) is never a cut.
+fn repeated_header_cuts(rows: &[Vec<&str>], blocked: &[bool]) -> Vec<usize> {
+    // a header row: three or more filled cells, mostly words (a repeated data row such as a
+    // regression table's reference category, "Non-snacker | 1.00 | 1.00", is no header)
+    let numeric = |c: &str| {
+        let c = c.trim();
+        !c.is_empty()
+            && c.chars().any(|ch| ch.is_ascii_digit())
+            && c.chars()
+                .all(|ch| ch.is_ascii_digit() || " .,%$()-–+*/".contains(ch))
+    };
+    let key = |r: &[&str]| -> Option<String> {
+        let filled = nonempty(r.iter().copied());
+        let nums = r.iter().filter(|c| numeric(c)).count();
+        (filled >= 3 && nums * 3 <= filled).then(|| {
+            r.iter()
+                .map(|c| {
+                    c.split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .to_lowercase()
+                })
+                .collect::<Vec<_>>()
+                .join("\u{1f}")
+        })
+    };
+    let mut cuts = Vec::new();
+    let mut seg_start = 0;
+    for i in 1..rows.len() {
+        let Some(k) = key(&rows[i]) else { continue };
+        // the earlier copy heads the current table (its first three rows)
+        if !(seg_start..i.min(seg_start + 3)).any(|j| key(&rows[j]).as_deref() == Some(k.as_str()))
+        {
+            continue;
+        }
+        // the title row above moves with the repeated header
+        let cut = if i - 1 > seg_start && nonempty(rows[i - 1].iter().copied()) == 1 {
+            i - 1
+        } else {
+            i
+        };
+        if cut > seg_start && !blocked[cut] {
+            cuts.push(cut);
+            seg_start = cut;
+        }
+    }
+    cuts
+}
+
+fn union_cells<'a>(rects: impl Iterator<Item = &'a Rect>) -> Option<Rect> {
+    let mut b: Option<(f32, f32, f32, f32)> = None;
+    for r in rects {
+        let (x0, y0, x1, y1) = (r.x, r.y, r.x + r.width, r.y + r.height);
+        b = Some(match b {
+            None => (x0, y0, x1, y1),
+            Some((a, c, d, e)) => (a.min(x0), c.min(y0), d.max(x1), e.max(y1)),
+        });
+    }
+    b.map(|(x0, y0, x1, y1)| Rect {
+        x: x0,
+        y: y0,
+        width: x1 - x0,
+        height: y1 - y0,
+    })
+}
+
 /// Heal words hyphenated across a soft line wrap that the classifier split into
 /// two *separate* paragraph blocks: `…they dis-` ‖ `lodged…`. When a plain
 /// paragraph ends with `<letter>-` and the next is a plain paragraph starting
@@ -661,6 +981,131 @@ mod tests {
         let s = render(blocks);
         assert!(s.starts_with("~~~\n"));
         assert!(s.ends_with("~~~"));
+    }
+
+    fn grid(rows: &[&[&str]]) -> PositionedBlock {
+        let mut it = rows
+            .iter()
+            .map(|r| r.iter().map(|c| Cell::from(*c)).collect::<Vec<_>>());
+        let header = it.next();
+        PositionedBlock::new(
+            Block::Table {
+                header,
+                rows: it.collect(),
+            },
+            None,
+        )
+    }
+
+    fn table_count(blocks: &[PositionedBlock]) -> usize {
+        blocks
+            .iter()
+            .filter(|b| matches!(b.block, Block::Table { .. }))
+            .count()
+    }
+
+    fn para(text: &str) -> PositionedBlock {
+        PositionedBlock::new(
+            Block::Paragraph {
+                text: text.into(),
+                bold: false,
+                italic: false,
+            },
+            None,
+        )
+    }
+
+    fn fig(id: &str) -> PositionedBlock {
+        PositionedBlock::new(
+            Block::Figure {
+                id: id.into(),
+                format: "png".into(),
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn figure_inside_a_sentence_moves_after_the_paragraph() {
+        let out = rejoin_paragraphs_around_figures(vec![
+            para("Add the ability to engrave items, including"),
+            fig("a"),
+            fig("b"),
+            para("glasses, bottles, and more."),
+        ]);
+        assert_eq!(out.len(), 3);
+        let Block::Paragraph { text, .. } = &out[0].block else {
+            unreachable!()
+        };
+        assert_eq!(
+            text,
+            "Add the ability to engrave items, including glasses, bottles, and more."
+        );
+        assert!(
+            matches!(out[1].block, Block::Figure { .. })
+                && matches!(out[2].block, Block::Figure { .. })
+        );
+        // between complete sentences (or before a capitalised start) the figure stays put
+        let kept = rejoin_paragraphs_around_figures(vec![
+            para("One sentence."),
+            fig("a"),
+            para("next one."),
+        ]);
+        assert_eq!(kept.len(), 3);
+        let kept = rejoin_paragraphs_around_figures(vec![
+            para("A list of"),
+            fig("a"),
+            para("New section"),
+        ]);
+        assert_eq!(kept.len(), 3);
+    }
+
+    #[test]
+    fn repeated_header_row_starts_a_new_table() {
+        let b = grid(&[
+            &["", "Current Base Rate", "", ""],
+            &["CA", "PPO 1500", "PPO 2500", "HDHP 3000"],
+            &["Block A", "254.96", "207.94", "173.76"],
+            &["", "Proposed Base Rate", "", ""],
+            &["CA", "PPO 1500", "PPO 2500", "HDHP 3000"],
+            &["Block A", "284.28", "231.85", "193.74"],
+        ]);
+        let out = split_repeated_header_tables(vec![b]);
+        assert_eq!(table_count(&out), 2);
+        let Block::Table { header, rows } = &out[1].block else {
+            unreachable!()
+        };
+        assert_eq!(header.as_ref().unwrap()[1].as_str(), "Proposed Base Rate");
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn repeated_data_row_is_not_a_header() {
+        // a regression table's reference category repeats in every group: one table
+        let b = grid(&[
+            &["", "OR", "95% CI", "OR"],
+            &["Non-snacker", "1.00", "", "1.00"],
+            &["Low snacker", "0.68", "0.44-1.05", "0.80"],
+            &["Non-snacker", "1.00", "", "1.00"],
+            &["Low snacker", "0.96", "0.70-1.30", "0.36"],
+        ]);
+        assert_eq!(table_count(&split_repeated_header_tables(vec![b])), 1);
+    }
+
+    #[test]
+    fn side_by_side_tables_split_at_their_gutter() {
+        let b = grid(&[
+            &["Tier", "Type", "Rate", "", "Tier", "Type", "Rate"],
+            &["001", "AN", "1.000", "", "001", "AN", "1.000"],
+            &["001", "AN", "0.170", "", "001", "AN", "0.210"],
+        ]);
+        assert_eq!(table_count(&split_repeated_header_tables(vec![b])), 2);
+        // an empty spacer column inside one table (different headers either side) stays
+        let c = grid(&[
+            &["Item", "2024", "", "2023", "Change"],
+            &["Revenue", "10", "", "9", "1"],
+        ]);
+        assert_eq!(table_count(&split_repeated_header_tables(vec![c])), 1);
     }
 
     #[test]

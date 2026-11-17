@@ -329,6 +329,8 @@ impl LiteParse {
                 extract_annotations: self.config.extract_annotations,
                 extract_form_fields: self.config.extract_form_fields,
                 extract_structure_tree: self.config.extract_structure_tree,
+                split_scripts: self.style_runs(),
+                keep_clipped_text: self.config.keep_clipped_text,
             },
         }
     }
@@ -359,11 +361,16 @@ impl LiteParse {
             // by free slots and ignores this field.
             max_rasters: self.config.num_workers.max(1),
             dpi: self.config.dpi,
+            page_images: self.config.ocr_page_images.clone(),
+            max_long_edge: None,
             grayscale,
             render_form_fields: self.config.render_form_fields,
             continue_on_page_error: self.config.continue_on_page_error,
             reflatten_pages,
             selection: None,
+            despeckle_scans: self.config.ocr_despeckle_scans,
+            request_fields: self.config.ocr_request_fields.clone(),
+            page_request_fields: self.config.ocr_page_request_fields.clone(),
         }
     }
 
@@ -493,6 +500,7 @@ impl LiteParse {
                     glyph_resolver: self.glyph_resolver.as_deref(),
                     output: stages::ExtractionOutputOptions {
                         continue_on_page_error: self.config.continue_on_page_error,
+                        keep_clipped_text: self.config.keep_clipped_text,
                         ..Default::default()
                     },
                 },
@@ -849,7 +857,7 @@ impl LiteParse {
         stages::apply_content_filters(&mut pages, &self.content_filters());
 
         // Grid projection
-        let mut parsed_pages = stages::project(pages);
+        let mut parsed_pages = self.project(pages);
 
         // Attach per-page complexity signals, including the layout signals
         // that need the projected page (same as `is_complex()` reports).
@@ -888,6 +896,8 @@ impl LiteParse {
         if self.config.output_format == crate::config::OutputFormat::Markdown {
             stages::canonicalize_image_refs(&mut parsed_pages, &mut full_text, &images);
         }
+        // Last geometry stage: projection and layout ran on upright OCR items.
+        stages::rotate_back_ocr_deskew(&mut parsed_pages);
 
         let total = web_time::Instant::now().duration_since(t0).as_secs_f64() * 1000.0;
         log(&format!("[liteparse] total: {:.1}ms", total));
@@ -924,9 +934,26 @@ impl LiteParse {
     /// configured output formatter, so it touches neither PDFium nor OCR and
     /// is fully synchronous. Used when an external extractor (e.g. with its
     /// own font-recovery pipeline) owns text extraction.
+    /// Markdown output and layout blocks keep emphasis and super/subscript runs apart; plain
+    /// text and JSON keep such runs inside their word, as the text grid was always built.
+    /// Blocks follow markdown so `extract_blocks` reports the same blocks under every format.
+    fn style_runs(&self) -> bool {
+        self.config.output_format == crate::config::OutputFormat::Markdown
+            || self.config.extract_blocks
+    }
+
+    /// Grid projection (see [`Self::style_runs`]).
+    fn project(&self, pages: Vec<Page>) -> Vec<ParsedPage> {
+        if self.style_runs() {
+            stages::project_for_markdown(pages)
+        } else {
+            stages::project(pages)
+        }
+    }
+
     pub fn parse_from_pages(&self, pages: Vec<Page>, outline: Vec<OutlineTarget>) -> ParseResult {
         let total_pages = pages.len().min(u32::MAX as usize) as u32;
-        let mut parsed_pages = stages::project(pages);
+        let mut parsed_pages = self.project(pages);
 
         let full_text = if let Some(md) = apply_layout(self, &mut parsed_pages, &outline) {
             md
@@ -1018,7 +1045,7 @@ impl LiteParse {
         let all_blocks = if page_filtered { None } else { all_blocks };
 
         let markdown_out = self.config.output_format == crate::config::OutputFormat::Markdown;
-        let mut parsed_pages = stages::project(pages);
+        let mut parsed_pages = self.project(pages);
         for ((page, blocks), stats) in parsed_pages.iter_mut().zip(&page_blocks).zip(page_stats) {
             if markdown_out {
                 page.markdown = stages::render_blocks(blocks);
@@ -1237,6 +1264,7 @@ mod tests {
 
     fn page_with_text_metadata() -> Page {
         Page {
+            ocr_deskew: None,
             page_number: 1,
             page_label: None,
             page_width: 100.0,
@@ -1268,6 +1296,98 @@ mod tests {
             annotations: None,
             form_fields: None,
             structure_tree: None,
+        }
+    }
+
+    /// On a deskewed scan, measured word boxes without quads come back, after
+    /// projection and the rotate-back, as the rects the OCR engine measured.
+    #[test]
+    fn deskewed_ocr_word_boxes_come_back_as_measured() {
+        use crate::ocr::{OcrResult, OcrWord};
+        use crate::ocr_merge::{PageOcrOutcome, merge_ocr_results};
+        // Pixels `a..b` along a 30 px tall line from `(x, y)`, tilted 5° (y down).
+        let (sin, cos) = 5f32.to_radians().sin_cos();
+        let quad = |x: f32, y: f32, a: f32, b: f32| {
+            [(a, 0.0), (b, 0.0), (b, 30.0), (a, 30.0)]
+                .map(|(u, v)| [x + u * cos - v * sin, y + u * sin + v * cos])
+        };
+        let bounds = |q: [[f32; 2]; 4]| {
+            let xs = q.map(|p| p[0]);
+            let ys = q.map(|p| p[1]);
+            let min = |v: [f32; 4]| v.into_iter().fold(f32::INFINITY, f32::min);
+            let max = |v: [f32; 4]| v.into_iter().fold(f32::NEG_INFINITY, f32::max);
+            [min(xs), min(ys), max(xs), max(ys)]
+        };
+        let line = |y: f32, text: &str, words: Vec<OcrWord>| OcrResult {
+            text: text.into(),
+            bbox: bounds(quad(100.0, y, 0.0, 800.0)),
+            confidence: 0.9,
+            polygon: Some(quad(100.0, y, 0.0, 800.0)),
+            rotation: None,
+            words,
+        };
+        let measured = vec![
+            OcrWord {
+                text: "Invoice".into(),
+                bbox: bounds(quad(100.0, 200.0, 0.0, 300.0)),
+            },
+            OcrWord {
+                text: "total".into(),
+                bbox: bounds(quad(100.0, 200.0, 400.0, 700.0)),
+            },
+        ];
+        let outcome = PageOcrOutcome {
+            page_number: 1,
+            dpi: 144.0,
+            has_native_text: false,
+            image_rects: Vec::new(),
+            replace_native: false,
+            results: vec![
+                line(200.0, "Invoice total", measured.clone()),
+                line(400.0, "Second line of text", Vec::new()),
+                line(600.0, "Third line of text", Vec::new()),
+            ],
+            error: None,
+        };
+        let mut page = page_with_text_metadata();
+        page.text_items.clear();
+        (page.page_width, page.page_height) = (612.0, 792.0);
+        let mut pages = vec![page];
+        merge_ocr_results(&mut pages, vec![outcome], false, true).unwrap();
+        pages[0].ocr_deskew.expect("three 5° lines deskew the page");
+        let mut parsed = stages::project(pages);
+        stages::rotate_back_ocr_deskew(&mut parsed);
+
+        let got: Vec<(String, [f32; 4])> = parsed[0]
+            .text_items
+            .iter()
+            .flat_map(|i| &i.words)
+            .filter(|w| w.text == "Invoice" || w.text == "total")
+            .map(|w| (w.text.clone(), [w.x, w.y, w.x + w.width, w.y + w.height]))
+            .collect();
+        // An unmeasured line's one word box comes back with its item's box.
+        let close = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-3);
+        for item in parsed[0]
+            .text_items
+            .iter()
+            .filter(|i| i.text.ends_with("of text"))
+        {
+            let w = &item.words[0];
+            assert!(
+                close(
+                    [w.x, w.y, w.width, w.height],
+                    [item.x, item.y, item.width, item.height]
+                ),
+                "{}: {w:?} vs item {:?}",
+                item.text,
+                [item.x, item.y, item.width, item.height]
+            );
+        }
+        assert_eq!(got.len(), 2, "{got:?}");
+        for ((text, rect), want) in got.iter().zip(&measured) {
+            assert_eq!(text, &want.text);
+            let points = want.bbox.map(|v| v / 2.0);
+            assert!(close(*rect, points), "{text}: {rect:?} != {points:?}");
         }
     }
 
@@ -1487,6 +1607,7 @@ mod tests {
             form_fields: None,
             structure_tree: None,
             blocks: None,
+            ocr_deskew: None,
         }];
         let mut full_text = pages[0].markdown.clone();
         let images = vec![

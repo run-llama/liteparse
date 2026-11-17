@@ -41,6 +41,10 @@ const CR_PROSE_MIN_LINES: usize = 3;
 const CR_PROSE_WIDTH_FRAC: f32 = 0.7;
 /// ...and whose summed line heights fill this fraction of the y-band.
 const CR_PROSE_VFILL: f32 = 0.55;
+/// A single leaf judged as prose (see the per-leaf gate) needs a median line of this many
+/// characters: table cells ("1,644,143", "Rooms Occupied") stay under it, a narrow newsletter
+/// column's lines ("based on generations of") run 20 and more.
+const CR_PROSE_LEAF_MIN_CHARS: f32 = 16.0;
 /// A prose side is dominated by single-cell lines: when this fraction or more
 /// of a side's lines split into ≥2 cells, it's a sliced table half (row
 /// fragments with internal column gaps), not flowing text.
@@ -634,8 +638,27 @@ pub(super) fn find_cross_region_table_merge(lines: &[ProjectedLine]) -> Option<C
             }
             // Either side reading as flowing prose means the V-cut was right:
             // a body column next to a sidebar / second column must stay split.
+            // A side made of several leaves (two columns left of a third) is judged leaf by
+            // leaf as well: lumped together its lines fill only part of the side's width. A
+            // leaf holding one table column fills its own width too, so a prose leaf must also
+            // run to sentence-length lines.
+            let leaf_is_prose = || {
+                set_leaves.len() > 2
+                    && set_leaves.iter().any(|&k| {
+                        let leaf = &leaves[k];
+                        let ls: Vec<&ProjectedLine> = lines[leaf.start..leaf.end].iter().collect();
+                        let chars = median(
+                            ls.iter()
+                                .map(|l| l.text.trim().chars().count() as f32)
+                                .collect(),
+                        );
+                        chars >= CR_PROSE_LEAF_MIN_CHARS
+                            && side_looks_like_prose(&ls, leaf.x0, leaf.x1)
+                    })
+            };
             if side_looks_like_prose(&left_lines, lx0, lx1)
                 || side_looks_like_prose(&right_lines, rx0, rx1)
+                || leaf_is_prose()
             {
                 if debug {
                     eprintln!("[cross-region] reject cut@{cut_x:.1}: a side is prose-like");

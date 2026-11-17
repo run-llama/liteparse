@@ -46,6 +46,19 @@ export interface LiteParseConfig {
   ocrServerUrl?: string;
   /** Extra HTTP headers sent with every request to `ocrServerUrl`. */
   ocrServerHeaders?: Record<string, string>;
+  /**
+   * Form fields sent as-is with every request to `ocrServerUrl`, next to
+   * `file` and `language` (a `language` entry replaces it). LiteParse adds no
+   * other field, so you own flags such as `correct_rotation` or
+   * `return_word_boxes`. Default empty.
+   */
+  ocrRequestFields?: Record<string, string>;
+  /**
+   * Per-page form fields, keyed by 1-based page number, merged over
+   * {@link LiteParseConfig.ocrRequestFields} for that page's request, e.g.
+   * `{ 3: { correct_rotation: "false" } }`. Default empty.
+   */
+  ocrPageRequestFields?: Record<number, Record<string, string>>;
   tessdataPath?: string;
   maxPages: number;
   targetPages?: string;
@@ -65,6 +78,8 @@ export interface LiteParseConfig {
   extractLinks: boolean;
   /** Keep running headers/footers in markdown output instead of stripping repeated page-band lines and page chrome (default: false). */
   keepHeadersFooters: boolean;
+  /** Keep text hidden by rectangular clips (e.g. overflow from a fixed-height table cell) instead of dropping it (default: false). */
+  keepClippedText: boolean;
   /** Extract all PDF annotations into each parsed page (default: false). */
   extractAnnotations: boolean;
   /** Extract AcroForm widget fields and values (default: false). */
@@ -101,6 +116,12 @@ export interface LiteParseConfig {
    * rejecting — for callers that prefer a degraded document over a hard failure.
    */
   ocrFailureFatal: boolean;
+  /**
+   * Remove dot-screen specks from OCR rasters of 1-bit full-page scans on a
+   * dotted or dithered background, rendered at 200 dpi or more (default: true).
+   * Only pages dense with specks are touched; punctuation is kept.
+   */
+  ocrDespeckleScans: boolean;
   /**
    * OCR request-hedging schedule (ms). Empty (default) = no hedging. Multiple
    * delays (e.g. `[0, 5000, 10000, 15000, 20000]`) fire duplicate requests per
@@ -662,6 +683,8 @@ export class LiteParse {
       ocrEnabled: userConfig.ocrEnabled,
       ocrServerUrl: userConfig.ocrServerUrl,
       ocrServerHeaders: userConfig.ocrServerHeaders,
+      ocrRequestFields: userConfig.ocrRequestFields,
+      ocrPageRequestFields: userConfig.ocrPageRequestFields,
       tessdataPath: userConfig.tessdataPath,
       maxPages: userConfig.maxPages,
       targetPages: userConfig.targetPages,
@@ -674,6 +697,7 @@ export class LiteParse {
       imageOutputDir: userConfig.imageOutputDir,
       extractLinks: userConfig.extractLinks,
       keepHeadersFooters: userConfig.keepHeadersFooters,
+      keepClippedText: userConfig.keepClippedText,
       extractAnnotations: userConfig.extractAnnotations,
       extractFormFields: userConfig.extractFormFields,
       extractStructureTree: userConfig.extractStructureTree,
@@ -688,6 +712,7 @@ export class LiteParse {
       quiet: userConfig.quiet,
       numWorkers: userConfig.numWorkers,
       ocrFailureFatal: userConfig.ocrFailureFatal,
+      ocrDespeckleScans: userConfig.ocrDespeckleScans,
       ocrHedgeDelaysMs: userConfig.ocrHedgeDelaysMs,
       emitWordBoxes: userConfig.emitWordBoxes,
       extractTextMetadata: userConfig.extractTextMetadata,
@@ -723,6 +748,8 @@ export class LiteParse {
       ocrEnabled: resolved.ocrEnabled ?? true,
       ocrServerUrl: resolved.ocrServerUrl ?? undefined,
       ocrServerHeaders: resolved.ocrServerHeaders ?? undefined,
+      ocrRequestFields: resolved.ocrRequestFields ?? {},
+      ocrPageRequestFields: resolved.ocrPageRequestFields ?? {},
       tessdataPath: resolved.tessdataPath ?? undefined,
       maxPages: resolved.maxPages ?? 1000,
       targetPages: resolved.targetPages ?? undefined,
@@ -735,6 +762,7 @@ export class LiteParse {
       imageOutputDir: resolved.imageOutputDir ?? undefined,
       extractLinks: resolved.extractLinks ?? true,
       keepHeadersFooters: resolved.keepHeadersFooters ?? false,
+      keepClippedText: resolved.keepClippedText ?? false,
       extractAnnotations: resolved.extractAnnotations ?? false,
       extractFormFields: resolved.extractFormFields ?? false,
       extractStructureTree: resolved.extractStructureTree ?? false,
@@ -749,6 +777,7 @@ export class LiteParse {
       quiet: resolved.quiet ?? false,
       numWorkers: resolved.numWorkers ?? 1,
       ocrFailureFatal: resolved.ocrFailureFatal ?? true,
+      ocrDespeckleScans: resolved.ocrDespeckleScans ?? true,
       ocrHedgeDelaysMs: resolved.ocrHedgeDelaysMs ?? [],
       emitWordBoxes: resolved.emitWordBoxes ?? false,
       extractTextMetadata: resolved.extractTextMetadata ?? false,

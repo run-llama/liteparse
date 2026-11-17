@@ -10,6 +10,9 @@ pub(super) struct SpanStyle {
     pub(super) italic: bool,
     pub(super) mono: bool,
     pub(super) strike: bool,
+    pub(super) underline: bool,
+    pub(super) sup: bool,
+    pub(super) sub: bool,
 }
 
 impl SpanStyle {
@@ -19,29 +22,98 @@ impl SpanStyle {
             italic: is_italic_item(item),
             mono: is_mono_item(item),
             strike: is_strike_item(item),
+            underline: item.underline,
+            sup: item.sup,
+            sub: item.sub,
         }
     }
 
     pub(super) fn is_plain(self) -> bool {
-        !self.bold && !self.italic && !self.mono && !self.strike
+        !self.bold
+            && !self.italic
+            && !self.mono
+            && !self.strike
+            && !self.underline
+            && !self.sup
+            && !self.sub
     }
 }
 
 /// Escape characters that would otherwise be interpreted as markdown emphasis.
 /// Deliberately narrow: only `*`, `_`, and backslash. Aggressive escaping
 /// (`#`, `[`, backticks, etc.) breaks more output than it saves in practice.
+/// An `_` between two letters or digits stays bare: CommonMark never reads an
+/// intraword underscore as emphasis, and `snake_case`, `first_last@host.com`
+/// or a URL path should survive verbatim (`mcc\_compliance` splits the token
+/// for any consumer that doesn't unescape). Inline math (`$…$`, see
+/// [`math_runs`]) passes through untouched.
 pub fn escape_inline(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\\' | '*' | '_' => {
-                out.push('\\');
-                out.push(c);
+    for (is_math, run) in math_runs(s) {
+        if is_math {
+            out.push_str(run);
+            continue;
+        }
+        let chars: Vec<char> = run.chars().collect();
+        for (i, &c) in chars.iter().enumerate() {
+            let intraword = c == '_'
+                && i > 0
+                && chars[i - 1].is_alphanumeric()
+                && chars.get(i + 1).is_some_and(|n| n.is_alphanumeric());
+            match c {
+                '\\' | '*' | '_' if !intraword => {
+                    out.push('\\');
+                    out.push(c);
+                }
+                _ => out.push(c),
             }
-            _ => out.push(c),
         }
     }
     out
+}
+
+/// Split `s` into runs, flagging the `$…$` spans a renderer reads as inline
+/// math under pandoc's `tex_math_dollars` rule: the opening `$` is followed
+/// by a non-space, the closing `$` follows a non-space and isn't followed by
+/// a digit (so "$5 to $10" stays text) unless the span is plainly LaTeX
+/// (`\`, `^`, `_` or `{`: "$\mathbb{R}$3" from a split script). The math
+/// pass (`tex_math`) emits its LaTeX this way, and it must reach the output
+/// unescaped.
+pub(crate) fn math_runs(s: &str) -> Vec<(bool, &str)> {
+    let b = s.as_bytes();
+    let mut runs = Vec::new();
+    let (mut lit, mut i) = (0, 0);
+    while i < b.len() {
+        let opens = b[i] == b'$'
+            && (i == 0 || b[i - 1] != b'\\')
+            && b.get(i + 1)
+                .is_some_and(|c| !c.is_ascii_whitespace() && *c != b'$');
+        let close = opens
+            .then(|| {
+                let j = i + 1 + s[i + 1..].find('$')?;
+                let latex = s[i + 1..j].contains(['\\', '^', '_', '{']);
+                let ok = !b[j - 1].is_ascii_whitespace()
+                    && b[j - 1] != b'\\'
+                    && (latex || !b.get(j + 1).is_some_and(u8::is_ascii_digit));
+                ok.then_some(j)
+            })
+            .flatten();
+        match close {
+            Some(j) => {
+                if lit < i {
+                    runs.push((false, &s[lit..i]));
+                }
+                runs.push((true, &s[i..=j]));
+                i = j + 1;
+                lit = i;
+            }
+            None => i += 1,
+        }
+    }
+    if lit < s.len() {
+        runs.push((false, &s[lit..]));
+    }
+    runs
 }
 
 /// Escape `text` for use as the body of a span with `style`. Backslash escapes
@@ -99,6 +171,9 @@ fn apply_style(inner: &str, style: SpanStyle) -> String {
             let fence = "`".repeat(longest_run + 1);
             format!("{fence} {inner} {fence}")
         }
+    } else if style.sup || style.sub {
+        // a footnote marker or index: the script tag alone (`<sup>**1**</sup>` reads as noise)
+        inner.to_string()
     } else {
         match (style.bold, style.italic) {
             (true, true) => format!("***{}***", inner),
@@ -106,6 +181,20 @@ fn apply_style(inner: &str, style: SpanStyle) -> String {
             (false, true) => format!("*{}*", inner),
             (false, false) => inner.to_string(),
         }
+    };
+    // Raised / lowered script: HTML `<sup>` / `<sub>` (no markdown syntax).
+    let styled = if style.sup {
+        format!("<sup>{}</sup>", styled)
+    } else if style.sub {
+        format!("<sub>{}</sub>", styled)
+    } else {
+        styled
+    };
+    // Underline has no markdown syntax: HTML `<u>…</u>`, outside emphasis and code.
+    let styled = if style.underline {
+        format!("<u>{}</u>", styled)
+    } else {
+        styled
     };
     // Strikethrough (GFM `~~…~~`) wraps outermost so it composes with emphasis
     // and inline code (`~~**foo**~~`, `~~`bar`~~`).
@@ -127,12 +216,24 @@ fn apply_style(inner: &str, style: SpanStyle) -> String {
 ///
 /// Falls back to `collapse_whitespace(line.text)` when the line has no usable
 /// spans (e.g. OCR-only lines where TextItem styling isn't populated).
-pub(super) fn render_line_inline(line: &ProjectedLine) -> String {
-    let spans: Vec<&TextItem> = line
-        .spans
+/// A line's spans as the renderer styles them: a merged item that kept its differently-styled
+/// pieces (`TextItem::style_pieces`) contributes those pieces.
+fn styled_spans(line: &ProjectedLine) -> Vec<&TextItem> {
+    line.spans
         .iter()
+        .flat_map(|s| {
+            if s.style_pieces.is_empty() {
+                std::slice::from_ref(s)
+            } else {
+                s.style_pieces.as_slice()
+            }
+        })
         .filter(|s| !s.text.trim().is_empty())
-        .collect();
+        .collect()
+}
+
+pub(super) fn render_line_inline(line: &ProjectedLine) -> String {
+    let spans: Vec<&TextItem> = styled_spans(line);
     if spans.is_empty() {
         return collapse_whitespace(&line.text);
     }
@@ -187,13 +288,44 @@ pub(super) fn render_line_inline(line: &ProjectedLine) -> String {
         if let Some(url) = link {
             rendered = apply_link(&rendered, url);
         }
-        if !out.is_empty() && !out.ends_with(' ') {
+        // Between groups, a space only where the page has one: a style that changes inside a
+        // word (`Taha` + raised `1`, `**Note**` + `:`) abuts its neighbour.
+        if !out.is_empty()
+            && !out.ends_with(' ')
+            && (i == 0 || spans_separated(spans[i - 1], spans[i], &line.text, line.rtl))
+        {
             out.push(' ');
         }
         out.push_str(&rendered);
         i = j;
     }
     out
+}
+
+/// Whether two consecutive spans of a line (in reading order) are separated by a space. The
+/// line's own text (projection's join, which already decided word spacing) answers when it holds
+/// the two spans' touching words either joined or apart (not at a sub/superscript, which its
+/// join spaces off); otherwise the page geometry does: a
+/// gap over an eighth of the smaller span's height (a word space is a quarter em or more).
+fn spans_separated(a: &TextItem, b: &TextItem, line_text: &str, rtl: bool) -> bool {
+    let last = a.text.split_whitespace().next_back().unwrap_or("");
+    let first = b.text.split_whitespace().next().unwrap_or("");
+    // a raised / lowered script hugs its word: projection's join spaces it off, the page doesn't
+    let script = a.sup || a.sub || b.sup || b.sub;
+    if !script && !last.is_empty() && !first.is_empty() {
+        let (l, r) = if rtl { (first, last) } else { (last, first) };
+        let apart = line_text.contains(&format!("{l} {r}"));
+        let joined = line_text.contains(&format!("{l}{r}"));
+        if apart != joined {
+            return apart;
+        }
+    }
+    let gap = if rtl {
+        a.x - (b.x + b.width)
+    } else {
+        b.x - (a.x + a.width)
+    };
+    gap > a.height.min(b.height) * 0.125
 }
 
 /// Render the text portion of a list item with per-span emphasis. The marker
@@ -241,7 +373,43 @@ pub(super) fn append_inline_continuation(
     next_inline: &str,
 ) {
     let next_raw = collapse_whitespace(next_raw);
+    // An emphasis run that continues onto the next line ("*… Network on*" then "*Drug Use …*")
+    // stays one run: the closing marker and the reopening one are dropped at the seam.
+    let next_inline = if prev_text.ends_with("</u>")
+        && next_inline.starts_with("<u>")
+        && !next_inline.starts_with("<u></u>")
+    {
+        prev_text.truncate(prev_text.len() - "</u>".len());
+        &next_inline["<u>".len()..]
+    } else {
+        next_inline
+    };
+    let next_inline = match continued_emphasis(prev_text, next_inline) {
+        Some(n) => {
+            prev_text.truncate(prev_text.len() - n);
+            &next_inline[n..]
+        }
+        None => next_inline,
+    };
     dehyphenate_join(prev_text, &next_raw, next_inline);
+}
+
+/// Length of an emphasis marker (`*`, `**`, `***` or `~~`) that closes `prev` and reopens
+/// `next` identically, with text on both sides of the seam (not `\*`, not a lone marker).
+fn continued_emphasis(prev: &str, next: &str) -> Option<usize> {
+    for (ch, lens) in [('*', &[1usize, 2, 3][..]), ('~', &[2][..])] {
+        let tail = prev.chars().rev().take_while(|&c| c == ch).count();
+        let head = next.chars().take_while(|&c| c == ch).count();
+        if tail == 0 || tail != head || !lens.contains(&tail) {
+            continue;
+        }
+        let before = prev[..prev.len() - tail].chars().last();
+        let after = next[head..].chars().next();
+        let ok = before.is_some_and(|c| !c.is_whitespace() && c != '\\')
+            && after.is_some_and(|c| !c.is_whitespace());
+        return ok.then_some(tail);
+    }
+    None
 }
 
 /// Returns the shared `SpanStyle` of `line` when every non-whitespace span on
@@ -260,11 +428,7 @@ pub(super) fn line_uniform_style(line: &ProjectedLine) -> Option<SpanStyle> {
     {
         return None;
     }
-    let mut iter = line
-        .spans
-        .iter()
-        .filter(|s| !s.text.trim().is_empty())
-        .map(SpanStyle::from_item);
+    let mut iter = styled_spans(line).into_iter().map(SpanStyle::from_item);
     let first = iter.next()?;
     for s in iter {
         if s != first {
@@ -336,6 +500,37 @@ mod tests {
     }
 
     #[test]
+    fn escape_inline_leaves_dollar_math_alone() {
+        assert_eq!(
+            escape_inline(r"where $x_{i}\in \mathbb{R}$ and a*b"),
+            r"where $x_{i}\in \mathbb{R}$ and a\*b"
+        );
+        // Currency is not math: the closing `$` is followed by a digit.
+        assert_eq!(
+            escape_inline("costs $5 to $10 a*b"),
+            r"costs $5 to $10 a\*b"
+        );
+        assert_eq!(escape_inline("$ x*1$"), r"$ x\*1$");
+        // A script split off after the span still leaves the LaTeX intact.
+        assert_eq!(escape_inline(r"M×$\mathbb{R}$3"), r"M×$\mathbb{R}$3");
+    }
+
+    #[test]
+    fn escape_inline_keeps_intraword_underscores() {
+        // CommonMark never reads an underscore between alphanumerics as emphasis.
+        assert_eq!(
+            escape_inline("mcc_compliance@masterchemical.com"),
+            "mcc_compliance@masterchemical.com"
+        );
+        assert_eq!(escape_inline("snake_case and x_1"), "snake_case and x_1");
+        // At a word edge it can open or close emphasis, so it stays escaped.
+        assert_eq!(
+            escape_inline("_lead and trail_ and __init__"),
+            r"\_lead and trail\_ and \_\_init\_\_"
+        );
+    }
+
+    #[test]
     fn render_line_inline_escapes_emphasis_chars() {
         let l = styled_line(&[("5*4=20", 50.0, Some("Arial"))], 100.0, 10.0);
         let out = render_line_inline(&l);
@@ -394,6 +589,26 @@ mod tests {
         l.spans[0].link = Some("https://example.com/a b".to_string());
         let out = render_line_inline(&l);
         assert_eq!(out, "[link](<https://example.com/a b>)");
+    }
+
+    #[test]
+    fn emphasis_continues_across_line_join() {
+        let mut prev = "hallucinogen. *South African Network on*".to_string();
+        append_inline_continuation(&mut prev, "Drug Use (2014)", "*Drug Use (2014)*");
+        assert_eq!(
+            prev,
+            "hallucinogen. *South African Network on Drug Use (2014)*"
+        );
+        let mut bold = "**Bold start**".to_string();
+        append_inline_continuation(&mut bold, "ends here", "**ends here** plain");
+        assert_eq!(bold, "**Bold start ends here** plain");
+        // different markers, escaped stars and lone markers are left alone
+        let mut mixed = "**bold**".to_string();
+        append_inline_continuation(&mut mixed, "italic", "*italic*");
+        assert_eq!(mixed, "**bold** *italic*");
+        let mut esc = "price 5\\*".to_string();
+        append_inline_continuation(&mut esc, "x", "*x*");
+        assert_eq!(esc, "price 5\\* *x*");
     }
 
     #[test]

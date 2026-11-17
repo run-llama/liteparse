@@ -1,6 +1,6 @@
-use crate::types::{OutlineTarget, ParsedPage, ProjectedLine, Rect};
+use crate::types::{OutlineTarget, ParsedPage, ProjectedLine, Rect, TextItem};
 
-use super::blocks::{Block, PositionedBlock, paragraph_from_accum};
+use super::blocks::{Block, Cell, PositionedBlock, paragraph_from_accum};
 use super::headings::{
     HEADING_MAX_TEXT_CHARS, MAX_HEADING_LEVELS, heading_level_for, heading_size_of,
     is_caption_line, is_toc_title, looks_like_bold_heading, looks_like_numbered_bold_heading,
@@ -16,8 +16,9 @@ use super::lists::{
     split_ordered_marker_for_emit,
 };
 use super::paragraphs::{
-    ParaAccum, append_to_paragraph, collapse_whitespace, continues_heading, continues_list_item,
-    continues_paragraph, ends_hyphenated, ends_sentence_final, is_soft_hyphen_break,
+    ParaAccum, append_to_paragraph, collapse_whitespace, continues_heading, continues_hyphen_wrap,
+    continues_list_item, continues_paragraph, ends_hyphenated, ends_open_hyphen,
+    ends_sentence_final, is_soft_hyphen_break,
 };
 use super::repetition::is_header_or_footer;
 use super::tables::{detect_ruled_tables, detect_tables_banded, merge_table_runs};
@@ -87,12 +88,72 @@ enum Interruption {
 /// watermarks, vertical legends) from the body-size and heading-size
 /// histograms so it doesn't compete with normal-flow text for heading slots.
 pub(super) fn is_rotated_line(line: &ProjectedLine) -> bool {
-    line.spans.iter().any(|s| {
-        let r = s.rotation.abs() % 360.0;
-        // Anything more than ~5° off the horizontal axes is "rotated" for
-        // our purposes. 0° and 180° are both horizontal text.
-        !(r < 5.0 || (175.0..=185.0).contains(&r) || (355.0..=360.0).contains(&r))
+    line.spans.iter().any(|s| is_sideways(s.rotation))
+}
+
+/// Whether text at `rotation` degrees reads more than ~5° off the horizontal
+/// axes. 0° and 180° are both horizontal text.
+fn is_sideways(rotation: f32) -> bool {
+    let r = rotation.abs() % 360.0;
+    !(r < 5.0 || (175.0..=185.0).contains(&r) || (355.0..=360.0).contains(&r))
+}
+
+/// `line` without its sideways spans, when they carry less than half of its
+/// non-whitespace characters: OCR read one glyph or speck of a horizontal row
+/// at 90°, and projection put it on the row. `None` when the line has no
+/// sideways span, or is mostly sideways text and so stays margin furniture.
+/// Text, box and indent are rebuilt from the upright spans the way projection
+/// builds them; the line's other aggregates are kept.
+fn without_stray_sideways(line: &ProjectedLine) -> Option<ProjectedLine> {
+    let chars = |s: &&TextItem| s.text.chars().filter(|c| !c.is_whitespace()).count();
+    let (sideways, upright): (Vec<&TextItem>, Vec<&TextItem>) =
+        line.spans.iter().partition(|s| is_sideways(s.rotation));
+    let sideways_chars: usize = sideways.iter().map(chars).sum();
+    if sideways_chars == 0 || sideways_chars >= upright.iter().map(chars).sum() {
+        return None;
+    }
+    let mut pieces: Vec<&str> = upright.iter().map(|s| s.text.as_str()).collect();
+    if line.rtl {
+        pieces.reverse();
+    }
+    let mut text = String::new();
+    for piece in pieces {
+        if !text.is_empty() && !text.ends_with(' ') {
+            text.push(' ');
+        }
+        text.push_str(piece);
+    }
+    let bbox = upright
+        .iter()
+        .map(|s| Rect {
+            x: s.x,
+            y: s.y,
+            width: s.width,
+            height: s.height,
+        })
+        .reduce(|a, b| a.union(&b))?;
+    Some(ProjectedLine {
+        text,
+        indent_x: bbox.x,
+        bbox,
+        spans: upright.into_iter().cloned().collect(),
+        ..line.clone()
     })
+}
+
+/// Whether the page's rotated lines are its content rather than margin furniture: they carry at
+/// least 30% of its non-whitespace characters. Banners, stamps and vertical legends are a sliver
+/// of a page; a table or figure set sideways is most of it.
+pub(super) fn rotated_text_is_content(page: &ParsedPage) -> bool {
+    let (mut rotated, mut all) = (0usize, 0usize);
+    for line in &page.projected_lines {
+        let n = line.text.chars().filter(|c| !c.is_whitespace()).count();
+        all += n;
+        if is_rotated_line(line) {
+            rotated += n;
+        }
+    }
+    all > 0 && rotated * 10 >= all * 3
 }
 
 /// Classify a single page's `ProjectedLine`s into blocks.
@@ -180,6 +241,7 @@ pub fn classify_page_with_filters(
     // Strip running header/footer lines up-front so they don't leak into
     // table detection (a repeating two-column footer would otherwise look
     // like a 2-row table) or paragraph grouping.
+
     let need_filter = !header_footer.is_empty() || !chrome_indices.is_empty();
     let filtered_owned: Vec<ProjectedLine> = if !need_filter {
         Vec::new()
@@ -198,6 +260,16 @@ pub fn classify_page_with_filters(
     } else {
         &filtered_owned
     };
+
+    // Projection appends detached footers after all body lines. Filtering keeps
+    // that order, so both slices can borrow their lines without a partition copy.
+    // Keep footers outside table detection: extending a table region can lower
+    // its validated coverage enough to reject the table.
+    let footer_start = lines
+        .iter()
+        .position(|line| line.region_path == crate::projection::NUMERIC_FOOTER_PATH)
+        .unwrap_or(lines.len());
+    let (lines, footer_lines) = lines.split_at(footer_start);
 
     // Global ruled-table pass. `detect_ruled_tables` is otherwise called per
     // xy_cut leaf, but a ruled table whose rows scatter across several leaves
@@ -435,7 +507,20 @@ pub fn classify_page_with_filters(
         interrupt_cursor += 1;
     }
 
-    stitch_regions(blocks, &region_boundaries)
+    // Appending here gives the footer its own final paragraph, outside table
+    // detection and cross-column paragraph continuation.
+    let mut blocks = stitch_regions(blocks, &region_boundaries);
+    blocks.extend(footer_lines.iter().map(|line| {
+        PositionedBlock::new(
+            Block::Paragraph {
+                text: line.text.clone(),
+                bold: false,
+                italic: false,
+            },
+            Some(line.bbox.clone()),
+        )
+    }));
+    blocks
 }
 
 /// Turn an interruption into a positioned block. Both the page-level walker
@@ -540,6 +625,7 @@ fn classify_region(
     let mut blocks: Vec<PositionedBlock> = Vec::new();
     let mut state = FlowState::default();
     let mut heading_run: Option<(u8, usize)> = None;
+    let rotated_content = rotated_text_is_content(page);
     // Track whether we've already emitted a TOC title on this page. Once seen,
     // any subsequent line matching `is_toc_title` (e.g. "Index", "List of
     // Figures") is a TOC entry pointing at that chapter, not another title,
@@ -553,7 +639,14 @@ fn classify_region(
     let ruled_runs = detect_ruled_tables(lines, rule_segments, page.page_width, page.page_height);
     let borderless_runs = precomputed_tables
         .unwrap_or_else(|| detect_tables_banded(lines, rule_segments, page.page_height));
-    let table_runs = merge_table_runs(ruled_runs, borderless_runs);
+    // A table that carries under 70% of the text of the lines it spans loses
+    // the rest, since the loop below skips the span. Handing back lines no
+    // cell took a word from cannot help when every line shares a word with
+    // the cells, so such a run is read as text: every value kept, no grid.
+    let table_runs: Vec<_> = merge_table_runs(ruled_runs, borderless_runs)
+        .into_iter()
+        .filter(|run| super::tables::run_text_kept(run, lines).is_none_or(|kept| kept >= 0.7))
+        .collect();
 
     // Region-wide pre-pass: which line indices carry a lettered/roman marker
     // (`a.`, `i.`) that belongs to a confirmed sequential list run. Only these
@@ -594,6 +687,24 @@ fn classify_region(
     region_interruptions.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut interruptions = region_interruptions.into_iter().peekable();
 
+    // Outside tables, a line whose only sideways text is a stray OCR glyph
+    // renders without it, instead of being skipped below as margin furniture.
+    // Table runs were detected on the lines as projected and keep them.
+    let upright: Vec<(usize, ProjectedLine)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !rotated_content && !table_covered.contains(i))
+        .filter_map(|(i, line)| without_stray_sideways(line).map(|u| (i, u)))
+        .collect();
+    let upright_owned: Option<Vec<ProjectedLine>> = (!upright.is_empty()).then(|| {
+        let mut owned = lines.to_vec();
+        for (i, line) in upright {
+            owned[i] = line;
+        }
+        owned
+    });
+    let lines: &[ProjectedLine] = upright_owned.as_deref().unwrap_or(lines);
+
     let mut idx = 0;
     while idx < lines.len() {
         if let Some(run) = table_iter.peek()
@@ -605,7 +716,14 @@ fn classify_region(
             state.flush_paragraph(&mut blocks);
             state.flush_code(&mut blocks);
             state.reset_list();
-            let run = table_iter.next().unwrap();
+            let mut run = table_iter.next().unwrap();
+            // Lines in the span that no cell took a word from (a note under
+            // the table, a column the grid left out) go the same way.
+            let left_out = super::tables::lines_left_out(&run, lines);
+            run.interstitials.extend(left_out.into_iter().map(|i| Cell {
+                text: lines[i].text.clone(),
+                bbox: Some(lines[i].bbox.clone()),
+            }));
             // Prose lines the run stepped over between its header and body
             // sit inside `[run.start, run.end)`, which this loop skips — emit
             // each as its own paragraph ahead of the table so the text isn't
@@ -639,8 +757,10 @@ fn classify_region(
         }
         // Skip rotated text (vertical sidebars, arXiv banners, watermarks).
         // Including it would either inject a paragraph of disconnected
-        // characters or be misclassified as a heading.
-        if is_rotated_line(line) {
+        // characters or be misclassified as a heading. Not when rotated text
+        // is the page's content (a table or figure set sideways): projection
+        // has already turned it upright, and skipping it drops the page.
+        if is_rotated_line(line) && !rotated_content {
             continue;
         }
         if debug {
@@ -780,6 +900,12 @@ fn classify_region(
             let mid_word_wrap = text.trim_end().ends_with('-');
             !(has_mid_sentence && mid_word_wrap)
         });
+        // On a page whose sizes are estimated from box heights (scans, OCR) a line ending in an
+        // attached hyphen is the first half of a token, not a finished heading: promoted, it
+        // splits the token across a heading and the paragraph below ("…pyridine-3-" /
+        // "carbonitrile 4a …"). Left in the paragraph, the join keeps it whole.
+        let open_hyphen_scan = line.font_size_is_estimated && ends_open_hyphen(text);
+        let size_level = size_level.filter(|_| !open_hyphen_scan);
         // A standalone "Contents" / "Table of Contents" / "Index" line is
         // almost always a real H1, even when `page_is_toc` is false — many
         // TOCs list entries without inline trailing page numbers, so the
@@ -1058,7 +1184,10 @@ fn classify_region(
         }
 
         match state.paragraph.as_mut() {
-            Some(acc) if continues_paragraph(&acc.last, line) => {
+            Some(acc)
+                if continues_paragraph(&acc.last, line)
+                    || continues_hyphen_wrap(&acc.last, line) =>
+            {
                 append_to_paragraph(acc, line);
             }
             _ => {
@@ -1253,6 +1382,15 @@ fn stitch_regions(blocks: Vec<PositionedBlock>, region_starts: &[usize]) -> Vec<
                     prev_text.pop();
                 }
                 prev_text.pop(); // the '-'
+                prev_text.push_str(cur_text.trim_start());
+                prev.bbox = merged_bbox;
+                continue;
+            }
+            // A hard hyphen (`pyridine-3-` + `carbonitrile`): one token, hyphen kept.
+            if ends_open_hyphen(prev_text) && starts_lower {
+                while prev_text.ends_with(|c: char| c.is_whitespace()) {
+                    prev_text.pop();
+                }
                 prev_text.push_str(cur_text.trim_start());
                 prev.bbox = merged_bbox;
                 continue;

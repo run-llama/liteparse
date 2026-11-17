@@ -68,6 +68,36 @@ pub(super) fn ends_hyphenated(text: &str) -> bool {
     t.ends_with('-') && t.chars().rev().nth(1).is_some_and(|c| c.is_alphabetic())
 }
 
+/// True when `text` ends with a hyphen attached to a letter or digit (`architec-`,
+/// `pyridine-3-`, `Billion-`): the token continues on the next line. A detached ` -`
+/// (a dash, a list marker) does not.
+pub(super) fn ends_open_hyphen(text: &str) -> bool {
+    let t = text.trim_end();
+    t.ends_with('-') && t.chars().rev().nth(1).is_some_and(|c| c.is_alphanumeric())
+}
+
+/// A token broken over a line end (`…pyridine-3-` / `carbonitrile 4a …`): `prev` ends in an
+/// attached hyphen and `cur` starts lowercase, in the same region, no more than two line
+/// heights below. The token joins whatever the indent or gap says about paragraphs, since
+/// a break there would split one word or identifier into two.
+pub(super) fn continues_hyphen_wrap(prev: &ProjectedLine, cur: &ProjectedLine) -> bool {
+    if !ends_open_hyphen(&prev.text) || prev.region_path != cur.region_path {
+        return false;
+    }
+    if !cur
+        .text
+        .trim_start()
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_lowercase())
+    {
+        return false;
+    }
+    let gap = cur.bbox.y - (prev.bbox.y + prev.bbox.height);
+    let line_height = prev.bbox.height.max(cur.bbox.height).max(1.0);
+    (-0.5 * line_height..=2.0 * line_height).contains(&gap)
+}
+
 /// True when `text` ends a sentence: its last non-space character (ignoring a
 /// trailing closing quote / bracket) is `.`, `!`, or `?`. The heading
 /// lowercase-continuation guard uses the negation — a previous line that does
@@ -119,6 +149,13 @@ pub(super) fn dehyphenate_join(prev: &mut String, check: &str, to_append: &str) 
             prev.pop();
         }
         prev.pop(); // the soft hyphen
+        prev.push_str(to_append.trim_start());
+    } else if ends_open_hyphen(prev) {
+        // a hard hyphen at the break (`pyridine-3-` + `carbonitrile`, `well-` + `Known`): one
+        // token, hyphen kept, no space
+        while prev.ends_with(|c: char| c.is_whitespace()) {
+            prev.pop();
+        }
         prev.push_str(to_append.trim_start());
     } else {
         prev.push(' ');
@@ -302,7 +339,9 @@ pub(super) fn append_to_paragraph(accum: &mut ParaAccum, next_line: &ProjectedLi
     // won't strip and falls through to a space join — exactly the prior
     // behavior, now via one helper.
     dehyphenate_join(&mut accum.raw, &next_raw, &next_raw);
-    dehyphenate_join(&mut accum.inline, &next_raw, &next_inline);
+    // the inline side first rejoins an emphasis run split at the line break ("*… Man-*" +
+    // "*ager …*"), so the hyphen is at its seam again
+    super::inline::append_inline_continuation(&mut accum.inline, &next_raw, &next_inline);
 
     // Maintain the running uniform-style flag.
     accum.uniform = match (accum.uniform, next_uniform) {
@@ -317,13 +356,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dehyphenate_join_keeps_hard_hyphen_without_space() {
+        let mut s = String::from("2-Chloro-5-ethyl-6-methylpyridine-3-");
+        dehyphenate_join(&mut s, "carbonitrile 4a", "carbonitrile 4a");
+        assert_eq!(s, "2-Chloro-5-ethyl-6-methylpyridine-3-carbonitrile 4a");
+        let mut s = String::from("a well-");
+        dehyphenate_join(&mut s, "Known case", "Known case");
+        assert_eq!(s, "a well-Known case");
+        let mut s = String::from("ranges 5 -");
+        dehyphenate_join(&mut s, "10", "10");
+        assert_eq!(s, "ranges 5 - 10");
+    }
+
+    #[test]
     fn dehyphenate_join_only_strips_before_lowercase() {
         let mut s = String::from("co-");
         dehyphenate_join(&mut s, "operate", "operate");
         assert_eq!(s, "cooperate");
 
+        // a capitalized continuation is a real compound: the hyphen stays, with no space
         let mut s = String::from("Vitamin-");
         dehyphenate_join(&mut s, "A", "A");
-        assert_eq!(s, "Vitamin- A");
+        assert_eq!(s, "Vitamin-A");
     }
 }
