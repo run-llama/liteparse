@@ -699,6 +699,18 @@ fn form_lines(
         prev.orig_height = y2 - y1;
     }
 
+    // Every joiner must leave the merged item with `next`'s trailing-space
+    // state; a stale flag would add a space later. The line pass joins
+    // through here; the bbox pass below appends in stream order.
+    fn append_text(prev: &mut ProjectedTextItem, next: &ProjectedTextItem, sep: &str) {
+        join_in_reading_order(&mut prev.item.text, &next.item.text, sep);
+        prev.item.followed_by_space = next.item.followed_by_space;
+    }
+
+    fn trailing_sep(prev: &ProjectedTextItem) -> &'static str {
+        if prev.item.followed_by_space { " " } else { "" }
+    }
+
     // Merge continuous bbox items in a single linear pass.
     let merge_y_tolerance = 0.1;
     let merge_h_tolerance = 0.1;
@@ -721,7 +733,11 @@ fn form_lines(
         if should_merge {
             if let Some(prev) = merged_items.last_mut() {
                 let merged = merge_bbox(prev, &cur);
+                if prev.item.followed_by_space && !prev.item.text.ends_with(' ') {
+                    prev.item.text.push(' ');
+                }
                 prev.item.text.push_str(&cur.item.text);
+                prev.item.followed_by_space = cur.item.followed_by_space;
                 prev.item.words.append(&mut cur.item.words);
                 prev.item.x = merged.0;
                 prev.item.y = merged.1;
@@ -934,7 +950,7 @@ fn form_lines(
                         record_style_piece(&mut prev.item, &item.item, "");
                     }
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
-                    prev.item.text.push_str(&item.item.text);
+                    append_text(prev, &item, "");
                     prev.item.words.append(&mut item.item.words);
                     merge_orig_bbox(prev, &item);
                     continue;
@@ -977,11 +993,12 @@ fn form_lines(
                     && !alpha_alpha_gap
                     && delta_x <= MERGE_THRESHOLD
                 {
+                    let sep = trailing_sep(prev);
                     if keep_pieces {
-                        record_style_piece(&mut prev.item, &item.item, "");
+                        record_style_piece(&mut prev.item, &item.item, sep);
                     }
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
-                    join_in_reading_order(&mut prev.item.text, &item.item.text, "");
+                    append_text(prev, &item, sep);
                     prev.item.words.append(&mut item.item.words);
                     merge_orig_bbox(prev, &item);
                     continue;
@@ -994,7 +1011,7 @@ fn form_lines(
                         record_style_piece(&mut prev.item, &item.item, " ");
                     }
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
-                    join_in_reading_order(&mut prev.item.text, &item.item.text, " ");
+                    append_text(prev, &item, " ");
                     prev.item.words.append(&mut item.item.words);
                     merge_orig_bbox(prev, &item);
                     continue;
@@ -5671,6 +5688,22 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert!(lines[0].iter().any(|i| i.item.text == "7.7"));
         assert!(lines[0].iter().all(|i| !i.is_margin_line_number));
+    }
+
+    #[test]
+    fn merged_item_inherits_trailing_space_of_its_last_part() {
+        // "case" was split at a space; "estimates" joins it through the spaced
+        // merge, so the abutting "." must not see "case"'s flag.
+        let mut case = item_at("case", 10.0, 100.0, 20.0, 10.0);
+        case.item.followed_by_space = true;
+        let mut items = vec![
+            case,
+            item_at("estimates", 33.0, 100.0, 45.0, 10.0),
+            item_at(".", 78.0, 101.0, 2.0, 9.0),
+        ];
+        let lines = form_lines(&mut items, 10.0, 10.0, 612.0, 792.0, true);
+        let texts: Vec<_> = lines[0].iter().map(|i| i.item.text.as_str()).collect();
+        assert_eq!(texts, ["case estimates."]);
     }
 
     #[test]
