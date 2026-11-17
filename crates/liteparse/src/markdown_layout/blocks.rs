@@ -13,6 +13,11 @@ use serde::{Deserialize, Serialize};
 pub struct Cell {
     pub text: String,
     pub bbox: Option<Rect>,
+    /// Indices into the page's `text_items` of the items the text was read
+    /// from, in reading order. One item may feed several cells (a merged run
+    /// split across columns). May repeat; `LayoutCell` deduplicates.
+    #[serde(default)]
+    pub text_item_indices: Vec<usize>,
 }
 
 impl Cell {
@@ -21,6 +26,17 @@ impl Cell {
         Cell {
             text: text.into(),
             bbox: Some(bbox),
+            text_item_indices: Vec::new(),
+        }
+    }
+
+    /// Cell carrying text, the region it was read from, and the items it was
+    /// read from.
+    pub fn sourced(text: impl Into<String>, bbox: Rect, text_item_indices: Vec<usize>) -> Self {
+        Cell {
+            text: text.into(),
+            bbox: Some(bbox),
+            text_item_indices,
         }
     }
 
@@ -36,14 +52,17 @@ impl From<&str> for Cell {
     fn from(text: &str) -> Self {
         Cell {
             text: text.to_string(),
-            bbox: None,
+            ..Cell::default()
         }
     }
 }
 
 impl From<String> for Cell {
     fn from(text: String) -> Self {
-        Cell { text, bbox: None }
+        Cell {
+            text,
+            ..Cell::default()
+        }
     }
 }
 
@@ -94,6 +113,10 @@ pub struct SpanCell {
     /// spanning cell), in the same viewport space as `text_items`. `None` when
     /// the producer has no geometry for it.
     pub bbox: Option<Rect>,
+    /// Indices into the page's `text_items` of the items the cell was read
+    /// from, when the producer knows them. See [`Cell::text_item_indices`].
+    #[serde(default)]
+    pub text_item_indices: Vec<usize>,
 }
 
 impl SpanCell {
@@ -104,6 +127,7 @@ impl SpanCell {
             colspan: 1,
             rowspan: 1,
             bbox: None,
+            text_item_indices: Vec::new(),
         }
     }
 
@@ -116,6 +140,7 @@ impl SpanCell {
             colspan: colspan.max(1),
             rowspan: rowspan.max(1),
             bbox: None,
+            text_item_indices: Vec::new(),
         }
     }
 
@@ -255,23 +280,62 @@ fn wrap_emphasis(text: &str, bold: bool, italic: bool) -> String {
 pub struct PositionedBlock {
     pub block: Block,
     pub bbox: Option<Rect>,
+    /// Indices into the page's `text_items` of every item the block was read
+    /// from. Unordered and may repeat; `LayoutBlock` reports it sorted and
+    /// deduplicated. Empty for blocks with no text behind them, and for
+    /// tables, whose items are on their cells.
+    #[serde(default)]
+    pub text_item_indices: Vec<usize>,
 }
 
 impl PositionedBlock {
     pub fn new(block: Block, bbox: Option<Rect>) -> Self {
-        PositionedBlock { block, bbox }
+        PositionedBlock {
+            block,
+            bbox,
+            text_item_indices: Vec::new(),
+        }
+    }
+
+    /// A block with known geometry and source items.
+    pub fn sourced(block: Block, bbox: Option<Rect>, text_item_indices: Vec<usize>) -> Self {
+        PositionedBlock {
+            block,
+            bbox,
+            text_item_indices,
+        }
     }
 
     /// A block with no known geometry.
     pub fn unlocated(block: Block) -> Self {
-        PositionedBlock { block, bbox: None }
+        PositionedBlock::new(block, None)
     }
 
-    /// Grow this block's box to also cover `other`.
-    fn absorb(&mut self, other: &Option<Rect>) {
-        if let Some(r) = other {
+    /// Drop every text-item index, the block's and its cells'.
+    pub(crate) fn clear_text_items(&mut self) {
+        self.text_item_indices.clear();
+        match &mut self.block {
+            Block::Table { header, rows } => {
+                for cell in header.iter_mut().flatten().chain(rows.iter_mut().flatten()) {
+                    cell.text_item_indices.clear();
+                }
+            }
+            Block::MergedTable { rows, .. } => {
+                for cell in rows.iter_mut().flatten() {
+                    cell.text_item_indices.clear();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Grow this block's box and source items to also cover `other`.
+    fn absorb(&mut self, other: &PositionedBlock) {
+        if let Some(r) = &other.bbox {
             Rect::extend(&mut self.bbox, r);
         }
+        self.text_item_indices
+            .extend_from_slice(&other.text_item_indices);
     }
 }
 
@@ -288,7 +352,7 @@ pub fn rejoin_paragraphs_around_figures(blocks: Vec<PositionedBlock>) -> Vec<Pos
             out.push(pb);
             continue;
         };
-        let (mut text, mut bbox) = (text, pb.bbox);
+        let (mut text, mut bbox, mut items) = (text, pb.bbox, pb.text_item_indices);
         let mut held: Vec<PositionedBlock> = Vec::new();
         loop {
             // figures directly after this paragraph
@@ -321,12 +385,14 @@ pub fn rejoin_paragraphs_around_figures(blocks: Vec<PositionedBlock>) -> Vec<Pos
             if let Some(r) = &next.bbox {
                 Rect::extend(&mut bbox, r);
             }
+            items.extend(next.text_item_indices);
             held.extend(figs);
         }
-        out.push(PositionedBlock {
-            block: Block::Paragraph { text, bold, italic },
+        out.push(PositionedBlock::sourced(
+            Block::Paragraph { text, bold, italic },
             bbox,
-        });
+            items,
+        ));
         out.extend(held);
     }
     out
@@ -380,13 +446,13 @@ pub fn split_repeated_header_tables(blocks: Vec<PositionedBlock>) -> Vec<Positio
                                 .or(pb.bbox.clone());
                         let mut it = part.into_iter();
                         let header = if had_header { it.next() } else { None };
-                        out.extend(split_repeated_header_tables(vec![PositionedBlock {
-                            block: Block::Table {
+                        out.extend(split_repeated_header_tables(vec![PositionedBlock::new(
+                            Block::Table {
                                 header,
                                 rows: it.collect(),
                             },
                             bbox,
-                        }]));
+                        )]));
                     }
                     continue;
                 }
@@ -398,13 +464,13 @@ pub fn split_repeated_header_tables(blocks: Vec<PositionedBlock>) -> Vec<Positio
                 if cuts.is_empty() {
                     let mut it = all.into_iter();
                     let header = if had_header { it.next() } else { None };
-                    out.push(PositionedBlock {
-                        block: Block::Table {
+                    out.push(PositionedBlock::new(
+                        Block::Table {
                             header,
                             rows: it.collect(),
                         },
-                        bbox: pb.bbox,
-                    });
+                        pb.bbox,
+                    ));
                     continue;
                 }
                 let mut start = 0;
@@ -414,13 +480,13 @@ pub fn split_repeated_header_tables(blocks: Vec<PositionedBlock>) -> Vec<Positio
                         .or(pb.bbox.clone());
                     let mut it = seg.into_iter();
                     let header = if k > 0 || had_header { it.next() } else { None };
-                    out.push(PositionedBlock {
-                        block: Block::Table {
+                    out.push(PositionedBlock::new(
+                        Block::Table {
                             header,
                             rows: it.collect(),
                         },
                         bbox,
-                    });
+                    ));
                     start = end;
                 }
             }
@@ -441,10 +507,10 @@ pub fn split_repeated_header_tables(blocks: Vec<PositionedBlock>) -> Vec<Positio
                     .collect();
                 let cuts = repeated_header_cuts(&texts, &spanned);
                 if cuts.is_empty() {
-                    out.push(PositionedBlock {
-                        block: Block::MergedTable { rows, header_rows },
-                        bbox: pb.bbox,
-                    });
+                    out.push(PositionedBlock::new(
+                        Block::MergedTable { rows, header_rows },
+                        pb.bbox,
+                    ));
                     continue;
                 }
                 let mut start = 0;
@@ -467,20 +533,21 @@ pub fn split_repeated_header_tables(blocks: Vec<PositionedBlock>) -> Vec<Positio
                             },
                         )
                     };
-                    out.push(PositionedBlock {
-                        block: Block::MergedTable {
+                    out.push(PositionedBlock::new(
+                        Block::MergedTable {
                             rows: seg,
                             header_rows: hr,
                         },
                         bbox,
-                    });
+                    ));
                     start = end;
                 }
             }
-            block => out.push(PositionedBlock {
+            block => out.push(PositionedBlock::sourced(
                 block,
-                bbox: pb.bbox,
-            }),
+                pb.bbox,
+                pb.text_item_indices,
+            )),
         }
     }
     out
@@ -635,7 +702,7 @@ pub fn splice_soft_hyphens(blocks: Vec<PositionedBlock>) -> Vec<PositionedBlock>
                 text.pop(); // the soft hyphen
                 text.push_str(&tail);
             }
-            prev.absorb(&pb.bbox);
+            prev.absorb(&pb);
             continue;
         }
         out.push(pb);
@@ -1108,6 +1175,88 @@ mod tests {
         assert_eq!(table_count(&split_repeated_header_tables(vec![c])), 1);
     }
 
+    /// `grid`, with each non-empty cell sourced from item `100 * row + column`.
+    fn sourced_grid(rows: &[&[&str]]) -> (PositionedBlock, Vec<usize>) {
+        let mut b = grid(rows);
+        let Block::Table { header, rows } = &mut b.block else {
+            unreachable!()
+        };
+        let mut items = Vec::new();
+        for (r, row) in header.iter_mut().chain(rows.iter_mut()).enumerate() {
+            for (c, cell) in row.iter_mut().enumerate() {
+                if !cell.as_str().is_empty() {
+                    cell.text_item_indices = vec![100 * r + c];
+                    items.push(100 * r + c);
+                }
+            }
+        }
+        (b, items)
+    }
+
+    fn cell_items(blocks: &[PositionedBlock]) -> Vec<usize> {
+        let mut items: Vec<usize> = blocks
+            .iter()
+            .flat_map(|b| match &b.block {
+                Block::Table { header, rows } => header
+                    .iter()
+                    .chain(rows.iter())
+                    .flatten()
+                    .flat_map(|c| c.text_item_indices.iter().copied())
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        items.sort_unstable();
+        items
+    }
+
+    #[test]
+    fn split_tables_keep_their_cells_items() {
+        let (stacked, items) = sourced_grid(&[
+            &["", "Current Base Rate", "", ""],
+            &["CA", "PPO 1500", "PPO 2500", "HDHP 3000"],
+            &["Block A", "254.96", "207.94", "173.76"],
+            &["", "Proposed Base Rate", "", ""],
+            &["CA", "PPO 1500", "PPO 2500", "HDHP 3000"],
+            &["Block A", "284.28", "231.85", "193.74"],
+        ]);
+        let out = split_repeated_header_tables(vec![stacked]);
+        assert_eq!(table_count(&out), 2);
+        assert_eq!(cell_items(&out), items);
+
+        let (side_by_side, items) = sourced_grid(&[
+            &["Tier", "Type", "Rate", "", "Tier", "Type", "Rate"],
+            &["001", "AN", "1.000", "", "001", "AN", "1.000"],
+            &["001", "AN", "0.170", "", "001", "AN", "0.210"],
+        ]);
+        let out = split_repeated_header_tables(vec![side_by_side]);
+        assert_eq!(table_count(&out), 2);
+        assert_eq!(cell_items(&out), items);
+
+        // blocks the pass does not split keep their own items
+        let kept = split_repeated_header_tables(vec![PositionedBlock::sourced(
+            Block::Paragraph {
+                text: "Body.".into(),
+                bold: false,
+                italic: false,
+            },
+            None,
+            vec![7, 8],
+        )]);
+        assert_eq!(kept[0].text_item_indices, vec![7, 8]);
+    }
+
+    #[test]
+    fn paragraph_rejoined_around_a_figure_keeps_both_halves_items() {
+        let mut head = para("Add the ability to engrave items, including");
+        head.text_item_indices = vec![0, 1];
+        let mut tail = para("glasses, bottles, and more.");
+        tail.text_item_indices = vec![2, 3];
+        let out = rejoin_paragraphs_around_figures(vec![head, fig("a"), tail]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].text_item_indices, vec![0, 1, 2, 3]);
+    }
+
     #[test]
     fn renders_table_to_pipe_format() {
         let blocks = vec![Block::Table {
@@ -1153,12 +1302,13 @@ mod tests {
             height: 12.0,
         };
         let joined = splice_soft_hyphens(vec![
-            PositionedBlock::new(p("they dis-"), Some(r(50.0))),
-            PositionedBlock::new(p("lodged the part"), Some(r(70.0))),
+            PositionedBlock::sourced(p("they dis-"), Some(r(50.0)), vec![0, 1]),
+            PositionedBlock::sourced(p("lodged the part"), Some(r(70.0)), vec![2, 3]),
         ]);
         assert_eq!(joined.len(), 1);
         let bbox = joined[0].bbox.clone().expect("merged block keeps geometry");
         assert_eq!((bbox.y, bbox.height), (50.0, 32.0));
+        assert_eq!(joined[0].text_item_indices, vec![0, 1, 2, 3]);
     }
 
     #[test]
