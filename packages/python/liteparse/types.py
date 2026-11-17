@@ -305,6 +305,20 @@ class PageError:
 
 
 @dataclass
+class OutlineTarget:
+    """A bookmark with a destination in the source document.
+
+    ``level`` is 1-based, ``page_index`` is zero-based, and ``y_pdf`` is an
+    optional vertical destination in PDF coordinates (origin bottom-left).
+    """
+
+    level: int
+    title: str
+    page_index: int
+    y_pdf: Optional[float]
+
+
+@dataclass
 class ParseResult:
     """Result of parsing a document."""
     pages: List[ParsedPage]
@@ -327,6 +341,8 @@ class ParseResult:
     doc_meta: Optional[DocumentMetadata] = None
     #: Raw XFA packets; present only when ``extract_xfa_packets=True``.
     xfa_packets: Optional[List[XfaPacket]] = None
+    #: Document bookmarks in tree order, including pages outside any selection.
+    outline: List[OutlineTarget] = field(default_factory=list)
 
     @property
     def num_pages(self) -> int:

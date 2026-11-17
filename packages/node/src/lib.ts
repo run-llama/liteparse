@@ -479,10 +479,23 @@ export interface ExtractedImage {
   bytes: Buffer;
 }
 
+/** One bookmark with a destination in the source document. */
+export interface OutlineTarget {
+  /** One-based nesting depth. */
+  level: number;
+  title: string;
+  /** Zero-based source-document page index. */
+  pageIndex: number;
+  /** Optional vertical destination in PDF coordinates (bottom-left origin). */
+  yPdf?: number;
+}
+
 export interface ParseResult {
   /** Total source-document pages before `targetPages` or `maxPages` filtering. */
   totalPages: number;
   pages: ParsedPage[];
+  /** Document bookmarks in tree order, including pages outside any selection. */
+  outline: OutlineTarget[];
   /** Page-level PDFium extraction failures when tolerance is enabled. */
   pageErrors: Array<{ pageNum: number; message: string }>;
   text: string;
@@ -970,6 +983,7 @@ export function toParseResult(result: NativeParseResult): ParseResult {
   return {
     totalPages: result.totalPages,
     pages: result.pages.map(toPage),
+    outline: result.outline ?? [],
     pageErrors: result.pageErrors ?? [],
     text: result.text,
     images: (result.images ?? []).map(toImage),

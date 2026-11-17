@@ -35,6 +35,7 @@ from .types import (
     ParseBatch,
     ParseError,
     PageError,
+    OutlineTarget,
     ParseResult,
     DocumentMetadata,
     ScreenshotRect,
@@ -401,6 +402,15 @@ def _convert_native_result(native_result: Any) -> ParseResult:
     return ParseResult(
         pages=pages,
         text=native_result.text,
+        outline=[
+            OutlineTarget(
+                level=entry.level,
+                title=entry.title,
+                page_index=entry.page_index,
+                y_pdf=entry.y_pdf,
+            )
+            for entry in getattr(native_result, "outline", [])
+        ],
         total_pages=getattr(native_result, "total_pages", len(pages)),
         images=images,
         screenshots=[

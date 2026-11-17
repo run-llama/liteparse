@@ -273,6 +273,7 @@ export interface NativeExtractedImage {
 export interface NativeParseResult {
   totalPages: number;
   pages: NativeParsedPage[];
+  outline: Array<{ level: number; title: string; pageIndex: number; yPdf?: number }>;
   pageErrors: Array<{ pageNum: number; message: string }>;
   text: string;
   images: NativeExtractedImage[];
