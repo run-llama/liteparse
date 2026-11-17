@@ -491,6 +491,30 @@ async fn test_annotation_text_complexity_reason() {
     );
 }
 
+/// A caption with a year and a numbered element ("Table 1-1. 2025 …") sits in
+/// the header band of this page of IRS Publication 17 and must not be stripped
+/// as a journal-citation footer.
+#[tokio::test]
+#[serial]
+async fn test_numbered_table_caption_survives_chrome_detection() {
+    let lit = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        output_format: OutputFormat::Markdown,
+        ..Default::default()
+    });
+    let parsed = lit
+        .parse("../../integration_tests_data/irs_p17_table_1_1.pdf")
+        .await
+        .expect("publication page should parse");
+
+    for expected in [
+        "Table 1-1. 2025 Filing Requirements for Most Taxpayers",
+        "Do I Have To File a Return?",
+    ] {
+        assert!(parsed.text.contains(expected), "missing {expected:?}");
+    }
+}
+
 /// Filled AcroForm values are visible page content even though PDFium's text
 /// API does not expose widget appearance streams until they are flattened.
 #[tokio::test]
