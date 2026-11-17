@@ -1,6 +1,6 @@
 [package]
 name = "liteparse-wasm"
-version = "2.19.0"
+version = "2.20.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -26,7 +26,7 @@ console_error_panic_hook = { version = "0.1", optional = true }
 # fallback setjmp/longjmp stubs in wasi_stubs.rs. Only the wasm target links
 # pdfium statically, so scope it there.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-pdfium-sys = { package = "liteparse-pdfium-sys", version = "1.13.0", path = "../pdfium-sys" }
+pdfium-sys = { package = "liteparse-pdfium-sys", version = "1.14.0", path = "../pdfium-sys" }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"

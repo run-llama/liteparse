@@ -1,6 +1,6 @@
 {
   "name": "@llamaindex/liteparse",
-  "version": "2.19.0",
+  "version": "2.20.0",
   "description": "Fast, lightweight PDF and document parsing with spatial text extraction",
   "type": "module",
   "main": "./dist/lib.cjs",

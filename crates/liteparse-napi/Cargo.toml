@@ -1,6 +1,6 @@
 [package]
 name = "liteparse-napi"
-version = "2.19.0"
+version = "2.20.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -14,11 +14,11 @@ default = ["tesseract"]
 tesseract = ["liteparse/tesseract"]
 
 [dependencies]
-liteparse = { package = "liteparse", version = "2.19.0", path = "../liteparse", default-features = false }
-pdfium-sys = { package = "liteparse-pdfium-sys", version = "1.13.0", path = "../pdfium-sys" }
+liteparse = { package = "liteparse", version = "2.20.0", path = "../liteparse", default-features = false }
+pdfium-sys = { package = "liteparse-pdfium-sys", version = "1.14.0", path = "../pdfium-sys" }
 napi = { version = "2", features = ["async", "serde-json", "napi9"] }
 napi-derive = "2"
-pdfium = { package = "liteparse-pdfium", version = "1.13.0", path = "../pdfium" }
+pdfium = { package = "liteparse-pdfium", version = "1.14.0", path = "../pdfium" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
