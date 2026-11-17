@@ -101,6 +101,7 @@ All optional, camelCase:
 | `ocrLanguage` | `string` | `"eng"` | Language code passed to the OCR engine |
 | `ocrEnabled` | `boolean` | `false` | Run OCR on text-sparse pages. Off by default in WASM — there is no built-in engine, so this does nothing without `ocrEngine` |
 | `ocrEngine` | `object` | — | Custom JS-side OCR engine (see above) |
+| `onOcrPage` | `(page: ParsedPage) => void` | — | Early OCR text and boxes during `parse()`; calls can arrive out of page order |
 | `numWorkers` | `number` | `1` | Maximum concurrent OCR calls |
 | `ocrFailureFatal` | `boolean` | `true` | When `false`, OCR failures return partial results instead of throwing |
 | `ocrHedgeDelaysMs` | `number[]` | `[]` | Request-hedging schedule for a remote `ocrEngine` |

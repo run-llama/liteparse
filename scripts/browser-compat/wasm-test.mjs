@@ -121,6 +121,8 @@ async function main() {
     console.log(`  OCR maximum concurrency: ${ocrMaxConcurrency}`);
     console.log(`  OCR failure cases: ${ocrFailureCases}`);
 
+    console.log(`  Incremental OCR page events: ${await page.locator("#result").getAttribute("data-ocr-page-events")}`);
+
     if (errors.length) {
       console.warn("Browser console errors (non-fatal):", errors);
     }
