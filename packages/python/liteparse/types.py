@@ -509,6 +509,7 @@ class LiteParseConfig:
     extract_document_metadata: bool = False
     detect_screenshot_rects: bool = False
     extract_content_bounds: bool = False
+    render_form_fields: bool = False
 
 
 class ParseError(Exception):
