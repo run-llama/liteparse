@@ -55,7 +55,9 @@ fn stream(dict: &str, content: &str) -> String {
 
 fn complexity(bytes: Vec<u8>) -> PageComplexityStats {
     let lib = Library::init();
-    let document = stages::open(&lib, &PdfInput::Bytes(bytes), None, &[]).unwrap();
+    // PDFium reads from this buffer lazily, so it must outlive the document.
+    let input = PdfInput::Bytes(bytes);
+    let document = stages::open(&lib, &input, None, &[]).unwrap();
     let pages = stages::extract(&document, &stages::ExtractRequest::default())
         .unwrap()
         .pages;
