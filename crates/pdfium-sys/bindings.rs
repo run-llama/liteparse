@@ -449,6 +449,7 @@ pub struct FPDF_LIBRARY_CONFIG_ {
     pub m_RendererType: FPDF_RENDERER_TYPE,
     pub m_FontLibraryType: FPDF_FONT_BACKEND_TYPE,
     pub m_BrotliEnabled: FPDF_BOOL,
+    pub m_IsolatePerDocument: FPDF_BOOL,
 }
 impl Default for FPDF_LIBRARY_CONFIG_ {
     fn default() -> Self {
@@ -1528,6 +1529,18 @@ unsafe extern "C" {
     ) -> FPDF_BOOL;
 }
 unsafe extern "C" {
+    pub fn FPDFPageObj_GetRenderedStrokePattern(
+        document: FPDF_DOCUMENT,
+        page_object: FPDF_PAGEOBJECT,
+    ) -> FPDF_BITMAP;
+}
+unsafe extern "C" {
+    pub fn FPDFPageObj_GetRenderedFillPattern(
+        document: FPDF_DOCUMENT,
+        page_object: FPDF_PAGEOBJECT,
+    ) -> FPDF_BITMAP;
+}
+unsafe extern "C" {
     pub fn FPDFPath_CountSegments(path: FPDF_PAGEOBJECT) -> ::std::os::raw::c_int;
 }
 unsafe extern "C" {
@@ -1837,6 +1850,9 @@ unsafe extern "C" {
         G: *mut f32,
         B: *mut f32,
     ) -> FPDF_BOOL;
+}
+unsafe extern "C" {
+    pub fn FPDFBookmark_GetStyle(bookmark: FPDF_BOOKMARK) -> ::std::os::raw::c_int;
 }
 unsafe extern "C" {
     pub fn FPDFAction_GetType(action: FPDF_ACTION) -> ::std::os::raw::c_ulong;
@@ -3014,6 +3030,13 @@ unsafe extern "C" {
     ) -> ::std::os::raw::c_int;
 }
 unsafe extern "C" {
+    pub fn FPDF_StructElement_GetRawType(
+        struct_element: FPDF_STRUCTELEMENT,
+        buffer: *mut FPDF_WCHAR,
+        buflen: usize,
+    ) -> ::std::os::raw::c_ulong;
+}
+unsafe extern "C" {
     pub fn FPDF_StructElement_GetType(
         struct_element: FPDF_STRUCTELEMENT,
         buffer: *mut ::std::os::raw::c_void,
@@ -3313,4 +3336,38 @@ unsafe extern "C" {
         length: ::std::os::raw::c_ulong,
         index: ::std::os::raw::c_int,
     ) -> FPDF_BOOL;
+}
+unsafe extern "C" {
+    pub fn FPDF_ImportPages(
+        dest_doc: FPDF_DOCUMENT,
+        src_doc: FPDF_DOCUMENT,
+        pagerange: FPDF_BYTESTRING,
+        index: ::std::os::raw::c_int,
+    ) -> FPDF_BOOL;
+}
+unsafe extern "C" {
+    pub fn FPDF_ImportNPagesToOne(
+        src_doc: FPDF_DOCUMENT,
+        output_width: f32,
+        output_height: f32,
+        num_pages_on_x_axis: usize,
+        num_pages_on_y_axis: usize,
+    ) -> FPDF_DOCUMENT;
+}
+unsafe extern "C" {
+    pub fn FPDF_NewXObjectFromPage(
+        dest_doc: FPDF_DOCUMENT,
+        src_doc: FPDF_DOCUMENT,
+        src_page_index: ::std::os::raw::c_int,
+    ) -> FPDF_XOBJECT;
+}
+unsafe extern "C" {
+    pub fn FPDF_CloseXObject(xobject: FPDF_XOBJECT);
+}
+unsafe extern "C" {
+    pub fn FPDF_NewFormObjectFromXObject(xobject: FPDF_XOBJECT) -> FPDF_PAGEOBJECT;
+}
+unsafe extern "C" {
+    pub fn FPDF_CopyViewerPreferences(dest_doc: FPDF_DOCUMENT, src_doc: FPDF_DOCUMENT)
+        -> FPDF_BOOL;
 }
