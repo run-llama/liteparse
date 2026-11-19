@@ -531,7 +531,15 @@ pub(crate) fn calculate_page_complexity(
     let is_full_page = |b: &ImageBounds| {
         b.width > pw * MAX_IMAGE_PAGE_COVERAGE && b.height > ph * MAX_IMAGE_PAGE_COVERAGE
     };
-    let full_page_image = all_images.iter().any(is_full_page);
+    // A scan can also be drawn inside a form XObject, which `image_bounds`
+    // doesn't walk. Only the full-page signal looks there: inline figures in
+    // forms (LaTeX includes, header logos) would otherwise newly trip
+    // `EmbeddedImages` on ordinary born-digital pages.
+    let full_page_image = all_images.iter().any(is_full_page)
+        || page_obj
+            .form_image_bounds(MIN_IMAGE_SIZE_PT)
+            .iter()
+            .any(is_full_page);
     let image_bounds: Vec<&ImageBounds> = all_images.iter().filter(|b| !is_full_page(b)).collect();
     let has_images = !image_bounds.is_empty();
 

@@ -751,6 +751,56 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
         }
     }
 
+    /// Bounding boxes of image objects drawn inside form XObjects, which
+    /// [`Self::image_bounds`] does not see (it only walks top-level objects).
+    /// Each image is placed through its enclosing forms' matrices and clamped
+    /// to the page's view box. Returns viewport-space boxes (Y-down, top-left
+    /// origin) in PDF points, skipping images smaller than `min_size_pt` in
+    /// either dimension.
+    pub fn form_image_bounds(&self, min_size_pt: f32) -> Vec<ImageBounds> {
+        let view_box = self.view_box().unwrap_or(RectF {
+            left: 0.0,
+            top: self.height(),
+            right: self.width(),
+            bottom: 0.0,
+        });
+        let mut page_rects = Vec::new();
+        let obj_count = unsafe { ffi!(FPDFPage_CountObjects(self.handle)) };
+        for i in 0..obj_count {
+            let obj = unsafe { ffi!(FPDFPage_GetObject(self.handle, i)) };
+            if obj.is_null()
+                || unsafe { ffi!(FPDFPageObj_GetType(obj)) } != pdfium_sys::FPDF_PAGEOBJ_FORM as i32
+            {
+                continue;
+            }
+            collect_form_images(obj, &FS_IDENTITY, 0, &mut page_rects);
+        }
+
+        page_rects
+            .into_iter()
+            .filter_map(|r| {
+                let clamped = RectF {
+                    left: r.left.max(view_box.left),
+                    right: r.right.min(view_box.right),
+                    bottom: r.bottom.max(view_box.bottom),
+                    top: r.top.min(view_box.top),
+                };
+                if clamped.right - clamped.left < min_size_pt
+                    || clamped.top - clamped.bottom < min_size_pt
+                {
+                    return None;
+                }
+                let v = self.bounds_to_viewport(&view_box, &clamped);
+                Some(ImageBounds {
+                    x: v.left,
+                    y: v.top,
+                    width: v.right - v.left,
+                    height: v.bottom - v.top,
+                })
+            })
+            .collect()
+    }
+
     /// Extract bounding boxes of filled vector path objects on this page,
     /// recursing into form XObjects (with each form's transform applied).
     /// Returns coordinates in viewport space (Y-down, top-left origin) in PDF
@@ -1755,6 +1805,65 @@ fn compose_matrix(
     }
 }
 
+/// Collect the page-space boxes of image objects inside a form XObject,
+/// descending into nested forms. `parent` maps the form's container space into
+/// page space (identity for a top-level form).
+fn collect_form_images(
+    form: pdfium_sys::FPDF_PAGEOBJECT,
+    parent: &pdfium_sys::FS_MATRIX,
+    depth: u32,
+    out: &mut Vec<RectF>,
+) {
+    const MAX_DEPTH: u32 = 8;
+    if depth >= MAX_DEPTH {
+        return;
+    }
+    let mut fm = FS_IDENTITY;
+    unsafe { ffi!(FPDFPageObj_GetMatrix(form, &mut fm)) };
+    let form_to_page = compose_matrix(parent, &fm);
+
+    let n = unsafe { ffi!(FPDFFormObj_CountObjects(form)) };
+    for i in 0..n {
+        let child = unsafe { ffi!(FPDFFormObj_GetObject(form, i as std::os::raw::c_ulong)) };
+        if child.is_null() {
+            continue;
+        }
+        match unsafe { ffi!(FPDFPageObj_GetType(child)) } as u32 {
+            pdfium_sys::FPDF_PAGEOBJ_FORM => {
+                collect_form_images(child, &form_to_page, depth + 1, out);
+            }
+            pdfium_sys::FPDF_PAGEOBJ_IMAGE => {
+                // An image's matrix maps the unit square into its container's
+                // space; lift that square all the way to page space.
+                let mut im = FS_IDENTITY;
+                if unsafe { ffi!(FPDFPageObj_GetMatrix(child, &mut im)) } == 0 {
+                    continue;
+                }
+                let m = compose_matrix(&form_to_page, &im);
+                let corners = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)];
+                let mut rect = RectF {
+                    left: f32::INFINITY,
+                    right: f32::NEG_INFINITY,
+                    bottom: f32::INFINITY,
+                    top: f32::NEG_INFINITY,
+                };
+                for (x, y) in corners {
+                    let px = m.a * x + m.c * y + m.e;
+                    let py = m.b * x + m.d * y + m.f;
+                    rect.left = rect.left.min(px);
+                    rect.right = rect.right.max(px);
+                    rect.bottom = rect.bottom.min(py);
+                    rect.top = rect.top.max(py);
+                }
+                if rect.left.is_finite() && rect.top.is_finite() {
+                    out.push(rect);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Recursively collect path objects, descending into Form XObjects. `parent`
 /// is the accumulated form matrix mapping this object's content space into
 /// page space (identity at the top level).
@@ -2155,6 +2264,90 @@ impl Drop for Page<'_, '_> {
 mod tests {
     use super::*;
     use crate::Library;
+
+    /// One-page PDF (200x100) with a top-level image and the same image drawn
+    /// inside a form (`/Matrix [2 0 0 2 10 5]`) and inside a form nested in it.
+    fn form_images_pdf() -> Vec<u8> {
+        fn stream(dict: &str, content: &str) -> String {
+            format!(
+                "<< {dict} /Length {} >>\nstream\n{content}\nendstream",
+                content.len()
+            )
+        }
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R /Fx1 6 0 R >> >> >>".to_string(),
+            stream("", "q 30 0 0 30 150 10 cm /Im1 Do Q q /Fx1 Do Q"),
+            stream(
+                "/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /ASCIIHexDecode",
+                "00FFFF00>",
+            ),
+            stream(
+                "/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Matrix [2 0 0 2 10 5] /Resources << /XObject << /Im1 5 0 R /Fx2 7 0 R >> >>",
+                "q 40 0 0 20 5 10 cm /Im1 Do Q q /Fx2 Do Q",
+            ),
+            stream(
+                "/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Matrix [1 0 0 1 50 0] /Resources << /XObject << /Im1 5 0 R >> >>",
+                "q 10 0 0 10 0 0 cm /Im1 Do Q",
+            ),
+        ];
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    #[test]
+    fn form_image_bounds_places_images_through_nested_form_matrices() {
+        let bytes = form_images_pdf();
+        let library = Library::init();
+        let document = library.load_document_from_bytes(&bytes, None).unwrap();
+        let page = document.page(0).unwrap();
+
+        // Top-level walk is unchanged: only the image drawn on the page itself.
+        let top = page.image_bounds(0.0, f32::INFINITY);
+        assert_eq!(top.len(), 1);
+
+        let nested: Vec<(f32, f32, f32, f32)> = page
+            .form_image_bounds(0.0)
+            .iter()
+            .map(|b| (b.x, b.y, b.width, b.height))
+            .collect();
+        assert_eq!(nested.len(), 2, "{nested:?}");
+        // Fx1: image at x 5..45, y 10..30 in form space -> page x 20..100,
+        // y 25..65 -> viewport y 35.
+        let close = |a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)| {
+            (a.0 - b.0).abs() < 1e-3
+                && (a.1 - b.1).abs() < 1e-3
+                && (a.2 - b.2).abs() < 1e-3
+                && (a.3 - b.3).abs() < 1e-3
+        };
+        assert!(close(nested[0], (20.0, 35.0, 80.0, 40.0)), "{nested:?}");
+        // Fx2 inside Fx1: x 50..60, y 0..10 in Fx1 space -> page x 110..130,
+        // y 5..25 -> viewport y 75.
+        assert!(close(nested[1], (110.0, 75.0, 20.0, 20.0)), "{nested:?}");
+
+        // Size filter applies to the placed (page-space) box.
+        assert_eq!(page.form_image_bounds(30.0).len(), 1);
+    }
 
     #[test]
     fn nested_form_matrix_composition_transforms_path_points_in_order() {
