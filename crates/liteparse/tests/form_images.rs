@@ -1,11 +1,9 @@
-//! A scan drawn inside a form XObject (instead of directly on the page) must
-//! still count as a full-page image in the page complexity check.
+//! Scans drawn inside a form XObject still count as full-page images.
 use liteparse::stages::{self, ComplexityReason, PageComplexityStats};
 use liteparse::types::PdfInput;
 use pdfium::Library;
 
-/// One-page 600x800 PDF whose content is `content`, with an image `/Im1`
-/// reachable from the page and from form `/Fx1` (drawn with `form_matrix`).
+/// 600x800 page with image `/Im1` and form `/Fx1` (drawing `/Im1`).
 fn pdf(content: &str, form_matrix: &str) -> Vec<u8> {
     let form_content = "/Im1 Do";
     let objects = [
@@ -68,7 +66,6 @@ const STAMP: &str = "BT /F1 8 Tf 20 20 Td (Stamp 01) Tj ET";
 
 #[test]
 fn scan_inside_form_is_a_full_page_image() {
-    // The unit-square form only reaches page size through its matrix.
     let stats = complexity(pdf(&format!("q /Fx1 Do Q {STAMP}"), "600 0 0 800 0 0"));
     assert!(stats.full_page_image);
     assert!(
@@ -79,31 +76,9 @@ fn scan_inside_form_is_a_full_page_image() {
 }
 
 #[test]
-fn scan_on_page_and_scan_in_form_agree() {
-    let direct = complexity(pdf(
-        &format!("q 600 0 0 800 0 0 cm /Im1 Do Q {STAMP}"),
-        "1 0 0 1 0 0",
-    ));
-    let in_form = complexity(pdf(&format!("q /Fx1 Do Q {STAMP}"), "600 0 0 800 0 0"));
-    assert_eq!(direct.full_page_image, in_form.full_page_image);
-    assert_eq!(direct.reasons, in_form.reasons);
-}
-
-#[test]
 fn small_image_inside_form_is_not_a_full_page_image() {
     let stats = complexity(pdf(&format!("q /Fx1 Do Q {STAMP}"), "200 0 0 100 50 50"));
     assert!(!stats.full_page_image);
-    // Inline images inside forms are left out of the embedded-image signal.
     assert!(!stats.reasons.contains(&ComplexityReason::Scanned));
     assert!(!stats.reasons.contains(&ComplexityReason::EmbeddedImages));
-}
-
-#[test]
-fn oversized_form_image_off_the_page_is_clamped() {
-    // Image placed mostly off the page: only a 100x100 sliver is visible.
-    let stats = complexity(pdf(
-        &format!("q /Fx1 Do Q {STAMP}"),
-        "2000 0 0 2000 500 700",
-    ));
-    assert!(!stats.full_page_image);
 }

@@ -751,12 +751,8 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
         }
     }
 
-    /// Bounding boxes of image objects drawn inside form XObjects, which
-    /// [`Self::image_bounds`] does not see (it only walks top-level objects).
-    /// Each image is placed through its enclosing forms' matrices and clamped
-    /// to the page's view box. Returns viewport-space boxes (Y-down, top-left
-    /// origin) in PDF points, skipping images smaller than `min_size_pt` in
-    /// either dimension.
+    /// Viewport-space boxes of images inside form XObjects (which
+    /// [`Self::image_bounds`] skips), clamped to the page.
     pub fn form_image_bounds(&self, min_size_pt: f32) -> Vec<ImageBounds> {
         let view_box = self.view_box().unwrap_or(RectF {
             left: 0.0,
@@ -1805,9 +1801,7 @@ fn compose_matrix(
     }
 }
 
-/// Collect the page-space boxes of image objects inside a form XObject,
-/// descending into nested forms. `parent` maps the form's container space into
-/// page space (identity for a top-level form).
+/// Page-space boxes of images in a form and its nested forms.
 fn collect_form_images(
     form: pdfium_sys::FPDF_PAGEOBJECT,
     parent: &pdfium_sys::FS_MATRIX,
@@ -1833,8 +1827,7 @@ fn collect_form_images(
                 collect_form_images(child, &form_to_page, depth + 1, out);
             }
             pdfium_sys::FPDF_PAGEOBJ_IMAGE => {
-                // An image's matrix maps the unit square into its container's
-                // space; lift that square all the way to page space.
+                // The image matrix maps the unit square into the form.
                 let mut im = FS_IDENTITY;
                 if unsafe { ffi!(FPDFPageObj_GetMatrix(child, &mut im)) } == 0 {
                     continue;
@@ -2265,8 +2258,7 @@ mod tests {
     use super::*;
     use crate::Library;
 
-    /// One-page PDF (200x100) with a top-level image and the same image drawn
-    /// inside a form (`/Matrix [2 0 0 2 10 5]`) and inside a form nested in it.
+    /// 200x100 page: one image on the page, one in a form, one in a nested form.
     fn form_images_pdf() -> Vec<u8> {
         fn stream(dict: &str, content: &str) -> String {
             format!(
@@ -2322,7 +2314,6 @@ mod tests {
         let document = library.load_document_from_bytes(&bytes, None).unwrap();
         let page = document.page(0).unwrap();
 
-        // Top-level walk is unchanged: only the image drawn on the page itself.
         let top = page.image_bounds(0.0, f32::INFINITY);
         assert_eq!(top.len(), 1);
 
@@ -2332,8 +2323,6 @@ mod tests {
             .map(|b| (b.x, b.y, b.width, b.height))
             .collect();
         assert_eq!(nested.len(), 2, "{nested:?}");
-        // Fx1: image at x 5..45, y 10..30 in form space -> page x 20..100,
-        // y 25..65 -> viewport y 35.
         let close = |a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)| {
             (a.0 - b.0).abs() < 1e-3
                 && (a.1 - b.1).abs() < 1e-3
@@ -2341,11 +2330,8 @@ mod tests {
                 && (a.3 - b.3).abs() < 1e-3
         };
         assert!(close(nested[0], (20.0, 35.0, 80.0, 40.0)), "{nested:?}");
-        // Fx2 inside Fx1: x 50..60, y 0..10 in Fx1 space -> page x 110..130,
-        // y 5..25 -> viewport y 75.
         assert!(close(nested[1], (110.0, 75.0, 20.0, 20.0)), "{nested:?}");
 
-        // Size filter applies to the placed (page-space) box.
         assert_eq!(page.form_image_bounds(30.0).len(), 1);
     }
 
