@@ -84,3 +84,19 @@ fn small_image_inside_form_is_not_a_full_page_image() {
     assert!(!stats.reasons.contains(&ComplexityReason::Scanned));
     assert!(!stats.reasons.contains(&ComplexityReason::EmbeddedImages));
 }
+
+#[test]
+fn scan_inside_form_does_not_replace_an_invisible_text_layer() {
+    // Born-digital pages often wrap a full-page background in a form; only a
+    // top-level scan sends the native text layer to re-OCR.
+    let invisible = "BT 3 Tr /F1 8 Tf 20 20 Td (An invisible text layer under the form) Tj ET";
+    let stats = complexity(pdf(&format!("q /Fx1 Do Q {invisible}"), "600 0 0 800 0 0"));
+    assert!(stats.full_page_image);
+    assert!(
+        !stats
+            .reasons
+            .contains(&ComplexityReason::InvisibleTextLayer),
+        "{:?}",
+        stats.reasons
+    );
+}

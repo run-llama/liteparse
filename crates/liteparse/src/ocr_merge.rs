@@ -417,7 +417,8 @@ pub struct PageComplexityStats {
     /// backgrounds are excluded from `image_coverage`/`largest_image_coverage`
     /// (they're not inline figures), so this flag is the only signal that
     /// distinguishes a scan from a genuinely blank page — both otherwise report
-    /// no text and no counted images.
+    /// no text and no counted images. Includes rasters drawn inside form
+    /// XObjects, which only relabel a textless page as `Scanned`.
     pub full_page_image: bool,
     /// Filled vector-outline area not covered by native text, in pt². `None`
     /// when a cheaper predicate already flagged the page for OCR, so this
@@ -531,9 +532,12 @@ pub(crate) fn calculate_page_complexity(
     let is_full_page = |b: &ImageBounds| {
         b.width > pw * MAX_IMAGE_PAGE_COVERAGE && b.height > ph * MAX_IMAGE_PAGE_COVERAGE
     };
-    // Scans can sit inside a form XObject. Only this signal looks there, so
-    // figures and logos in forms don't trip `EmbeddedImages`.
-    let full_page_image = all_images.iter().any(is_full_page)
+    // Only a top-level scan gates OCR (`SparseText`, `InvisibleTextLayer`).
+    // Scans can also sit inside a form XObject; those are reported and
+    // relabel a textless page as `Scanned`, but don't send more pages to OCR,
+    // since born-digital pages often wrap a full-page background in a form.
+    let top_level_scan = all_images.iter().any(is_full_page);
+    let full_page_image = top_level_scan
         || page_obj
             .form_image_bounds(MIN_IMAGE_SIZE_PT)
             .iter()
@@ -592,7 +596,7 @@ pub(crate) fn calculate_page_complexity(
         if page_obj.has_annotation_text() {
             reasons.push(ComplexityReason::AnnotationText);
         }
-    } else if sparse_text && (full_page_image || text_length < SPARSE_TEXT_TRUSTED_LEN) {
+    } else if sparse_text && (top_level_scan || text_length < SPARSE_TEXT_TRUSTED_LEN) {
         // There is real text, but it's too thin to be the whole page. A page that already
         // carries plenty of native text and no raster at all has nothing else for OCR to read
         // but text drawn as vector outlines, which the vector check below measures; OCR'ing it
@@ -605,7 +609,7 @@ pub(crate) fn calculate_page_complexity(
     if is_garbled {
         reasons.push(ComplexityReason::Garbled);
     }
-    if full_page_image
+    if top_level_scan
         && text_length >= MIN_NATIVE_TEXT_LEN
         && (invisible_text_share(page_obj) >= INVISIBLE_LAYER_MIN_SHARE
             || hidden_under_scan_share(page_obj) >= INVISIBLE_LAYER_MIN_SHARE)
