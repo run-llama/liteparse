@@ -2169,6 +2169,11 @@ fn garbled_scope(page: &Page) -> GarbledScope {
             e.0 += j;
             e.1 += m;
         }
+        // The checks below judge decoded text; a math item's text is the TeX pass's LaTeX
+        // ("\\mathbb{N}", "z^{n+1}"), which reads as a vowel-less cipher.
+        if it.math {
+            continue;
+        }
         let (l, v) = count_letters_and_vowels(&it.text);
         total_letters += l;
         total_vowels += v;
@@ -3571,6 +3576,35 @@ mod tests {
         items.push(("TickerFont", "NYSE NASDAQ FTSE DAX SPX"));
         let page = make_font_page(&items);
         assert!(matches!(garbled_scope(&page), GarbledScope::None));
+    }
+
+    /// A math item's text is the TeX pass's LaTeX, not decoded glyphs: its few vowels must not
+    /// flag a healthy page as garbled (which sends it to whole-page OCR, losing the LaTeX).
+    #[test]
+    fn test_garbled_scope_ignores_math_items() {
+        let mut page = make_font_page(
+            &HEALTHY_PARAGRAPH
+                .iter()
+                .map(|t| ("Helvetica", *t))
+                .collect::<Vec<_>>(),
+        );
+        for latex in [
+            r"A_{n}:f(x,y,z)=xy-z^{n+1},n\in \mathbb{N}",
+            r"D_{n}:f(x,y,z)=z^{2}-x(y^{2}+x^{n-2}),n\in \mathbb{N},n\geq 4",
+            r"E_{7}:f(x,y,z)=x^{2}+y^{3}+yz^{3}",
+            r"s.v=\sum _{i=1}^{m}v_{i}",
+            r"X=V(f)\subset \mathbb{C}^{3}",
+            r"\mathrm{Co}_{1}(f)=\langle (n+1,0,1),(0,n+1,1)\rangle",
+        ] {
+            page.text_items.push(TextItem {
+                text: latex.into(),
+                font_name: None,
+                math: true,
+                ..Default::default()
+            });
+        }
+        assert!(matches!(garbled_scope(&page), GarbledScope::None));
+        assert!(!page_is_garbled(&page));
     }
 
     /// Items with no font name still fall back to the page-wide verdict.
