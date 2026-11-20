@@ -125,6 +125,7 @@ Key files in `crates/liteparse/src/`:
 - `projection.rs` — Layout reconstruction (most complex)
 - `extract.rs` — Raw text item extraction from PDFium
 - `text_clip.rs` — Shared clip visibility, decided per word (any visible glyph keeps the word; leader runs trim per glyph; `keep_clipped_text` disables it): PDFium clip points already include the object matrix; compose only ancestor form matrices and inherit ancestor clips.
+- `text_paint.rs` — Drops fill-only text that never changes a pixel: white on bare page, or the colour of the rectangle under it. Checked against a render.
 - `ocr_merge.rs` — Merging OCR and native text
 
 ### Adding CLI Options
