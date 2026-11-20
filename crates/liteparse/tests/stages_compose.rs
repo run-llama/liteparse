@@ -339,7 +339,12 @@ async fn compose_with(parser: &LiteParse, input: PdfInput, rotate_back: bool) ->
 
     // ── pure: filters, projection, complexity layout half
     stages::apply_content_filters(&mut pages, &parser.content_filters());
-    let parsed = stages::project(pages);
+    // As `parse()` does: markdown and blocks keep emphasis runs apart.
+    let parsed = if markdown || config.extract_blocks {
+        stages::project_for_markdown(pages)
+    } else {
+        stages::project(pages)
+    };
 
     // Boundary 2: projected pages cross before the markdown stages.
     let mut parsed: Vec<ParsedPage> = round_trip(parsed, "Vec<ParsedPage> after project");
