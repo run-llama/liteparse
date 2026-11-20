@@ -39,6 +39,7 @@ export interface LiteParseNativeConfig {
   extractLinks?: boolean;
   keepHeadersFooters?: boolean;
   keepClippedText?: boolean;
+  normalizePunctuation?: boolean;
   extractAnnotations?: boolean;
   extractFormFields?: boolean;
   extractStructureTree?: boolean;

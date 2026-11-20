@@ -517,6 +517,8 @@ pub struct ExtractionOutputOptions {
     pub split_scripts: bool,
     /// Keep native text hidden by rectangular clips (e.g. overflow in a fixed-height cell).
     pub keep_clipped_text: bool,
+    /// Keep native typographic quotes and dashes instead of folding them to ASCII.
+    pub preserve_punctuation: bool,
 }
 
 fn non_empty(value: &Option<String>) -> Option<String> {
@@ -1567,7 +1569,7 @@ fn is_combining_mark(c: char) -> bool {
 /// Fold typographic punctuation to its ASCII equivalent so extracted text
 /// matches plain-ASCII transcriptions: curly quotes → `'`/`"`, the dash family
 /// (en/em/figure/non-breaking/minus) → `-`. Applied to every decoded character
-/// at extraction time so all output formats are consistent.
+/// at extraction time when normalization is enabled, for consistent output formats.
 fn normalize_punct(c: char) -> char {
     match c {
         '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{2032}' => '\'',
@@ -1728,7 +1730,11 @@ fn extract_page_text_items(
                 },
             }
         };
-        let c = normalize_punct(c);
+        let c = if output_options.preserve_punctuation {
+            c
+        } else {
+            normalize_punct(c)
+        };
 
         // Newlines: flush the current segment
         if c == '\n' || c == '\r' {
