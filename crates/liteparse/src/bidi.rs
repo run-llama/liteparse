@@ -75,9 +75,123 @@ pub(crate) fn is_rtl_pieces<'a>(pieces: impl IntoIterator<Item = &'a str> + Clon
     is_rtl_chars(pieces.into_iter().flat_map(str::chars))
 }
 
+/// Reorder a text item's words from visual (left-to-right) order into logical
+/// reading order. A left-to-right item is left alone. A right-to-left item is
+/// walked right-to-left, except that each run of strong-LTR words, together
+/// with the neutral words between them, keeps its left-to-right order.
+pub(crate) fn words_to_logical_order(words: &mut [crate::types::WordBox]) {
+    if !is_rtl_pieces(words.iter().map(|w| w.text.as_str())) {
+        return;
+    }
+    words.sort_by(|a, b| b.x.total_cmp(&a.x));
+    let ltr: Vec<bool> = words
+        .iter()
+        .map(|w| w.text.chars().any(is_strong_ltr_char))
+        .collect();
+    let mut i = 0;
+    while i < words.len() {
+        if !ltr[i] {
+            i += 1;
+            continue;
+        }
+        let mut end = i;
+        for j in i + 1..words.len() {
+            if ltr[j] {
+                end = j;
+            } else if words[j].text.chars().any(is_rtl_char) {
+                break;
+            }
+        }
+        words[i..=end].reverse();
+        i = end + 1;
+    }
+}
+
+/// Glue back words that pdfium delivered as separate visual runs with no
+/// space between them, such as an RTL word split around "/" or ":". Two
+/// consecutive words whose boxes are closer than `max_gap` become one word.
+pub(crate) fn join_touching_words(words: &mut Vec<crate::types::WordBox>, max_gap: f32) {
+    let mut i = 1;
+    while i < words.len() {
+        let (a, b) = (&words[i - 1], &words[i]);
+        let gap = (b.x - (a.x + a.width)).max(a.x - (b.x + b.width));
+        if gap >= max_gap {
+            i += 1;
+            continue;
+        }
+        let b = words.remove(i);
+        let a = &mut words[i - 1];
+        let right = (a.x + a.width).max(b.x + b.width);
+        let bottom = (a.y + a.height).max(b.y + b.height);
+        a.x = a.x.min(b.x);
+        a.y = a.y.min(b.y);
+        a.width = right - a.x;
+        a.height = bottom - a.y;
+        a.text.push_str(&b.text);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::WordBox;
+
+    fn words(texts: &[&str]) -> Vec<WordBox> {
+        texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| WordBox {
+                text: t.to_string(),
+                x: i as f32 * 10.0,
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    fn texts(words: &[WordBox]) -> Vec<&str> {
+        words.iter().map(|w| w.text.as_str()).collect()
+    }
+
+    /// Catches a plain reversal (which would read "Excel Microsoft") and a
+    /// reversal that drags the digits "2020" into the LTR run. Also guards
+    /// against touching a left-to-right line at all.
+    #[test]
+    fn rtl_words_reorder_logically_keeping_ltr_runs() {
+        let mut w = words(&["2020", "سنة", "Microsoft", "Excel", "النظام", "استعمل"]);
+        words_to_logical_order(&mut w);
+        assert_eq!(
+            texts(&w),
+            ["استعمل", "النظام", "Microsoft", "Excel", "سنة", "2020"]
+        );
+
+        let mut w = words(&["Total", "12.34", "ب"]);
+        words_to_logical_order(&mut w);
+        assert_eq!(texts(&w), ["Total", "12.34", "ب"]);
+    }
+
+    /// pdfium hands "أنشطة/روتينات" over as three touching runs. After the
+    /// logical reorder they must fuse into one word spanning all three boxes,
+    /// while the space-separated neighbour "ما" stays apart.
+    #[test]
+    fn touching_words_fuse_after_reorder() {
+        let mk = |t: &str, x: f32, w: f32| WordBox {
+            text: t.to_string(),
+            x,
+            width: w,
+            height: 7.0,
+            ..Default::default()
+        };
+        let mut w = vec![
+            mk("روتينات", 525.0, 19.2),
+            mk("/", 544.3, 2.1),
+            mk("أنشطة", 546.3, 14.3),
+            mk("ما", 573.0, 4.6),
+        ];
+        words_to_logical_order(&mut w);
+        join_touching_words(&mut w, 0.15 * 7.5);
+        assert_eq!(texts(&w), ["ما", "أنشطة/روتينات"]);
+        assert!((w[1].x - 525.0).abs() < 1e-3 && (w[1].width - 35.6).abs() < 1e-3);
+    }
 
     #[test]
     fn strong_direction_classification() {

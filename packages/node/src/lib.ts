@@ -135,6 +135,17 @@ export interface LiteParseConfig {
    * marshalling), so enable only when doing word-level bbox attribution.
    */
   emitWordBoxes: boolean;
+  /**
+   * Build word boxes from the strict glyph boxes instead of the loose font
+   * boxes. Default false.
+   */
+  tightWordBoxes?: boolean;
+  /**
+   * List a right-to-left text item's `words` in logical (reading) order
+   * instead of left-to-right visual order, re-joining words split around
+   * punctuation. Default false. `text` is unchanged.
+   */
+  logicalWordOrder?: boolean;
   /** Include rich PDF text metadata on returned text items. Default false. */
   extractTextMetadata?: boolean;
   /**
@@ -726,6 +737,8 @@ export class LiteParse {
       ocrDespeckleScans: userConfig.ocrDespeckleScans,
       ocrHedgeDelaysMs: userConfig.ocrHedgeDelaysMs,
       emitWordBoxes: userConfig.emitWordBoxes,
+      tightWordBoxes: userConfig.tightWordBoxes,
+      logicalWordOrder: userConfig.logicalWordOrder,
       extractTextMetadata: userConfig.extractTextMetadata,
       cropBox: userConfig.cropBox,
       skipDiagonalText: userConfig.skipDiagonalText,
@@ -791,6 +804,8 @@ export class LiteParse {
       ocrDespeckleScans: resolved.ocrDespeckleScans ?? true,
       ocrHedgeDelaysMs: resolved.ocrHedgeDelaysMs ?? [],
       emitWordBoxes: resolved.emitWordBoxes ?? false,
+      tightWordBoxes: resolved.tightWordBoxes ?? false,
+      logicalWordOrder: resolved.logicalWordOrder ?? false,
       extractTextMetadata: resolved.extractTextMetadata ?? false,
       cropBox: resolved.cropBox ?? undefined,
       skipDiagonalText: resolved.skipDiagonalText ?? false,
