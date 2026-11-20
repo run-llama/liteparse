@@ -33,6 +33,7 @@ pub mod search;
 pub mod stages;
 mod tex_math;
 mod text_clip;
+mod text_paint;
 pub mod types;
 
 // ── Internal modules (available for binding crates, hidden from docs) ──
