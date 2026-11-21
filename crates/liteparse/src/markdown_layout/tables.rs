@@ -5942,7 +5942,8 @@ pub(super) fn merge_table_runs(
     }
     kept.sort_by_key(|r| r.start);
     for run in &mut kept {
-        if let Block::Table { rows, .. } = &mut run.block {
+        if let Block::Table { header, rows } = &mut run.block {
+            fold_header_continuations(header, rows);
             merge_continuation_rows(rows);
         }
     }
@@ -5984,41 +5985,74 @@ fn merge_continuation_rows(rows: &mut Vec<Vec<Cell>>) {
     // like a continuation and the table collapses into a single row. Requiring
     // the first column to be populated in at least half the rows separates the
     // two.
-    let first_col_filled = rows
-        .iter()
-        .filter(|r| r.first().is_some_and(|c| !c.text.trim().is_empty()))
-        .count();
-    if first_col_filled * 2 < rows.len() {
+    if !first_column_labels_rows(rows) {
         return;
     }
     let mut out: Vec<Vec<Cell>> = Vec::with_capacity(rows.len());
     for row in rows.drain(..) {
         if let Some(prev) = out.last_mut() {
             if is_continuation_row(prev, &row) {
-                for (i, cell) in row.iter().enumerate() {
-                    let t = cell.text.trim();
-                    if t.is_empty() {
-                        continue;
-                    }
-                    // `prev[i]` is non-empty for every filled column of `row`;
-                    // that is the subset rule `is_continuation_row` enforces.
-                    prev[i].text.push(' ');
-                    prev[i].text.push_str(t);
-                    // The wrapped line is part of the same logical cell, so it
-                    // grows that cell's box down to cover the continuation.
-                    if let Some(r) = &cell.bbox {
-                        Rect::extend(&mut prev[i].bbox, r);
-                    }
-                    prev[i]
-                        .text_item_indices
-                        .extend_from_slice(&cell.text_item_indices);
-                }
+                append_continuation(prev, &row);
                 continue;
             }
         }
         out.push(row);
     }
     *rows = out;
+}
+
+/// Whether the first column is populated in at least half of `rows`, i.e. it is a label
+/// column, so an empty first cell marks a wrapped line rather than a real row.
+fn first_column_labels_rows(rows: &[Vec<Cell>]) -> bool {
+    let first_col_filled = rows
+        .iter()
+        .filter(|r| r.first().is_some_and(|c| !c.text.trim().is_empty()))
+        .count();
+    first_col_filled * 2 >= rows.len()
+}
+
+/// Append the filled cells of a continuation `row` to `prev`, column by column.
+fn append_continuation(prev: &mut [Cell], row: &[Cell]) {
+    for (i, cell) in row.iter().enumerate() {
+        let t = cell.text.trim();
+        if t.is_empty() {
+            continue;
+        }
+        // `prev[i]` is non-empty for every filled column of `row`;
+        // that is the subset rule `is_continuation_row` enforces.
+        prev[i].text.push(' ');
+        prev[i].text.push_str(t);
+        // The wrapped line is part of the same logical cell, so it
+        // grows that cell's box down to cover the continuation.
+        if let Some(r) = &cell.bbox {
+            Rect::extend(&mut prev[i].bbox, r);
+        }
+        prev[i]
+            .text_item_indices
+            .extend_from_slice(&cell.text_item_indices);
+    }
+}
+
+/// Fold soft-wrapped header lines back into the header row.
+///
+/// A header cell that wraps ("GATS XVII" / "Reservation" / "(1994)") leaves its tail lines
+/// as the first body rows, where [`merge_continuation_rows`] has no row above them to fold
+/// into, so the header comes out as one row of fragments followed by rows of more fragments.
+/// The leading body rows that continue the header under the same rules as a body
+/// continuation join it; at least one body row always stays.
+fn fold_header_continuations(header: &mut Option<Vec<Cell>>, rows: &mut Vec<Vec<Cell>>) {
+    let Some(header) = header else {
+        return;
+    };
+    if !first_column_labels_rows(rows) {
+        return;
+    }
+    let mut folded = 0;
+    while folded + 1 < rows.len() && is_continuation_row(header, &rows[folded]) {
+        append_continuation(header, &rows[folded]);
+        folded += 1;
+    }
+    rows.drain(..folded);
 }
 
 fn is_continuation_row(prev: &[Cell], cur: &[Cell]) -> bool {
@@ -6728,6 +6762,43 @@ mod tests {
             "● To understand the meaning of reducing and recycling and how they connect ● To be familiar with the 7 Rs"
         );
         assert_eq!(r[1][0], "Skills");
+    }
+
+    #[test]
+    fn wrapped_header_lines_fold_into_the_header() {
+        // opendataloader-bench 088-090: each header cell wraps over up to four lines.
+        let mut header =
+            Some(rows(&[&["Jurisdiction", "GATS XVII", "Foreign", "Foreign"]]).remove(0));
+        let mut r = rows(&[
+            &["", "Reservation", "Ownership", "Ownership"],
+            &["", "(1994)", "Permitted", "Reporting"],
+            &["", "", "", "Requirements"],
+            &["Argentina", "Y", "Y", "None."],
+            &["Australia", "N", "Y", "Acquisitions must be reported."],
+            &["Austria", "Y", "Y", "None."],
+            &["Belgium", "N", "Y", "None."],
+        ]);
+        fold_header_continuations(&mut header, &mut r);
+        let header = header.unwrap();
+        assert_eq!(header[1], "GATS XVII Reservation (1994)");
+        assert_eq!(header[2], "Foreign Ownership Permitted");
+        assert_eq!(header[3], "Foreign Ownership Reporting Requirements");
+        assert_eq!(r.len(), 4);
+        assert_eq!(r[0][0], "Argentina");
+    }
+
+    #[test]
+    fn header_fold_leaves_a_sparse_first_column_alone() {
+        // Blank-label rows under a hierarchical header are real rows, not wrapped lines.
+        let mut header = Some(rows(&[&["Category", "Item", "Colour"]]).remove(0));
+        let mut r = rows(&[
+            &["", "Apple", "Red"],
+            &["", "Banana", "Yellow"],
+            &["Vegetable", "Leek", "Green"],
+        ]);
+        fold_header_continuations(&mut header, &mut r);
+        assert_eq!(header.unwrap()[1], "Item");
+        assert_eq!(r.len(), 3);
     }
 
     #[test]
