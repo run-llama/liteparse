@@ -1682,6 +1682,22 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> 
                 .iter()
                 .filter(|c| match_track_idx(c, &track_ranges).is_none())
                 .all(|c| c.end_x < first_track_x || c.start_x > tracks_right_edge);
+            // A run that so far holds only header text (no value-like cell) was seeded by a
+            // sub-header spanning part of the table, e.g. "Number of | Number of | ..." over
+            // the figure columns, while the row labels sit further left. The first row of
+            // data that extends past it on the left shows the table's real width: break and
+            // let that row seed the table instead of trimming its labels off as bleed.
+            let header_only_run = rows
+                .iter()
+                .all(|(_, _, row)| row.iter().all(|c| !is_value_like(&c.text)));
+            let wider_data_row = cells.iter().any(|c| is_value_like(&c.text))
+                && cells
+                    .iter()
+                    .filter(|c| match_track_idx(c, &track_ranges).is_none())
+                    .all(|c| c.end_x < first_track_x);
+            if header_only_run && wider_data_row {
+                break;
+            }
             if kept.len() == column_count && extras_all_outside {
                 trimmed = cells
                     .iter()
@@ -8226,6 +8242,60 @@ mod tests {
         assert!(matches!(run.block, Block::Table { .. }), "{:?}", run.block);
         assert_eq!((run.start, run.end), (0, 4));
         assert_run_keeps_text(&lines, &run);
+    }
+
+    #[test]
+    fn subheader_seeded_run_keeps_the_row_labels() {
+        // opendataloader-bench 046: a sub-header spans only the figure columns; the rows
+        // below carry a number and a name to its left. The labels belong to the table,
+        // not to an adjacent page column.
+        let row =
+            |n: &'static str, name: &'static str, a: &'static str, b: &'static str, y: f32| {
+                line_with_spans(
+                    &[
+                        (n, 50.0),
+                        (name, 90.0),
+                        (a, 250.0),
+                        (b, 330.0),
+                        ("+12", 410.0),
+                    ],
+                    y,
+                    10.0,
+                )
+            };
+        let lines = vec![
+            line_with_spans(
+                &[
+                    ("Number of", 250.0),
+                    ("Number of", 330.0),
+                    ("Difference", 410.0),
+                ],
+                100.0,
+                10.0,
+            ),
+            row("1", "Cambodian People's Party", "1,652", "28,008", 112.0),
+            row("2", "Candlelight Party", "1,649", "23,679", 124.0),
+            row("3", "Funcinpec Party", "715", "9,407", 136.0),
+        ];
+        // Seeded at the sub-header, the run must not take the data rows and trim their
+        // labels off as page-column bleed.
+        let from_subheader = try_detect_table(&lines, 0, 0);
+        assert!(
+            from_subheader.as_ref().is_none_or(|r| r.end <= 1),
+            "{:?}",
+            from_subheader.map(|r| r.block)
+        );
+        // Seeded at the first data row, the table spans all five columns.
+        let run = try_detect_table(&lines, 1, 0).expect("table");
+        let Block::Table { header, rows } = &run.block else {
+            panic!("{:?}", run.block)
+        };
+        let all: Vec<&Vec<Cell>> = header.iter().chain(rows.iter()).collect();
+        assert!(all.iter().all(|r| r.len() == 5), "{all:?}");
+        assert!(
+            all.iter().any(|r| r[1] == "Cambodian People's Party"),
+            "{all:?}"
+        );
     }
 
     #[test]
