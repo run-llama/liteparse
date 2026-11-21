@@ -1918,6 +1918,46 @@ fn detect_and_render_flowing_lines(
 // Main grid projection
 // ---------------------------------------------------------------------------
 
+/// Indices of single-"." items that sit right after the end of a non-dot item on the same
+/// line (gap within a third of the line height) and are not followed by another dot:
+/// sentence or abbreviation periods split off by the extractor, as opposed to leader or
+/// decoration dots.
+fn attached_periods(items: &[ProjectedTextItem]) -> HashSet<usize> {
+    let mut out = HashSet::new();
+    for (i, dot) in items.iter().enumerate() {
+        if dot.item.text != "." {
+            continue;
+        }
+        let d = &dot.item;
+        let tol = (d.height * 0.33).max(1.0);
+        let touches = items.iter().any(|other| {
+            let o = &other.item;
+            let overlap = (o.y + o.height).min(d.y + d.height) - o.y.max(d.y);
+            o.text
+                .chars()
+                .any(|c| c != '.' && c != '·' && c != '•' && !c.is_whitespace())
+                && overlap > 0.5 * d.height.min(o.height)
+                && (d.x - (o.x + o.width)).abs() <= tol
+        });
+        // A leader drawn one dot per item also starts right after its text; what follows
+        // tells them apart: the next item on the line is another dot.
+        let is_dot = |t: &str| !t.is_empty() && t.chars().all(|c| c == '.' || c == '·' || c == '•');
+        let next_is_dot = items
+            .iter()
+            .filter(|other| {
+                let o = &other.item;
+                let overlap = (o.y + o.height).min(d.y + d.height) - o.y.max(d.y);
+                overlap > 0.5 * d.height.min(o.height) && o.x >= d.x + d.width * 0.5
+            })
+            .min_by(|a, b| a.item.x.total_cmp(&b.item.x))
+            .is_some_and(|n| is_dot(n.item.text.trim()));
+        if touches && !next_is_dot {
+            out.insert(i);
+        }
+    }
+    out
+}
+
 fn project_to_grid(
     page: &Page,
     mut projection_boxes: Vec<ProjectedTextItem>,
@@ -1941,12 +1981,21 @@ fn project_to_grid(
     });
 
     if dot_count > 100 && (dot_count as f64) > (projection_boxes.len() as f64) * 0.05 {
+        // A lone "." that touches the text before it on its line is punctuation the
+        // extractor's dot-leader split sheared off ("12. 9. 2012" as "12" "." "9" "."), not
+        // a leader dot: leaders come as runs of dots. Dropping those turned a page of dates
+        // and abbreviations into "12 9 2012" once its periods passed the count above.
+        let attached = attached_periods(&projection_boxes);
+        let mut idx = 0;
         projection_boxes.retain(|item| {
-            !item
-                .item
-                .text
-                .chars()
-                .all(|c| c == '.' || c == '·' || c == '•')
+            let keep = attached.contains(&idx)
+                || !item
+                    .item
+                    .text
+                    .chars()
+                    .all(|c| c == '.' || c == '·' || c == '•');
+            idx += 1;
+            keep
         });
     }
 
@@ -5822,6 +5871,35 @@ mod tests {
         );
         assert_eq!(lines[1].text, "100");
         assert_eq!(lines[1].region_path, NUMERIC_FOOTER_PATH);
+    }
+
+    #[test]
+    fn attached_periods_are_punctuation_not_leaders() {
+        // "12. 9." split into "12" "." "9" "." keeps its periods; a leader drawn one dot per
+        // item after "Data" does not, even though its first dot touches the word too.
+        let items = vec![
+            item_at("12", 100.0, 50.0, 12.0, 12.0),
+            item_at(".", 112.0, 50.0, 3.0, 12.0),
+            item_at("9", 118.0, 50.0, 6.0, 12.0),
+            item_at(".", 124.0, 50.0, 3.0, 12.0),
+            item_at("2012", 130.0, 50.0, 24.0, 12.0),
+            item_at("Data", 100.0, 80.0, 24.0, 12.0),
+            item_at(".", 124.0, 80.0, 3.0, 12.0),
+            item_at(".", 130.0, 80.0, 3.0, 12.0),
+            item_at(".", 136.0, 80.0, 3.0, 12.0),
+            item_at("5", 200.0, 80.0, 6.0, 12.0),
+            item_at(".", 300.0, 110.0, 3.0, 12.0),
+        ];
+        let attached = attached_periods(&items);
+        assert!(
+            attached.contains(&1) && attached.contains(&3),
+            "{attached:?}"
+        );
+        assert!(!attached.contains(&6) && !attached.contains(&7) && !attached.contains(&8));
+        assert!(
+            !attached.contains(&10),
+            "a lone dot touching nothing is not punctuation"
+        );
     }
 
     #[test]
