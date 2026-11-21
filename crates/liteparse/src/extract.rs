@@ -1798,6 +1798,7 @@ fn extract_page_text_items(
         // normal line box on its baseline (#529).
         let vp_loose = normalize_tall_font_box(
             &vp_loose,
+            &vp_strict,
             baseline,
             obj_meta.meta_for(&ch, cv.text_object()).font_em_metrics,
         )
@@ -3418,18 +3419,24 @@ fn prescan_page_batched(
 }
 
 /// A font's own line box (ascent − descent, per em) above which its vertical metrics are treated
-/// as pathological. Text fonts sit between about 1.0 and 1.6 em. Cambria Math carries 5.58 em
-/// (`/Ascent 3116 /Descent -2463`), and WPS Office embeds those metrics in the Cambria subset it
-/// uses for digits, Latin letters and leader dots (#529).
-const TALL_FONT_LINE_BOX_EM: f32 = 3.0;
+/// as pathological. Text fonts sit between about 1.0 and 1.6 em. TeX symbol fonts that also hold
+/// big delimiters reach about 4 em (MnSymbol10 in the CI set's trouble_docs_3: 4.01 em) and lay
+/// out correctly with their own boxes, so the bar sits above them. Cambria Math carries 5.58 em
+/// (`/Ascent 3116 /Descent -2463`), and WPS Office and other producers embed those metrics in the
+/// Cambria subsets they use for digits, Latin letters and leader dots (#529).
+const TALL_FONT_LINE_BOX_EM: f32 = 5.0;
 
 /// Ascent and descent, per em, of the line box such a font's glyphs get instead.
 const NORMAL_ASCENT_EM: f32 = 0.8;
 const NORMAL_DESCENT_EM: f32 = 0.2;
 
 /// The loose box a glyph gets when its font's own line box is pathological (#529): one em on the
-/// glyph's baseline, `NORMAL_ASCENT_EM` above and `NORMAL_DESCENT_EM` below. `None` keeps the
-/// loose box as it is.
+/// glyph's baseline, `NORMAL_ASCENT_EM` above and `NORMAL_DESCENT_EM` below, grown to the glyph's
+/// ink where the ink reaches further. `None` keeps the loose box as it is.
+///
+/// A font with Cambria Math's metrics can still draw a glyph taller than one em (a big
+/// delimiter); taking the ink into account keeps such a glyph as tall as it is drawn, while a
+/// digit or a leader dot (ink well inside one em) gets the plain one-em box.
 ///
 /// Decided per font, not per glyph, and applied to every glyph of the font, a run's first
 /// included: then a lone period lines up with its neighbours instead of falling out of the line
@@ -3441,6 +3448,7 @@ const NORMAL_DESCENT_EM: f32 = 0.2;
 /// descent do. A rotated glyph's vertical extent is its advance, which fails that check.
 fn normalize_tall_font_box(
     vp_loose: &RectF,
+    vp_ink: &RectF,
     baseline: Option<f32>,
     em_metrics: Option<(f32, f32)>,
 ) -> Option<RectF> {
@@ -3455,11 +3463,17 @@ fn normalize_tall_font_box(
     if em <= 0.0 || ((baseline - top) - ascent * em).abs() > 0.25 * em {
         return None;
     }
+    let mut top = baseline - NORMAL_ASCENT_EM * em;
+    let mut bottom = baseline + NORMAL_DESCENT_EM * em;
+    if vp_ink.bottom > vp_ink.top {
+        top = top.min(vp_ink.top);
+        bottom = bottom.max(vp_ink.bottom);
+    }
     Some(RectF {
         left: vp_loose.left,
-        top: baseline - NORMAL_ASCENT_EM * em,
+        top,
         right: vp_loose.right,
-        bottom: baseline + NORMAL_DESCENT_EM * em,
+        bottom,
     })
 }
 
