@@ -1687,15 +1687,31 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> 
             // the figure columns, while the row labels sit further left. The first row of
             // data that extends past it on the left shows the table's real width: break and
             // let that row seed the table instead of trimming its labels off as bleed.
+            //
+            // Row labels repeat on every row at the same x; prose from a neighbouring page
+            // column lines up with only some rows. So the next line must also be a data row
+            // with cells left of the tracks starting where this row's do.
             let header_only_run = rows
                 .iter()
                 .all(|(_, _, row)| row.iter().all(|c| !is_value_like(&c.text)));
-            let wider_data_row = cells.iter().any(|c| is_value_like(&c.text))
-                && cells
-                    .iter()
-                    .filter(|c| match_track_idx(c, &track_ranges).is_none())
-                    .all(|c| c.end_x < first_track_x);
-            if header_only_run && wider_data_row {
+            let left_data_row = |row: &[TableCell]| {
+                row.iter().any(|c| is_value_like(&c.text))
+                    && row.first().is_some_and(|c| c.end_x < first_track_x)
+                    && row
+                        .iter()
+                        .filter(|c| match_track_idx(c, &track_ranges).is_none())
+                        .all(|c| c.end_x < first_track_x)
+            };
+            let labels_repeat = || {
+                lines.get(j + 1).is_some_and(|next| {
+                    let next_cells = split_cells(next);
+                    table_rows_adjacent(&lines[j], next)
+                        && left_data_row(&next_cells)
+                        && (next_cells[0].start_x - cells[0].start_x).abs()
+                            <= TABLE_TRACK_TOLERANCE_PT
+                })
+            };
+            if header_only_run && left_data_row(&cells) && labels_repeat() {
                 break;
             }
             if kept.len() == column_count && extras_all_outside {
@@ -8296,6 +8312,46 @@ mod tests {
             all.iter().any(|r| r[1] == "Cambodian People's Party"),
             "{all:?}"
         );
+    }
+
+    #[test]
+    fn subheader_seeded_run_still_trims_neighbouring_column_prose() {
+        // ParseBench 222876fb p21: a two-column page where a prose line of the left column
+        // lines up with one row of the table on the right. It is bleed, not a label column.
+        let lines = vec![
+            line_with_spans(
+                &[("Range", 250.0), ("Offset", 330.0), ("Twos", 410.0)],
+                100.0,
+                10.0,
+            ),
+            line_with_spans(
+                &[
+                    ("proper operation.", 50.0),
+                    ("+0.999", 250.0),
+                    ("1,111", 330.0),
+                    ("0,111", 410.0),
+                ],
+                112.0,
+                10.0,
+            ),
+            line_with_spans(
+                &[("+0.998", 250.0), ("1,110", 330.0), ("0,110", 410.0)],
+                124.0,
+                10.0,
+            ),
+            line_with_spans(
+                &[("+0.997", 250.0), ("1,101", 330.0), ("0,101", 410.0)],
+                136.0,
+                10.0,
+            ),
+        ];
+        let run = try_detect_table(&lines, 0, 0).expect("table");
+        let Block::Table { header, rows } = &run.block else {
+            panic!("{:?}", run.block)
+        };
+        assert!(header.iter().chain(rows.iter()).all(|r| r.len() == 3));
+        assert_eq!(run.end, 4);
+        assert_run_keeps_text(&lines, &run);
     }
 
     #[test]
