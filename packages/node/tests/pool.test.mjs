@@ -92,6 +92,34 @@ test("parseTimeoutMs requires poolSize", () => {
   assert.throws(() => new LiteParse({ parseTimeoutMs: 5000 }), /poolSize/);
 });
 
+for (const timeout of [
+  Infinity,
+  2_147_483_648,
+  Number.MAX_SAFE_INTEGER,
+  Number.MAX_VALUE,
+]) {
+  test(`parseTimeoutMs rejects a deadline outside the timer range: ${timeout}`, () => {
+    let parser;
+    try {
+      assert.throws(() => {
+        parser = new LiteParse({ ...CFG, poolSize: 1, parseTimeoutMs: timeout });
+      }, /parseTimeoutMs/);
+    } finally {
+      parser?.close();
+    }
+  });
+}
+
+test("parseTimeoutMs accepts the maximum supported timer delay", async () => {
+  const parser = new LiteParse({ ...CFG, poolSize: 1, parseTimeoutMs: 2_147_483_647 });
+  try {
+    const result = await parser.parse(gridPdf(1));
+    assert.equal(result.pages.length, 1);
+  } finally {
+    parser.close();
+  }
+});
+
 test("timeout kills worker and pool recovers", { skip: !existsSync(SAMPLE_PDF) }, async () => {
   const slowDoc = gridPdf(64000); // parses in seconds, not before the deadline
   const pooled = new LiteParse({ ...CFG, poolSize: 1, parseTimeoutMs: 500 });
