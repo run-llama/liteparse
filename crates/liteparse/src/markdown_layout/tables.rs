@@ -6049,11 +6049,30 @@ fn fold_header_continuations(header: &mut Option<Vec<Cell>>, rows: &mut Vec<Vec<
     }
     let mut folded = 0;
     while folded + 1 < rows.len() && is_continuation_row(header, &rows[folded]) {
+        let filled: Vec<&str> = rows[folded]
+            .iter()
+            .map(|c| c.text.trim())
+            .filter(|t| !t.is_empty())
+            .collect();
+        // A lone label under the header is a section row, or the tail of a row carried
+        // over from the previous page, not a wrapped header: the first folded line must
+        // continue at least two header cells. And header fragments are short; a long
+        // one is body text.
+        if (folded == 0 && filled.len() < 2)
+            || filled
+                .iter()
+                .any(|t| t.chars().count() > HEADER_WRAP_MAX_CHARS)
+        {
+            break;
+        }
         append_continuation(header, &rows[folded]);
         folded += 1;
     }
     rows.drain(..folded);
 }
+
+/// Longest fragment a wrapped header line may add to a header cell.
+const HEADER_WRAP_MAX_CHARS: usize = 40;
 
 fn is_continuation_row(prev: &[Cell], cur: &[Cell]) -> bool {
     if cur.len() != prev.len() || cur.len() < 2 {
@@ -6785,6 +6804,41 @@ mod tests {
         assert_eq!(header[3], "Foreign Ownership Reporting Requirements");
         assert_eq!(r.len(), 4);
         assert_eq!(r[0][0], "Argentina");
+    }
+
+    #[test]
+    fn header_fold_leaves_a_section_row_alone() {
+        // ParseBench dense_table_236: a one-cell section label under the header is a body row.
+        let mut header = Some(rows(&[&["Code", "Description", "Exposure", "Rate"]]).remove(0));
+        let mut r = rows(&[
+            &[
+                "",
+                "Oil or Gas Lease Operations - Operators With Field Operations",
+                "",
+                "",
+            ],
+            &[
+                "REN101",
+                "Producing wells < 5K Feet",
+                "Per Well",
+                "Included",
+            ],
+            &[
+                "REN102",
+                "Producing wells 5 - 10K Feet",
+                "Per Well",
+                "Included",
+            ],
+            &[
+                "REN103",
+                "Producing wells >10 - 15K Feet",
+                "Per Well",
+                "Included",
+            ],
+        ]);
+        fold_header_continuations(&mut header, &mut r);
+        assert_eq!(header.unwrap()[1], "Description");
+        assert_eq!(r.len(), 4);
     }
 
     #[test]
