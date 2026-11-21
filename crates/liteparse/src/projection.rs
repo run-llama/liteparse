@@ -3940,6 +3940,31 @@ fn xy_peak_fill_stats(
     (min_fill, avg_fill)
 }
 
+/// Two columns whose typical text heights differ by at least this factor are independent text
+/// runs (a large-type pull quote or sidebar beside a body column), not the columns of a table.
+const XY_TWO_COLUMN_MAX_SIZE_RATIO: f32 = 1.6;
+
+/// For a region split at `boundary` into two columns: the ratio of the larger to the smaller
+/// median text height of the two columns (1.0 when either side is empty).
+fn two_column_size_ratio(items: &[ProjectedTextItem], idxs: &[usize], boundary: f32) -> f32 {
+    let mut cols: [Vec<f32>; 2] = [Vec::new(), Vec::new()];
+    for &i in idxs {
+        let it = &items[i].item;
+        if it.text.trim().is_empty() || it.height <= 0.0 {
+            continue;
+        }
+        cols[usize::from(it.x >= boundary)].push(it.height);
+    }
+    let median = |v: &mut Vec<f32>| {
+        v.sort_by(|a, b| a.total_cmp(b));
+        v.get(v.len() / 2).copied()
+    };
+    match (median(&mut cols[0].clone()), median(&mut cols[1].clone())) {
+        (Some(a), Some(b)) if a > 0.0 && b > 0.0 => a.max(b) / a.min(b),
+        _ => 1.0,
+    }
+}
+
 fn xy_find_column_cut(
     items: &[ProjectedTextItem],
     idxs: &[usize],
@@ -4372,7 +4397,14 @@ fn xy_find_column_cut(
             *tabular = true;
             return None;
         }
-        if avg_fill.is_finite() && avg_fill < XY_COLUMN_MIN_FILL {
+        // Two low-fill columns set at very different sizes are not a table. A body column
+        // beside a large-type pull quote (ragged short lines, often one item per word) fills its
+        // slots about as sparsely as a key/value table; marking it tabular suppressed the column
+        // split and interleaved the two columns line by line.
+        let independent_columns = n == 2
+            && two_column_size_ratio(items, idxs, (peaks[0].0 + peaks[1].0) * 0.5)
+                >= XY_TWO_COLUMN_MAX_SIZE_RATIO;
+        if avg_fill.is_finite() && avg_fill < XY_COLUMN_MIN_FILL && !independent_columns {
             *tabular = true;
             return None;
         }
@@ -5852,6 +5884,48 @@ mod tests {
                 assert_eq!(r, 5, "right col should hold 5 items");
             }
             _ => panic!("expected a vertical split, got {:?}", region.kind),
+        }
+    }
+
+    #[test]
+    fn xy_cut_splits_body_column_from_large_type_pull_quote() {
+        // ParseBench text_multicolumns__esg_whitespace: a body column of small type beside a
+        // pull quote set at twice the size in short ragged lines. Both column slots are sparse
+        // (the gutter is wide), which read as a key/value table and suppressed the split, so
+        // the two columns were interleaved line by line.
+        let mut items = Vec::new();
+        for row in 0..40 {
+            let y = 160.0 + row as f32 * 10.4;
+            items.push(item_at(
+                "body column text of the page",
+                70.0,
+                y,
+                140.0,
+                10.0,
+            ));
+        }
+        let widths = [60.0, 150.0, 75.0, 110.0, 90.0, 140.0, 65.0, 95.0];
+        for row in 0..20 {
+            let y = 160.0 + row as f32 * 18.0;
+            items.push(item_at(
+                "pull quote",
+                391.0,
+                y,
+                widths[row % widths.len()],
+                22.0,
+            ));
+        }
+        let region = xy_cut(&items, 596.0, 842.0, &[]);
+        let mut leaves = Vec::new();
+        xy_walk_leaves(&region, &mut Vec::new(), &mut leaves);
+        for (_, idxs) in &leaves {
+            let left = idxs.iter().any(|&i| items[i].item.x < 300.0);
+            let right = idxs.iter().any(|&i| items[i].item.x > 300.0);
+            assert!(
+                !(left && right),
+                "a leaf mixes the two columns: {:?}",
+                region.kind
+            );
         }
     }
 
