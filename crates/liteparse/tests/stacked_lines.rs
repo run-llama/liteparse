@@ -143,3 +143,61 @@ async fn tall_glyph_does_not_drop_adjacent_line() {
         assert!(got.contains(want), "missing {want:?} in {got:?}");
     }
 }
+
+/// Text items with their heights.
+async fn items_with_height(bytes: Vec<u8>) -> Vec<(String, f32)> {
+    let parser = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        quiet: true,
+        ..LiteParseConfig::default()
+    });
+    let result = parser.parse_input(PdfInput::Bytes(bytes)).await.unwrap();
+    result.pages[0]
+        .text_items
+        .iter()
+        .map(|item| (item.text.clone(), item.height))
+        .collect()
+}
+
+/// #529: WPS Office sets digits and leader dots in a Cambria subset carrying Cambria Math's
+/// `/Ascent 3116 /Descent -2463`, with a large raw `Tf` scaled down by `Tm`. Every short run
+/// that starts with one of those glyphs used to come out ~5.6x as tall as its 11pt text,
+/// reach over the table-of-contents lines around it and get them deduped away.
+#[tokio::test]
+async fn tall_font_metrics_keep_toc_lines_and_heights() {
+    let entries = ["Overview", "Division of tasks", "Requirements"];
+    let mut content = Vec::new();
+    for (k, title) in entries.iter().enumerate() {
+        let y = 600.0 - 26.4 * k as f32;
+        content.push(format!("BT /F1 11 Tf 90 {y:.1} Td ({title}) Tj ET"));
+        content.push(format!(
+            "BT /F2 221 Tf 0.05 0 0 0.05 200 {y:.1} Tm (......) Tj ET"
+        ));
+        content.push(format!(
+            "BT /F2 221 Tf 0.05 0 0 0.05 240 {y:.1} Tm ({}) Tj ET",
+            k + 1
+        ));
+    }
+    content.push("BT /F2 221 Tf 0.05 0 0 0.05 90 480 Tm (3.) Tj ET".to_string());
+    content.push("BT /F1 11 Tf 102 480 Td (Set deadlines for every task.) Tj ET".to_string());
+    let tall = [
+        "<< /Type /Font /Subtype /TrueType /BaseFont /TallCambria /Encoding /WinAnsiEncoding /FirstChar 46 /LastChar 57 /Widths [250 278 500 500 500 500 500 500 500 500 500 500] /FontDescriptor 7 0 R >>",
+        "<< /Type /FontDescriptor /FontName /TallCambria /Flags 32 /FontBBox [-1474 -2463 2867 3116] /ItalicAngle 0 /Ascent 3116 /Descent -2463 /CapHeight 667 /StemV 88 >>",
+    ];
+    let got = items_with_height(pdf(&content.join("\n"), &tall)).await;
+    let text = got
+        .iter()
+        .map(|(t, _)| t.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    for want in entries
+        .iter()
+        .copied()
+        .chain(["1", "2", "3", "Set deadlines"])
+    {
+        assert!(text.contains(want), "missing {want:?} in {text:?}");
+    }
+    for (t, h) in &got {
+        assert!(*h < 16.0, "{t:?} is {h}pt tall for 11pt text: {got:?}");
+    }
+}
