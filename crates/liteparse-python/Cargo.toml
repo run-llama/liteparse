@@ -11,8 +11,9 @@ name = "_liteparse"
 crate-type = ["cdylib"]
 
 [features]
-default = ["tesseract"]
+default = ["tesseract", "ocria-nano"]
 tesseract = ["liteparse/tesseract"]
+ocria-nano = ["liteparse/ocria-nano"]
 
 [dependencies]
 liteparse = { package = "liteparse", version = "2.20.0", path = "../liteparse", default-features = false }

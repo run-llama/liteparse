@@ -1157,6 +1157,91 @@ struct BoxMeta {
     force_unsnapped: bool,
     rendered: bool,
     projected_x: usize,
+    // Recorded only when projection signals are collected: which block the item sits in,
+    // whether that block rendered as flowing prose, and how many items share each of its
+    // anchors (0 = no anchor of that kind).
+    block_idx: usize,
+    flowing: bool,
+    left_count: usize,
+    right_count: usize,
+    center_count: usize,
+}
+
+/// Per-item projection signals (see `dump_projection`).
+#[derive(serde::Serialize)]
+struct ProjDumpItem {
+    t: String,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    line: usize,
+    block: usize,
+    flow: bool,
+    snap: &'static str,
+    lc: usize,
+    rc: usize,
+    cc: usize,
+    px: usize,
+}
+
+thread_local! {
+    static PROJ_DUMP: std::cell::RefCell<Vec<ProjDumpItem>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Debug builds only (`projection-dump` feature): the file `LITEPARSE_PROJECTION_DUMP` names.
+#[cfg(feature = "projection-dump")]
+fn projection_dump_path() -> Option<std::ffi::OsString> {
+    std::env::var_os("LITEPARSE_PROJECTION_DUMP")
+}
+
+#[cfg(not(feature = "projection-dump"))]
+fn projection_dump_path() -> Option<std::ffi::OsString> {
+    None
+}
+
+fn projection_dump_enabled() -> bool {
+    COLLECT_SIGNALS.with(|c| c.get()) || projection_dump_path().is_some()
+}
+
+/// Per-item projection signals of one page, kept in memory for the table model
+/// (`table_model`).
+#[derive(Clone, Debug, Default)]
+pub struct ProjSignals {
+    pub width: f32,
+    pub height: f32,
+    /// original box (x, y, w, h), flowing, left / right / centre anchor counts, snap, block
+    pub items: Vec<ProjSignalItem>,
+    /// XY-cut leaf membership: an item's original box and its leaf path
+    pub leaves: Vec<([f32; 4], Vec<u16>)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProjSignalItem {
+    pub text: String,
+    pub bx: [f32; 4],
+    pub flow: bool,
+    pub lc: usize,
+    pub rc: usize,
+    pub cc: usize,
+    pub snap: char,
+    pub block: usize,
+}
+
+thread_local! {
+    static COLLECT_SIGNALS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SIGNALS: std::cell::RefCell<std::collections::HashMap<usize, ProjSignals>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Keep each projected page's signals in memory (for the table model) until [`take_signals`].
+pub fn collect_signals(on: bool) {
+    COLLECT_SIGNALS.with(|c| c.set(on));
+}
+
+/// The signals collected on this thread since the last call, by page number.
+pub fn take_signals() -> std::collections::HashMap<usize, ProjSignals> {
+    SIGNALS.with(|s| std::mem::take(&mut *s.borrow_mut()))
 }
 
 fn anchor_key(x: f32) -> i32 {
@@ -2000,7 +2085,12 @@ fn project_to_grid(
     let mut forward_center: BTreeMap<i32, usize> = BTreeMap::new();
     let mut forward_floating: BTreeMap<i32, usize> = BTreeMap::new();
 
-    for block in &blocks {
+    for (block_idx, block) in blocks.iter().enumerate() {
+        for meta_line in meta.iter_mut().take(block.end).skip(block.start) {
+            for m in meta_line {
+                m.block_idx = block_idx;
+            }
+        }
         // --- Anchor extraction (per block) ---
         let (mut anchor_left, mut anchor_right, mut anchor_center) =
             extract_block_anchors(&lines, block);
@@ -2077,6 +2167,11 @@ fn project_to_grid(
             page.page_width,
             median_width,
         ) {
+            for meta_line in meta.iter_mut().take(block.end).skip(block.start) {
+                for m in meta_line {
+                    m.flowing = true;
+                }
+            }
             render_flowing_block(&mut lines, block, &mut raw_lines, &mut meta, median_width);
             continue;
         }
@@ -2113,6 +2208,9 @@ fn project_to_grid(
                     .center_anchor
                     .and_then(|k| anchor_center.get(&k).map(|v| v.len()))
                     .unwrap_or(0);
+                m.left_count = left_count;
+                m.right_count = right_count;
+                m.center_count = center_count;
 
                 if left_count == 0 && right_count == 0 && center_count == 0 {
                     continue;
@@ -2966,8 +3064,33 @@ fn project_to_grid(
     // Persist projected positions and flatten in line order.
     let mut flattened: Vec<ProjectedTextItem> =
         Vec::with_capacity(lines.iter().map(|l| l.len()).sum());
+    let dump = projection_dump_enabled();
     for (line_idx, line) in lines.into_iter().enumerate() {
         for (box_idx, mut item) in line.into_iter().enumerate() {
+            if dump {
+                let m = &meta[line_idx][box_idx];
+                let rec = ProjDumpItem {
+                    t: item.item.text.clone(),
+                    x: item.orig_x,
+                    y: item.orig_y,
+                    w: item.orig_width,
+                    h: item.orig_height,
+                    line: line_idx,
+                    block: m.block_idx,
+                    flow: m.flowing,
+                    snap: match m.snap {
+                        Some(SnapKind::Left) => "L",
+                        Some(SnapKind::Right) => "R",
+                        Some(SnapKind::Center) => "C",
+                        None => "",
+                    },
+                    lc: m.left_count,
+                    rc: m.right_count,
+                    cc: m.center_count,
+                    px: m.projected_x,
+                };
+                PROJ_DUMP.with(|d| d.borrow_mut().push(rec));
+            }
             item.force_unsnapped = meta[line_idx][box_idx].force_unsnapped;
             item.num_spaces = meta[line_idx][box_idx].should_space;
 
@@ -3112,6 +3235,9 @@ fn project_pages(pages: Vec<Page>, style_runs: bool) -> Vec<ParsedPage> {
                 page.page_height,
                 &obstacles,
             );
+            if projection_dump_enabled() {
+                dump_projection(&page, &projected_items, &regions);
+            }
             let projected_item_frames = projected_item_frames(&projected_items);
             ParsedPage {
                 page_number: page.page_number,
@@ -3138,6 +3264,9 @@ fn project_pages(pages: Vec<Page>, style_runs: bool) -> Vec<ParsedPage> {
                 vector_graphics: page.vector_graphics,
                 figures,
                 projected_item_frames,
+                model_tables: Vec::new(),
+                model_classes: Vec::new(),
+                model_blocks: Vec::new(),
                 struct_nodes: page.struct_nodes,
                 image_refs: page.image_refs,
                 complexity: None,
@@ -5089,6 +5218,81 @@ pub(crate) fn xy_cut(
 
 /// Pre-order walk of leaves. Each leaf yields its `region_path` (index trail
 /// from the root) and item indices. Leaves with no items are skipped.
+/// Hands the page's projection signals to the table model when it asked for them. Debug
+/// builds (`projection-dump` feature) can also append them, one JSON line per page, to the file
+/// `LITEPARSE_PROJECTION_DUMP` names, for inspecting the projection: per-item anchor-group
+/// sizes, snap, grid column, line/block and flowing prose, plus each item's XY-cut leaf path.
+/// Boxes are the items' original page coordinates, so the two lists join by box.
+fn dump_projection(page: &Page, items: &[ProjectedTextItem], regions: &Region) {
+    #[derive(serde::Serialize)]
+    struct Leaf {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        path: Vec<u16>,
+    }
+    let recs = PROJ_DUMP.with(|d| std::mem::take(&mut *d.borrow_mut()));
+    let mut leaves = Vec::new();
+    xy_walk_leaves(regions, &mut Vec::new(), &mut leaves);
+    let mut leaf_items = Vec::new();
+    for (path, idxs) in leaves {
+        for i in idxs {
+            if let Some(it) = items.get(i) {
+                leaf_items.push(Leaf {
+                    x: it.orig_x,
+                    y: it.orig_y,
+                    w: it.orig_width,
+                    h: it.orig_height,
+                    path: path.clone(),
+                });
+            }
+        }
+    }
+    if COLLECT_SIGNALS.with(|c| c.get()) {
+        let sig = ProjSignals {
+            width: page.page_width,
+            height: page.page_height,
+            items: recs
+                .iter()
+                .map(|r| ProjSignalItem {
+                    text: r.t.clone(),
+                    bx: [r.x, r.y, r.w, r.h],
+                    flow: r.flow,
+                    lc: r.lc,
+                    rc: r.rc,
+                    cc: r.cc,
+                    snap: r.snap.chars().next().unwrap_or(' '),
+                    block: r.block,
+                })
+                .collect(),
+            leaves: leaf_items
+                .iter()
+                .map(|l| ([l.x, l.y, l.w, l.h], l.path.clone()))
+                .collect(),
+        };
+        SIGNALS.with(|s| s.borrow_mut().insert(page.page_number, sig));
+    }
+    let Some(path) = projection_dump_path() else {
+        return;
+    };
+    let line = serde_json::json!({
+        "page": page.page_number,
+        "width": page.page_width,
+        "height": page.page_height,
+        "items": recs,
+        "leaves": leaf_items,
+    });
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 fn xy_walk_leaves(region: &Region, path: &mut Vec<u16>, out: &mut Vec<(Vec<u16>, Vec<usize>)>) {
     match &region.kind {
         RegionKind::Leaf { item_indices } => {

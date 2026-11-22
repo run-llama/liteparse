@@ -39,6 +39,9 @@ pub struct JsLiteParseConfig {
     pub ocr_page_request_fields: Option<HashMap<String, HashMap<String, String>>>,
     /// Path to tessdata directory for Tesseract.
     pub tessdata_path: Option<String>,
+    /// Built-in OCR engine when no `ocrServerUrl` is set: "tesseract" or "ocria-nano". Default:
+    /// ocria-nano once pulled (`lit models pull ocria-nano`), else Tesseract.
+    pub ocr_backend: Option<String>,
     /// Maximum number of pages to parse.
     pub max_pages: Option<u32>,
     /// Specific pages to parse (e.g., "1-5,10,15-20").
@@ -76,6 +79,10 @@ pub struct JsLiteParseConfig {
     /// Keep running headers/footers in markdown output instead of stripping
     /// repeated page-band lines and page chrome (default false).
     pub keep_headers_footers: Option<bool>,
+    /// Learned table-structure model (weights file path). Born-digital pages get
+    /// their tables from the model wherever it finds one. Also read from
+    /// LITEPARSE_TABLE_MODEL.
+    pub table_model: Option<String>,
     /// Keep text hidden by rectangular clips (e.g. overflow from a
     /// fixed-height table cell) instead of dropping it. Default false.
     pub keep_clipped_text: Option<bool>,
@@ -195,6 +202,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.tessdata_path {
             cfg.tessdata_path = Some(v);
         }
+        if let Some(v) = self.ocr_backend {
+            cfg.ocr_backend = Some(v.parse().map_err(|e: String| napi::Error::from_reason(e))?);
+        }
         if let Some(v) = self.max_pages {
             cfg.max_pages = v as usize;
         }
@@ -208,7 +218,7 @@ impl JsLiteParseConfig {
             cfg.continue_on_page_error = v;
         }
         if let Some(v) = self.dpi {
-            cfg.dpi = v as f32;
+            cfg.dpi = Some(v as f32);
         }
         if let Some(v) = self.output_format {
             cfg.output_format = parse_output_format(&v)?;
@@ -243,6 +253,9 @@ impl JsLiteParseConfig {
         }
         if let Some(v) = self.keep_headers_footers {
             cfg.keep_headers_footers = v;
+        }
+        if let Some(v) = &self.table_model {
+            cfg.table_model = Some(v.clone());
         }
         if let Some(v) = self.keep_clipped_text {
             cfg.keep_clipped_text = v;
@@ -336,11 +349,18 @@ impl JsLiteParseConfig {
                     .collect(),
             ),
             tessdata_path: cfg.tessdata_path.clone(),
+            ocr_backend: Some(
+                match cfg.effective_ocr_backend() {
+                    liteparse::config::OcrBackend::Tesseract => "tesseract",
+                    liteparse::config::OcrBackend::OcriaNano => "ocria-nano",
+                }
+                .to_string(),
+            ),
             max_pages: Some(cfg.max_pages as u32),
             target_pages: cfg.target_pages.clone(),
             extract_screenshots: Some(cfg.extract_screenshots),
             continue_on_page_error: Some(cfg.continue_on_page_error),
-            dpi: Some(cfg.dpi as f64),
+            dpi: Some(cfg.effective_dpi() as f64),
             output_format: Some(match cfg.output_format {
                 OutputFormat::Json => "json".to_string(),
                 OutputFormat::Text => "text".to_string(),
@@ -359,6 +379,7 @@ impl JsLiteParseConfig {
             image_output_dir: cfg.image_output_dir.clone(),
             extract_links: Some(cfg.extract_links),
             keep_headers_footers: Some(cfg.keep_headers_footers),
+            table_model: cfg.table_model.clone(),
             keep_clipped_text: Some(cfg.keep_clipped_text),
             extract_annotations: Some(cfg.extract_annotations),
             extract_blocks: Some(cfg.extract_blocks),

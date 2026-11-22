@@ -252,3 +252,59 @@ pub fn search_items(
         .map(JsTextItem::from_rust)
         .collect()
 }
+
+/// An installed model package (`lit models list`).
+#[cfg(feature = "ocria-nano")]
+#[napi(object)]
+pub struct JsInstalledModel {
+    pub name: String,
+    pub version: Option<String>,
+    pub path: String,
+    pub size_bytes: f64,
+    /// Every file of the package is present (else pull again).
+    pub complete: bool,
+}
+
+/// Download and verify a model package ("ocria-nano" or "ocria-nano@<version>"); `fromDir`
+/// installs from a local directory instead. Resolves to the installed directory.
+#[cfg(feature = "ocria-nano")]
+#[napi]
+pub async fn models_pull(
+    spec: String,
+    from_dir: Option<String>,
+    quiet: Option<bool>,
+) -> Result<String> {
+    let opts = liteparse::models::PullOptions {
+        from: from_dir.map(std::path::PathBuf::from),
+        quiet: quiet.unwrap_or(false),
+    };
+    liteparse::models::pull(&spec, &opts)
+        .await
+        .map(|d| d.to_string_lossy().into_owned())
+        .map_err(|e| Error::from_reason(e.to_string()))
+}
+
+/// Installed model packages.
+#[cfg(feature = "ocria-nano")]
+#[napi]
+pub fn models_list() -> Vec<JsInstalledModel> {
+    liteparse::models::list()
+        .into_iter()
+        .map(|m| JsInstalledModel {
+            name: m.name.to_string(),
+            version: m.version,
+            path: m.dir.to_string_lossy().into_owned(),
+            size_bytes: m.bytes as f64,
+            complete: m.complete,
+        })
+        .collect()
+}
+
+/// Remove an installed model package; returns its directory, or null if not installed.
+#[cfg(feature = "ocria-nano")]
+#[napi]
+pub fn models_rm(name: String) -> Result<Option<String>> {
+    liteparse::models::remove(&name)
+        .map(|d| d.map(|p| p.to_string_lossy().into_owned()))
+        .map_err(|e| Error::from_reason(e.to_string()))
+}

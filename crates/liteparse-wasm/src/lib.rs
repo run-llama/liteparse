@@ -181,7 +181,7 @@ impl LiteParseConfig {
             cfg.detect_screenshot_rects = v;
         }
         if let Some(v) = self.dpi {
-            cfg.dpi = v;
+            cfg.dpi = Some(v);
         }
         if let Some(v) = self.output_format {
             cfg.output_format = match v.as_str() {
@@ -309,7 +309,7 @@ impl LiteParseConfig {
             continue_on_page_error: Some(cfg.continue_on_page_error),
             extract_screenshots: Some(cfg.extract_screenshots),
             detect_screenshot_rects: Some(cfg.detect_screenshot_rects),
-            dpi: Some(cfg.dpi),
+            dpi: Some(cfg.effective_dpi()),
             output_format: Some(match cfg.output_format {
                 OutputFormat::Json => "json".into(),
                 OutputFormat::Text => "text".into(),
@@ -1113,6 +1113,38 @@ export interface OcrEngine {
   recognize(imageData: Uint8Array, width: number, height: number, language: string): Promise<OcrResult[]>;
 }
 
+/** One ocria-nano recognizer: `rec_<script>.onnx`, `rec_<script>.charset.json` and the optional `rec_<script>.meta.json`. */
+export interface OcriaNanoRecognizer {
+  onnx: Uint8Array;
+  charset: Uint8Array;
+  meta?: Uint8Array;
+}
+
+/** The files of an ocria-nano model package as bytes (see `OcriaNano.load`). Recognizers left
+ * out fall back to the Latin one; without `tablenet` the learned table / layout model is off. */
+export interface OcriaNanoModels {
+  det: Uint8Array;
+  detMeta?: Uint8Array;
+  router: Uint8Array;
+  recLatin: OcriaNanoRecognizer;
+  recCjk?: OcriaNanoRecognizer;
+  recRtl?: OcriaNanoRecognizer;
+  recWorld?: OcriaNanoRecognizer;
+  tablenet?: Uint8Array;
+}
+
+/** What `OcriaNano.fromUrl` downloads, and from where. */
+export interface OcriaNanoFromUrlOptions {
+  /** Where the model files are: `<baseUrl>/<file>`. Default: this release's files on Hugging Face. */
+  baseUrl?: string;
+  /** Recognizers to download; Latin is always included. Default: all of them. */
+  scripts?: Array<"latin" | "cjk" | "rtl" | "world">;
+  /** Download LayoutNet, the learned table / layout model (17 MB). Default: true. */
+  layout?: boolean;
+  /** Check every file's size and sha256 against the release pins. Default: true. */
+  verify?: boolean;
+}
+
 export interface LiteParseInit extends LiteParseConfig {
   ocrEngine?: OcrEngine;
   /** Synchronous OCR preview; calls can arrive out of page order.
@@ -1126,6 +1158,232 @@ export interface LiteParseInit extends LiteParseConfig {
 extern "C" {
     #[wasm_bindgen(typescript_type = "LiteParseInit")]
     pub type LiteParseInit;
+    #[wasm_bindgen(typescript_type = "OcriaNanoModels")]
+    pub type OcriaNanoModels;
+}
+
+/// ocria-nano, LiteParse's own OCR models (and optionally LayoutNet, its learned table / layout
+/// model), loaded from bytes. Loading prepares every model, so load once and share the handle
+/// across parsers ([`LiteParse::with_ocria_nano`]).
+#[cfg(feature = "ocria-nano")]
+#[wasm_bindgen]
+pub struct OcriaNano {
+    engine: std::sync::Arc<liteparse::ocr::ocria::OcriaEngine>,
+    table_net: Option<&'static liteparse::table_model::net::TableNet>,
+}
+
+#[cfg(feature = "ocria-nano")]
+impl OcriaNano {
+    fn from_parts(
+        files: &liteparse::ocr::ocria::OcriaModels,
+        tablenet: Option<Vec<u8>>,
+    ) -> Result<OcriaNano, JsError> {
+        let engine = liteparse::ocr::ocria::OcriaEngine::from_models(files, Default::default())
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let table_net = match tablenet {
+            Some(b) => Some(
+                liteparse::table_model::load_bytes(&b)
+                    .map_err(|e| JsError::new(&format!("tablenet: {e}")))?,
+            ),
+            None => None,
+        };
+        Ok(OcriaNano {
+            engine: std::sync::Arc::new(engine),
+            table_net,
+        })
+    }
+}
+
+/// GET `url` with the global `fetch` (browsers, Node 18+, Deno, Workers) and return the body.
+#[cfg(feature = "ocria-nano")]
+async fn fetch_bytes(url: String) -> Result<Vec<u8>, JsError> {
+    let global = js_sys::global();
+    let fetch = Reflect::get(&global, &JsValue::from_str("fetch"))
+        .ok()
+        .and_then(|f| f.dyn_into::<Function>().ok())
+        .ok_or_else(|| {
+            JsError::new(
+                "no global fetch in this runtime; load the files yourself and use OcriaNano.load",
+            )
+        })?;
+    let js = |e: JsValue| {
+        JsError::new(&format!(
+            "{url}: {}",
+            e.as_string().unwrap_or_else(|| format!("{e:?}"))
+        ))
+    };
+    let promise = fetch.call1(&global, &JsValue::from_str(&url)).map_err(js)?;
+    let resp = JsFuture::from(js_sys::Promise::from(promise))
+        .await
+        .map_err(js)?;
+    let ok = Reflect::get(&resp, &JsValue::from_str("ok"))
+        .ok()
+        .and_then(|v| v.as_bool());
+    if ok != Some(true) {
+        let status = Reflect::get(&resp, &JsValue::from_str("status"))
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let hint = if status == 401.0 || status == 403.0 {
+            " (the files need authentication here; host them yourself and pass `baseUrl`, or fetch them and use OcriaNano.load)"
+        } else {
+            ""
+        };
+        return Err(JsError::new(&format!("{url}: HTTP {status}{hint}")));
+    }
+    let array_buffer: Function = Reflect::get(&resp, &JsValue::from_str("arrayBuffer"))
+        .map_err(js)?
+        .dyn_into()
+        .map_err(|_| JsError::new(&format!("{url}: response has no arrayBuffer()")))?;
+    let promise = array_buffer.call0(&resp).map_err(js)?;
+    let buf = JsFuture::from(js_sys::Promise::from(promise))
+        .await
+        .map_err(js)?;
+    Ok(Uint8Array::new(&buf).to_vec())
+}
+
+#[cfg(feature = "ocria-nano")]
+fn js_bytes(obj: &JsValue, key: &str) -> Result<Option<Vec<u8>>, JsError> {
+    let v = Reflect::get(obj, &JsValue::from_str(key))
+        .map_err(|e| JsError::new(&format!("{key}: {e:?}")))?;
+    if v.is_undefined() || v.is_null() {
+        return Ok(None);
+    }
+    let a = v
+        .dyn_into::<Uint8Array>()
+        .map_err(|_| JsError::new(&format!("{key} must be a Uint8Array")))?;
+    Ok(Some(a.to_vec()))
+}
+
+#[cfg(feature = "ocria-nano")]
+fn js_rec(obj: &JsValue, key: &str) -> Result<Option<liteparse::ocr::ocria::RecModel>, JsError> {
+    let v = Reflect::get(obj, &JsValue::from_str(key))
+        .map_err(|e| JsError::new(&format!("{key}: {e:?}")))?;
+    if v.is_undefined() || v.is_null() {
+        return Ok(None);
+    }
+    let need =
+        |k: &str| js_bytes(&v, k)?.ok_or_else(|| JsError::new(&format!("{key}.{k} is required")));
+    Ok(Some(liteparse::ocr::ocria::RecModel {
+        onnx: need("onnx")?,
+        charset: need("charset")?,
+        meta: js_bytes(&v, "meta")?,
+    }))
+}
+
+#[cfg(feature = "ocria-nano")]
+#[wasm_bindgen]
+impl OcriaNano {
+    /// Prepare the models in `models` (see `OcriaNanoModels`).
+    pub fn load(models: OcriaNanoModels) -> Result<OcriaNano, JsError> {
+        let m: JsValue = models.into();
+        let need =
+            |k: &str| js_bytes(&m, k)?.ok_or_else(|| JsError::new(&format!("{k} is required")));
+        let files = liteparse::ocr::ocria::OcriaModels {
+            det: need("det")?,
+            det_meta: js_bytes(&m, "detMeta")?,
+            router: need("router")?,
+            latin: js_rec(&m, "recLatin")?.ok_or_else(|| JsError::new("recLatin is required"))?,
+            cjk: js_rec(&m, "recCjk")?,
+            rtl: js_rec(&m, "recRtl")?,
+            world: js_rec(&m, "recWorld")?,
+        };
+        Self::from_parts(&files, js_bytes(&m, "tablenet")?)
+    }
+
+    /// Download the ocria-nano model files (see `OcriaNanoFromUrlOptions`) with the global
+    /// `fetch`, check them against this release's pinned sizes and sha256, and load them.
+    #[wasm_bindgen(js_name = fromUrl)]
+    pub async fn from_url(
+        #[wasm_bindgen(unchecked_optional_param_type = "OcriaNanoFromUrlOptions")] options: Option<
+            JsValue,
+        >,
+    ) -> Result<OcriaNano, JsError> {
+        let options = options.unwrap_or(JsValue::UNDEFINED);
+        use liteparse::ocr::ocria::package::{MODEL_BASE_URL, check};
+        let opt = |k: &str| -> JsValue {
+            if options.is_object() {
+                Reflect::get(&options, &JsValue::from_str(k)).unwrap_or(JsValue::UNDEFINED)
+            } else {
+                JsValue::UNDEFINED
+            }
+        };
+        let base = opt("baseUrl")
+            .as_string()
+            .unwrap_or_else(|| MODEL_BASE_URL.to_string());
+        let base = base.trim_end_matches('/').to_string();
+        let scripts: Vec<String> = match opt("scripts") {
+            v if v.is_undefined() || v.is_null() => {
+                vec!["latin".into(), "cjk".into(), "rtl".into(), "world".into()]
+            }
+            v => js_sys::Array::from(&v)
+                .iter()
+                .filter_map(|s| s.as_string())
+                .collect(),
+        };
+        for s in &scripts {
+            if !["latin", "cjk", "rtl", "world"].contains(&s.as_str()) {
+                return Err(JsError::new(&format!(
+                    "unknown script {s:?} (latin, cjk, rtl, world)"
+                )));
+            }
+        }
+        let layout = opt("layout").as_bool().unwrap_or(true);
+        let verify = opt("verify").as_bool().unwrap_or(true);
+
+        let mut names: Vec<String> = vec![
+            "det.onnx".into(),
+            "det.meta.json".into(),
+            "router.onnx".into(),
+        ];
+        for g in ["latin", "cjk", "rtl", "world"] {
+            if g == "latin" || scripts.iter().any(|s| s == g) {
+                names.push(format!("rec_{g}.onnx"));
+                names.push(format!("rec_{g}.charset.json"));
+                if g == "rtl" {
+                    names.push("rec_rtl.meta.json".into());
+                }
+            }
+        }
+        if layout {
+            names.push("tablenet.bin".into());
+        }
+        let fetched = futures_util::future::try_join_all(
+            names.iter().map(|n| fetch_bytes(format!("{base}/{n}"))),
+        )
+        .await?;
+        let mut files: HashMap<String, Vec<u8>> = HashMap::new();
+        for (n, bytes) in names.into_iter().zip(fetched) {
+            if verify {
+                check(&n, &bytes).map_err(|e| JsError::new(&e))?;
+            }
+            files.insert(n, bytes);
+        }
+        let mut rec = |g: &str| -> Option<liteparse::ocr::ocria::RecModel> {
+            Some(liteparse::ocr::ocria::RecModel {
+                onnx: files.remove(&format!("rec_{g}.onnx"))?,
+                charset: files.remove(&format!("rec_{g}.charset.json"))?,
+                meta: files.remove(&format!("rec_{g}.meta.json")),
+            })
+        };
+        let (latin, cjk, rtl, world) = (rec("latin"), rec("cjk"), rec("rtl"), rec("world"));
+        let models = liteparse::ocr::ocria::OcriaModels {
+            det: files.remove("det.onnx").unwrap_or_default(),
+            det_meta: files.remove("det.meta.json"),
+            router: files.remove("router.onnx").unwrap_or_default(),
+            latin: latin.ok_or_else(|| JsError::new("rec_latin missing"))?,
+            cjk,
+            rtl,
+            world,
+        };
+        Self::from_parts(&models, files.remove("tablenet.bin"))
+    }
+
+    /// Whether LayoutNet (`tablenet`) was loaded.
+    #[wasm_bindgen(getter, js_name = hasLayoutModel)]
+    pub fn has_layout_model(&self) -> bool {
+        self.table_net.is_some()
+    }
 }
 
 #[wasm_bindgen]
@@ -1141,6 +1399,23 @@ impl LiteParse {
     /// If `config.ocrEngine` is present, it is wired up as the OCR backend.
     #[wasm_bindgen(constructor)]
     pub fn new(config: LiteParseInit) -> Result<LiteParse, JsError> {
+        Self::build(config, None)
+    }
+
+    /// A parser that OCRs with ocria-nano (and runs LayoutNet when `ocria` has it). `config`
+    /// is as for the constructor; an `ocrEngine` in it is ignored.
+    #[cfg(feature = "ocria-nano")]
+    #[wasm_bindgen(js_name = withOcriaNano)]
+    pub fn with_ocria_nano(config: LiteParseInit, ocria: &OcriaNano) -> Result<LiteParse, JsError> {
+        Self::build(config, Some(ocria))
+    }
+}
+
+#[cfg(not(feature = "ocria-nano"))]
+struct OcriaNano;
+
+impl LiteParse {
+    fn build(config: LiteParseInit, ocria: Option<&OcriaNano>) -> Result<LiteParse, JsError> {
         let config: JsValue = config.into();
         let on_ocr_page = if config.is_object() {
             let callback = Reflect::get(&config, &JsValue::from_str("onOcrPage"))
@@ -1171,10 +1446,30 @@ impl LiteParse {
             serde_wasm_bindgen::from_value(config)
                 .map_err(|e| JsError::new(&format!("invalid config: {}", e)))?
         };
-        let core_cfg = js_cfg.into_core()?;
+        #[allow(unused_mut)]
+        let mut core_cfg = js_cfg.into_core()?;
+        // the backend decides defaults such as the render resolution (250 dpi for ocria-nano)
+        #[cfg(feature = "ocria-nano")]
+        if ocria.is_some() {
+            core_cfg.ocr_backend = Some(liteparse::config::OcrBackend::OcriaNano);
+        }
         let mut parser = CoreLiteParse::new(core_cfg.clone());
-        if let Some(js_engine) = ocr_engine_js {
-            parser = parser.with_ocr_engine(std::sync::Arc::new(JsOcrEngine::new(js_engine)));
+        match ocria {
+            #[cfg(feature = "ocria-nano")]
+            Some(o) => {
+                parser = parser.with_ocr_engine(o.engine.clone());
+                if let Some(net) = o.table_net {
+                    parser = parser.with_table_net(net);
+                }
+            }
+            #[cfg(not(feature = "ocria-nano"))]
+            Some(_) => {}
+            None => {
+                if let Some(js_engine) = ocr_engine_js {
+                    parser =
+                        parser.with_ocr_engine(std::sync::Arc::new(JsOcrEngine::new(js_engine)));
+                }
+            }
         }
         Ok(LiteParse {
             inner: parser,
@@ -1182,7 +1477,10 @@ impl LiteParse {
             on_ocr_page,
         })
     }
+}
 
+#[wasm_bindgen]
+impl LiteParse {
     /// Return the resolved config (camelCase JS object).
     #[wasm_bindgen(getter)]
     pub fn config(&self) -> LiteParseConfig {

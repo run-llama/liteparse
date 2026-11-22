@@ -314,6 +314,89 @@ fn has_digit_range(t: &str) -> bool {
 /// consistently (e.g. per-page citation tags). Conservative by design —
 /// requires a strong signature (pattern OR clear size delta) plus an
 /// isolation gap, so real titles and section headings are preserved.
+/// Page bands (fractions of the page height) inside which a layout-model furniture block may strip text.
+const FURNITURE_BAND_FRACTION: f32 = 0.2;
+
+/// Indices of `page.projected_lines` at least half covered by layout-model `PageHeader` / `PageFooter` blocks
+/// in the top / bottom page band: running chrome the model saw on this page alone, which the
+/// cross-page repetition set cannot catch on a one-page document. Rotated lines are skipped (their
+/// projection frame is not the page frame).
+pub fn model_furniture_lines(page: &ParsedPage) -> std::collections::HashSet<usize> {
+    use crate::table_model::BLOCK_CLASSES;
+    let mut out = std::collections::HashSet::new();
+    let h = page.page_height;
+    if h <= 0.0 || page.model_blocks.is_empty() {
+        return out;
+    }
+    let furniture: Vec<&crate::types::Rect> = page
+        .model_blocks
+        .iter()
+        .filter(|b| matches!(BLOCK_CLASSES[b.class], "PageHeader" | "PageFooter"))
+        .map(|b| &b.bbox)
+        .collect();
+    let body: Vec<&crate::types::Rect> = page
+        .model_blocks
+        .iter()
+        .filter(|b| !matches!(BLOCK_CLASSES[b.class], "PageHeader" | "PageFooter"))
+        .map(|b| &b.bbox)
+        .collect();
+    let (top, bottom) = (
+        h * FURNITURE_BAND_FRACTION,
+        h * (1.0 - FURNITURE_BAND_FRACTION),
+    );
+    // the model's blocks are in page space; a projected line's box can be in the projection's reflowed space
+    let pboxes = super::line_page_boxes(page, &page.projected_lines);
+    for (idx, line) in page.projected_lines.iter().enumerate() {
+        if line.text.trim().is_empty() || super::classify::is_rotated_line(line) {
+            continue;
+        }
+        let b = &pboxes[idx];
+        if !(b.y + b.height <= top || b.y >= bottom) {
+            continue;
+        }
+        // At least half the line's width under furniture blocks at its height: a projected line can span two
+        // side-by-side header blocks (left / right running heads), with its centre in the gap between them.
+        let cy = b.y + b.height / 2.0;
+        // Share of the line's text (span widths, not its box: "MUSIC .......... 35" is one wide line whose two
+        // words each sit in a small header block) inside furniture blocks at its height.
+        let at_cy = |r: &crate::types::Rect| r.y <= cy && cy <= r.y + r.height;
+        let span_overlap = |r: &crate::types::Rect| -> f32 {
+            line.spans
+                .iter()
+                .map(|sp| ((sp.x + sp.width).min(r.x + r.width) - sp.x.max(r.x)).max(0.0))
+                .sum()
+        };
+        let ink: f32 = line.spans.iter().map(|sp| sp.width.max(0.0)).sum();
+        let covered: f32 = furniture
+            .iter()
+            .filter(|r| at_cy(r))
+            .map(|r| span_overlap(r))
+            .sum();
+        if ink > 0.0 && covered >= 0.5 * ink {
+            out.insert(idx);
+            continue;
+        }
+        // A line in no body block (letterhead logos, address strips beside a footer): furniture when it lies
+        // beyond every body block toward the page edge, clear of them, so a table row or caption the model
+        // missed inside the content area stays.
+        let unblocked = !body.iter().any(|r| at_cy(r) && span_overlap(r) > 0.0);
+        if unblocked && !body.is_empty() {
+            // separated from the body by at least a line's height: a paragraph's last line just past a model block
+            // that ends a little short is body text
+            let gap = b.height.max(1.0);
+            let beyond = if cy < h / 2.0 {
+                body.iter().all(|r| r.y >= b.y + b.height + gap)
+            } else {
+                body.iter().all(|r| r.y + r.height <= b.y - gap)
+            };
+            if beyond {
+                out.insert(idx);
+            }
+        }
+    }
+    out
+}
+
 pub fn detect_single_page_chrome(
     page: &ParsedPage,
     body_size: f32,

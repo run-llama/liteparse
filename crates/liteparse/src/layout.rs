@@ -251,6 +251,167 @@ impl From<&PositionedBlock> for LayoutBlock {
     }
 }
 
+/// The page's layout blocks with a joint model's blocks in place of the
+/// heuristic text blocks: heuristic figures and tables stay (their rows / ids come from those
+/// paths), every model block whose centre falls in a kept table is dropped, and the rest are
+/// emitted by class (heading / title, page header / footer, list item, code, else paragraph;
+/// table and figure-text classes are left to the heuristic blocks).
+pub(crate) fn with_model_blocks(
+    page: &ParsedPage,
+    heuristic: Vec<LayoutBlock>,
+) -> Vec<LayoutBlock> {
+    let kept: Vec<LayoutBlock> = heuristic
+        .into_iter()
+        .filter(|b| {
+            matches!(
+                b.kind.as_str(),
+                "table" | "merged_table" | "grid_fallback" | "figure"
+            )
+        })
+        .collect();
+    let inside = |r: &Rect| {
+        let (cx, cy) = (r.x + r.width / 2.0, r.y + r.height / 2.0);
+        kept.iter().any(|t| {
+            t.kind != "figure"
+                && t.bbox.as_ref().is_some_and(|b| {
+                    b.x <= cx && cx <= b.x + b.width && b.y <= cy && cy <= b.y + b.height
+                })
+        })
+    };
+    let mut out = kept.clone();
+    // each text item links to one block: the kept heuristic blocks' items first, then the model
+    // block holding the item's centre
+    let mut claimed: std::collections::HashSet<usize> = kept
+        .iter()
+        .flat_map(|b| b.text_item_indices.iter().copied())
+        .collect();
+    for m in &page.model_blocks {
+        if inside(&m.bbox) || m.text.trim().is_empty() {
+            continue;
+        }
+        let (kind, level): (&'static str, Option<u8>) =
+            match crate::table_model::BLOCK_CLASSES[m.class] {
+                "Title" => ("heading", Some(1)),
+                "Heading" => ("heading", Some(2)),
+                "PageHeader" => ("page_header", None),
+                "PageFooter" => ("page_footer", None),
+                "List" => ("list_item", None),
+                "Code" => ("code", None),
+                "Table" | "FigureText" => continue,
+                _ => ("paragraph", None),
+            };
+        let mut b = LayoutBlock::of(kind, Some(m.bbox.clone()));
+        b.level = level;
+        let r = &m.bbox;
+        b.text_item_indices = page
+            .text_items
+            .iter()
+            .enumerate()
+            .filter(|(i, it)| {
+                let (cx, cy) = (it.x + it.width / 2.0, it.y + it.height / 2.0);
+                !claimed.contains(i)
+                    && !it.text.trim().is_empty()
+                    && r.x <= cx
+                    && cx <= r.x + r.width
+                    && r.y <= cy
+                    && cy <= r.y + r.height
+            })
+            .map(|(i, _)| i)
+            .collect();
+        claimed.extend(b.text_item_indices.iter().copied());
+        if kind == "code" {
+            b.lines = Some(vec![m.text.clone()]);
+        } else {
+            b.text = Some(m.text.clone());
+        }
+        out.push(b);
+    }
+    clip_to_page(&mut out, page.page_width, page.page_height);
+    let order = xy_cut_order(&out, page.page_width * page.page_height);
+    let mut slots: Vec<Option<LayoutBlock>> = out.into_iter().map(Some).collect();
+    order.into_iter().filter_map(|i| slots[i].take()).collect()
+}
+
+/// Block indices in reading order by recursive XY-cut over the block boxes: a region splits at a
+/// vertical gutter clear of every block top to bottom (columns, read left to right) when there
+/// is one (the widest), else at its topmost horizontal gap (the band above it first); a region with neither
+/// reads top to bottom, then left to right. Blocks covering half the page or more (full-bleed
+/// backgrounds) would hide every gutter, so they come first and take no part in the cuts.
+fn xy_cut_order(blocks: &[LayoutBlock], page_area: f32) -> Vec<usize> {
+    let rect = |i: usize| {
+        blocks[i].bbox.clone().unwrap_or(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        })
+    };
+    let (mut order, rest): (Vec<usize>, Vec<usize>) = (0..blocks.len())
+        .partition(|&i| page_area > 0.0 && rect(i).width * rect(i).height >= 0.5 * page_area);
+    let boxes: Vec<[f32; 4]> = (0..blocks.len())
+        .map(|i| {
+            let r = rect(i);
+            [r.x, r.y, r.x + r.width, r.y + r.height]
+        })
+        .collect();
+    xy_cut(&boxes, rest, &mut order);
+    order
+}
+
+/// A gap of at least `min` between the intervals `[lo, hi)` of `ids` along one axis (`a` = 0 for
+/// x, 1 for y): the widest, or with `first` the lowest; its cut position and width.
+fn find_gap(
+    boxes: &[[f32; 4]],
+    ids: &[usize],
+    a: usize,
+    min: f32,
+    first: bool,
+) -> Option<(f32, f32)> {
+    let mut iv: Vec<(f32, f32)> = ids
+        .iter()
+        .map(|&i| (boxes[i][a], boxes[i][a + 2]))
+        .collect();
+    iv.sort_by(|p, q| p.0.total_cmp(&q.0));
+    let mut best: Option<(f32, f32)> = None;
+    let mut reach = f32::NEG_INFINITY;
+    for (lo, hi) in iv {
+        if reach > f32::NEG_INFINITY && lo - reach >= min && best.is_none_or(|b| lo - reach > b.1) {
+            best = Some(((lo + reach) / 2.0, lo - reach));
+            if first {
+                break;
+            }
+        }
+        reach = reach.max(hi);
+    }
+    best
+}
+
+fn xy_cut(boxes: &[[f32; 4]], ids: Vec<usize>, out: &mut Vec<usize>) {
+    if ids.len() <= 1 {
+        out.extend(ids);
+        return;
+    }
+    let (axis, cut) = if let Some((c, _)) = find_gap(boxes, &ids, 0, 4.0, false) {
+        (0, c)
+    } else if let Some((c, _)) = find_gap(boxes, &ids, 1, 1.0, true) {
+        (1, c)
+    } else {
+        let mut ids = ids;
+        ids.sort_by(|&a, &b| {
+            boxes[a][1]
+                .total_cmp(&boxes[b][1])
+                .then(boxes[a][0].total_cmp(&boxes[b][0]))
+        });
+        out.extend(ids);
+        return;
+    };
+    let (first, second): (Vec<usize>, Vec<usize>) = ids
+        .into_iter()
+        .partition(|&i| (boxes[i][axis] + boxes[i][axis + 2]) / 2.0 < cut);
+    xy_cut(boxes, first, out);
+    xy_cut(boxes, second, out);
+}
+
 /// Public block list for one page: the classifier's blocks converted to the
 /// flat serializable shape, with geometry in the page's viewport frame.
 ///
@@ -277,21 +438,21 @@ pub(crate) fn blocks_for_page(page: &ParsedPage, blocks: &[PositionedBlock]) -> 
     if !page.projected_item_frames.is_empty() {
         remap_to_page_frame(&mut out, &page.text_items);
     }
-    clip_tables_to_page(&mut out, page.page_width, page.page_height);
+    clip_to_page(&mut out, page.page_width, page.page_height);
     out
 }
 
-/// Clip table and cell boxes to the page. Ruled-grid boundaries come from
+/// Clip block and cell boxes to the page. Ruled-grid boundaries come from
 /// vector paths, whose bounds PDFium reports unclipped, so a path drawn past
-/// the page edge would otherwise stretch a column (and the table) off the page.
-fn clip_tables_to_page(blocks: &mut [LayoutBlock], width: f32, height: f32) {
+/// the page edge would otherwise stretch a column (and the table) off the page;
+/// a full-bleed image's bounds and text set past the edge overhang it too. A
+/// box outside the page is no region of it (and a consumer normalizing by the
+/// page size gets coordinates outside [0, 1]).
+fn clip_to_page(blocks: &mut [LayoutBlock], width: f32, height: f32) {
     if !(width > 0.0 && width.is_finite() && height > 0.0 && height.is_finite()) {
         return;
     }
     for block in blocks.iter_mut() {
-        if !matches!(block.kind.as_str(), "table" | "merged_table") {
-            continue;
-        }
         let cells = block
             .header
             .iter_mut()
@@ -420,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn clip_tables_to_page_clips_offpage_cells() {
+    fn clip_to_page_clips_offpage_cells() {
         let cell = |text: &str, bbox: Rect| LayoutCell {
             text: text.into(),
             bbox: Some(bbox),
@@ -441,29 +602,29 @@ mod tests {
             },
             para(rect(-10.0, 10.0, 100.0, 10.0)),
         ];
-        clip_tables_to_page(&mut blocks, 595.0, 842.0);
+        clip_to_page(&mut blocks, 595.0, 842.0);
         assert_eq!(blocks[0].bbox, Some(rect(160.0, 650.0, 435.0, 14.0)));
         let header = &blocks[0].header.as_ref().unwrap()[0];
         assert_eq!(header.bbox, Some(rect(0.0, 0.0, 180.0, 15.0)));
         let row = &blocks[0].rows.as_ref().unwrap()[0];
         assert_eq!(row[0].bbox, Some(rect(160.0, 650.0, 274.0, 14.0)));
         assert_eq!(row[1].bbox, Some(rect(434.0, 650.0, 161.0, 14.0)));
-        // Only table geometry is clipped.
-        assert_eq!(blocks[1].bbox, Some(rect(-10.0, 10.0, 100.0, 10.0)));
+        // Every block is clipped, not only tables.
+        assert_eq!(blocks[1].bbox, Some(rect(0.0, 10.0, 90.0, 10.0)));
     }
 
     #[test]
-    fn clip_tables_to_page_leaves_non_finite_geometry_alone() {
+    fn clip_to_page_leaves_non_finite_geometry_alone() {
         let nan = rect(f32::NAN, 10.0, 50.0, 10.0);
         let mut blocks = vec![LayoutBlock::of("table", Some(nan))];
-        clip_tables_to_page(&mut blocks, 595.0, 842.0);
+        clip_to_page(&mut blocks, 595.0, 842.0);
         assert!(blocks[0].bbox.as_ref().unwrap().x.is_nan());
         let inf = rect(f32::NEG_INFINITY, 10.0, f32::INFINITY, 10.0);
         let mut blocks = vec![LayoutBlock::of("table", Some(inf.clone()))];
-        clip_tables_to_page(&mut blocks, 595.0, 842.0);
+        clip_to_page(&mut blocks, 595.0, 842.0);
         assert_eq!(blocks[0].bbox, Some(inf));
         let mut blocks = vec![LayoutBlock::of("table", Some(rect(0.0, 0.0, 900.0, 10.0)))];
-        clip_tables_to_page(&mut blocks, f32::NAN, 842.0);
+        clip_to_page(&mut blocks, f32::NAN, 842.0);
         assert_eq!(blocks[0].bbox, Some(rect(0.0, 0.0, 900.0, 10.0)));
     }
 
@@ -546,6 +707,9 @@ mod tests {
             structure_tree: None,
             blocks: None,
             ocr_deskew: None,
+            model_tables: Vec::new(),
+            model_classes: Vec::new(),
+            model_blocks: Vec::new(),
         };
         let para = PositionedBlock::sourced(
             Block::Paragraph {

@@ -1,5 +1,5 @@
 use clap::{Args, Parser, Subcommand};
-use liteparse::config::{LiteParseConfig, OutputFormat};
+use liteparse::config::{LiteParseConfig, OcrBackend, OutputFormat};
 use liteparse::conversion;
 use liteparse::extract;
 use liteparse::ocr_merge::LayoutComplexityReason;
@@ -19,6 +19,29 @@ struct Cli {
     command: Commands,
 }
 
+#[cfg(feature = "ocria-nano")]
+#[derive(Subcommand, Debug)]
+enum ModelsCommand {
+    /// Download a model package, e.g. `lit models pull ocria-nano@latest`
+    Pull {
+        /// Package name, optionally @version
+        spec: String,
+        /// Install from a local directory holding the package files instead of downloading
+        #[arg(long)]
+        from: Option<std::path::PathBuf>,
+        /// Suppress progress output
+        #[arg(short, long)]
+        quiet: bool,
+    },
+    /// Show installed model packages
+    List,
+    /// Remove an installed model package
+    Rm {
+        /// Package name
+        name: String,
+    },
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Parse a document file (PDF, DOCX, XLSX, PPTX, images, etc.)
@@ -32,9 +55,27 @@ enum Commands {
     /// Extract raw text items from a PDF file (no grid projection) [dev tool]
     #[command(hide = true)]
     Extract(ExtractCommand),
+    /// Download, list or remove optional model packages (ocria-nano)
+    #[cfg(feature = "ocria-nano")]
+    #[command(subcommand)]
+    Models(ModelsCommand),
+    /// Serve ocria-nano over HTTP for `--ocr-server-url` (one engine shared by many parsers)
+    #[cfg(feature = "ocr-serve")]
+    OcrServe(OcrServeCommand),
     /// Extract embedded image bounding boxes from a page [dev tool]
     #[command(hide = true)]
     ImageBounds(ExtractCommand),
+}
+
+#[cfg(feature = "ocr-serve")]
+#[derive(Args, Debug)]
+struct OcrServeCommand {
+    /// Address to listen on
+    #[arg(long, default_value = "127.0.0.1:8828")]
+    bind: std::net::SocketAddr,
+    /// Pages OCR'd at once (default: CPU cores)
+    #[arg(long)]
+    max_concurrent: Option<usize>,
 }
 
 #[derive(Args, Debug)]
@@ -58,7 +99,7 @@ struct ParseCommand {
     #[arg(long, default_value = "eng")]
     ocr_language: String,
 
-    /// HTTP OCR server URL (uses Tesseract if not provided)
+    /// HTTP OCR server URL (instead of the built-in --ocr-backend)
     #[arg(long, default_value = None)]
     ocr_server_url: Option<String>,
 
@@ -70,6 +111,11 @@ struct ParseCommand {
     /// Path to tessdata directory (overrides TESSDATA_PREFIX env var)
     #[arg(long)]
     tessdata_path: Option<String>,
+
+    /// OCR engine when no --ocr-server-url is given: tesseract or ocria-nano [default:
+    /// ocria-nano once pulled with `lit models pull ocria-nano`, else tesseract]
+    #[arg(long, value_parser = parse_ocr_backend)]
+    ocr_backend: Option<OcrBackend>,
 
     /// Max pages to parse
     #[arg(long, default_value = "1000")]
@@ -83,9 +129,9 @@ struct ParseCommand {
     #[arg(long)]
     continue_on_page_error: bool,
 
-    /// DPI for rendering (default: 150)
-    #[arg(long, default_value = "150")]
-    dpi: f32,
+    /// DPI for rendering [default: 250 with the ocria-nano OCR backend, else 150]
+    #[arg(long)]
+    dpi: Option<f32>,
 
     /// Preserve very small text
     #[arg(long)]
@@ -128,12 +174,19 @@ struct ParseCommand {
     no_links: bool,
 
     /// Keep running headers/footers in markdown output. By default, lines
-    /// that repeat in the top/bottom page bands across pages (and obvious
-    /// page chrome like `Page N of M`) are stripped from markdown. Pass this
+    /// that repeat in the top/bottom page bands across pages, obvious page
+    /// chrome like `Page N of M`, and text the layout model labels as a page
+    /// header / footer are stripped from markdown. Pass this
     /// to retain them all — e.g. for extraction pipelines that prefer to
     /// deduplicate downstream rather than risk losing content.
     #[arg(long)]
     keep_headers_footers: bool,
+
+    /// Learned table-structure model (weights file). Born-digital pages get their tables from
+    /// the model wherever it finds one; elsewhere the heuristic detectors still run. Defaults to
+    /// the installed ocria-nano package's model.
+    #[arg(long)]
+    table_model: Option<String>,
 
     /// Keep text hidden by rectangular clips (e.g. overflow from a
     /// fixed-height table cell). By default words drawn entirely outside
@@ -224,7 +277,7 @@ struct BatchParseCommand {
     #[arg(long, default_value = "eng")]
     ocr_language: String,
 
-    /// HTTP OCR server URL (uses Tesseract if not provided)
+    /// HTTP OCR server URL (instead of the built-in --ocr-backend)
     #[arg(long, default_value = None)]
     ocr_server_url: Option<String>,
 
@@ -237,6 +290,11 @@ struct BatchParseCommand {
     #[arg(long)]
     tessdata_path: Option<String>,
 
+    /// OCR engine when no --ocr-server-url is given: tesseract or ocria-nano [default:
+    /// ocria-nano once pulled with `lit models pull ocria-nano`, else tesseract]
+    #[arg(long, value_parser = parse_ocr_backend)]
+    ocr_backend: Option<OcrBackend>,
+
     /// Max pages to parse per file
     #[arg(long, default_value = "1000")]
     max_pages: usize,
@@ -245,9 +303,9 @@ struct BatchParseCommand {
     #[arg(long)]
     continue_on_page_error: bool,
 
-    /// DPI for rendering
-    #[arg(long, default_value = "150")]
-    dpi: f32,
+    /// DPI for rendering [default: 250 with the ocria-nano OCR backend, else 150]
+    #[arg(long)]
+    dpi: Option<f32>,
 
     /// Recursively search input directory
     #[arg(long)]
@@ -282,6 +340,10 @@ struct BatchParseCommand {
     /// Include page-scoped vector shapes and merged horizontal/vertical lines.
     #[arg(long)]
     extract_vector_graphics: bool,
+
+    /// Learned table-structure model (weights file); see `parse --table-model`.
+    #[arg(long)]
+    table_model: Option<String>,
 
     /// Include document annotations as page-scoped structured JSON/API data.
     #[arg(long)]
@@ -373,6 +435,10 @@ fn read_stdin_bytes() -> Result<Vec<u8>, std::io::Error> {
     Ok(bytes)
 }
 
+fn parse_ocr_backend(s: &str) -> Result<OcrBackend, String> {
+    s.parse()
+}
+
 fn parse_header(s: &str) -> Result<(String, String), String> {
     let (name, value) = s
         .split_once(':')
@@ -428,6 +494,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ocr_language: cmd.ocr_language,
                 ocr_enabled: !cmd.no_ocr,
                 tessdata_path: cmd.tessdata_path,
+                ocr_backend: cmd.ocr_backend,
                 max_pages: cmd.max_pages,
                 target_pages: cmd.target_pages,
                 continue_on_page_error: cmd.continue_on_page_error,
@@ -443,6 +510,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 image_output_dir: cmd.image_output_dir.clone(),
                 extract_links: !cmd.no_links,
                 keep_headers_footers: cmd.keep_headers_footers,
+                table_model: cmd.table_model.clone(),
                 keep_clipped_text: cmd.keep_clipped_text,
                 extract_annotations: cmd.extract_annotations,
                 extract_form_fields: cmd.extract_form_fields,
@@ -499,7 +567,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let config = LiteParseConfig {
                 target_pages: cmd.target_pages.clone(),
-                dpi: cmd.dpi,
+                dpi: Some(cmd.dpi),
                 password: cmd.password.clone(),
                 quiet: cmd.quiet,
                 ..Default::default()
@@ -535,6 +603,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ocr_language: cmd.ocr_language,
                 ocr_enabled: !cmd.no_ocr,
                 tessdata_path: cmd.tessdata_path,
+                ocr_backend: cmd.ocr_backend,
                 max_pages: cmd.max_pages,
                 target_pages: None,
                 continue_on_page_error: cmd.continue_on_page_error,
@@ -555,6 +624,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 extract_blocks: cmd.extract_blocks,
                 extract_xfa_packets: cmd.extract_xfa_packets,
                 extract_content_bounds: cmd.extract_content_bounds,
+                table_model: cmd.table_model,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {
@@ -648,6 +718,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             extract::extract(&cmd.pdf_path, cmd.page_num)?;
         }
 
+        #[cfg(feature = "ocria-nano")]
+        #[cfg(feature = "ocr-serve")]
+        Commands::OcrServe(cmd) => {
+            let engine = liteparse::ocr::ocria::shared_engine()?;
+            let n = cmd
+                .max_concurrent
+                .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+            liteparse::ocr::ocria::serve::serve(engine, cmd.bind, n).await?;
+        }
+        #[cfg(feature = "ocria-nano")]
+        Commands::Models(cmd) => match cmd {
+            ModelsCommand::Pull { spec, from, quiet } => {
+                liteparse::models::pull(&spec, &liteparse::models::PullOptions { from, quiet })
+                    .await?;
+            }
+            ModelsCommand::List => println!("{}", liteparse::models::list_report()),
+            ModelsCommand::Rm { name } => match liteparse::models::remove(&name)? {
+                Some(dir) => println!("Removed {}", dir.display()),
+                None => println!("{name} is not installed."),
+            },
+        },
         Commands::ImageBounds(cmd) => {
             render::image_bounds(&cmd.pdf_path, cmd.page_num)?;
         }

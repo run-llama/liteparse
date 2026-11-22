@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use liteparse::config::{CropBox, ImageMode, OutputFormat, PageOrientationCorrection};
+use liteparse::config::{CropBox, ImageMode, OcrBackend, OutputFormat, PageOrientationCorrection};
 use liteparse::ocr::{OcrEngine, OcrOptions, OcrResult};
 use liteparse::stages::{self, Library};
 use liteparse::types::{Page, ParsedPage, PdfInput};
@@ -451,6 +451,8 @@ async fn assert_parse_equals_composition(
 /// rewrite.
 fn everything_config() -> LiteParseConfig {
     LiteParseConfig {
+        // the heuristic pipeline the stages compose (an installed ocria-nano package would add LayoutNet)
+        ocr_backend: Some(OcrBackend::Tesseract),
         ocr_enabled: false,
         quiet: true,
         output_format: OutputFormat::Markdown,
@@ -495,6 +497,8 @@ async fn parse_equals_composed_stages_markdown_with_every_option() {
     assert!(with_blocks > 0, "no fixture produced blocks");
     assert!(with_screenshots > 0, "no fixture produced screenshots");
     let config = LiteParseConfig {
+        // the heuristic pipeline the stages compose (an installed ocria-nano package would add LayoutNet)
+        ocr_backend: Some(OcrBackend::Tesseract),
         target_pages: Some("1,2,108,119".into()),
         ..everything_config()
     };
@@ -509,6 +513,8 @@ async fn parse_equals_composed_stages_markdown_with_every_option() {
 #[serial]
 async fn parse_equals_composed_stages_text_output() {
     let config = LiteParseConfig {
+        // the heuristic pipeline the stages compose (an installed ocria-nano package would add LayoutNet)
+        ocr_backend: Some(OcrBackend::Tesseract),
         ocr_enabled: false,
         quiet: true,
         output_format: OutputFormat::Text,
@@ -527,6 +533,8 @@ async fn parse_equals_composed_stages_text_output() {
 #[serial]
 async fn parse_equals_composed_stages_with_ocr_rounds() {
     let config = LiteParseConfig {
+        // the heuristic pipeline the stages compose (an installed ocria-nano package would add LayoutNet)
+        ocr_backend: Some(OcrBackend::Tesseract),
         ocr_enabled: true,
         num_workers: 1,
         quiet: true,
@@ -554,6 +562,8 @@ async fn parse_equals_composed_stages_on_converted_image() {
         return;
     }
     let config = LiteParseConfig {
+        // the heuristic pipeline the stages compose (an installed ocria-nano package would add LayoutNet)
+        ocr_backend: Some(OcrBackend::Tesseract),
         ocr_enabled: true,
         quiet: true,
         output_format: OutputFormat::Markdown,
@@ -627,6 +637,8 @@ async fn composed_stages_need_deskew_rotate_back() {
         return;
     }
     let config = LiteParseConfig {
+        // the heuristic pipeline the stages compose (an installed ocria-nano package would add LayoutNet)
+        ocr_backend: Some(OcrBackend::Tesseract),
         ocr_enabled: true,
         quiet: true,
         output_format: OutputFormat::Markdown,
@@ -684,6 +696,8 @@ async fn composed_stages_need_deskew_rotate_back() {
 #[serial]
 async fn parse_equals_composed_stages_with_orientation_selection_and_filters() {
     let config = LiteParseConfig {
+        // the heuristic pipeline the stages compose (an installed ocria-nano package would add LayoutNet)
+        ocr_backend: Some(OcrBackend::Tesseract),
         ocr_enabled: false,
         quiet: true,
         output_format: OutputFormat::Markdown,
@@ -710,6 +724,8 @@ async fn parse_equals_composed_stages_with_orientation_selection_and_filters() {
 #[serial]
 async fn parse_equals_composed_stages_with_form_fields() {
     let config = LiteParseConfig {
+        // the heuristic pipeline the stages compose (an installed ocria-nano package would add LayoutNet)
+        ocr_backend: Some(OcrBackend::Tesseract),
         ocr_enabled: true,
         quiet: true,
         output_format: OutputFormat::Markdown,
@@ -727,6 +743,8 @@ async fn parse_equals_composed_stages_with_form_fields() {
 #[serial]
 async fn parse_equals_composed_stages_with_form_fields_and_rendered_screenshots() {
     let config = LiteParseConfig {
+        // the heuristic pipeline the stages compose (an installed ocria-nano package would add LayoutNet)
+        ocr_backend: Some(OcrBackend::Tesseract),
         ocr_enabled: false,
         quiet: true,
         output_format: OutputFormat::Markdown,
@@ -767,6 +785,8 @@ fn ocr_page_request_fields_merge_over_the_base() {
             .collect()
     };
     let parser = LiteParse::new(LiteParseConfig {
+        // the heuristic pipeline the stages compose (an installed ocria-nano package would add LayoutNet)
+        ocr_backend: Some(OcrBackend::Tesseract),
         ocr_request_fields: fields(&[("correct_rotation", "true"), ("return_word_boxes", "true")]),
         ocr_page_request_fields: [(numbers[0], fields(&[("correct_rotation", "false")]))].into(),
         ..everything_config()
@@ -900,6 +920,8 @@ async fn extract_page_by_page_equals_one_call_on_one_document() {
         return;
     }
     let parser = LiteParse::new(LiteParseConfig {
+        // the heuristic pipeline the stages compose (an installed ocria-nano package would add LayoutNet)
+        ocr_backend: Some(OcrBackend::Tesseract),
         output_format: OutputFormat::Markdown,
         ..LiteParseConfig::default()
     });
@@ -1018,6 +1040,8 @@ fn signed_form_with_orphan_header_widgets_pdf() -> Vec<u8> {
 #[serial]
 async fn widget_text_survives_extracting_an_earlier_page_first() {
     let parser = LiteParse::new(LiteParseConfig {
+        // the heuristic pipeline the stages compose (an installed ocria-nano package would add LayoutNet)
+        ocr_backend: Some(OcrBackend::Tesseract),
         output_format: OutputFormat::Markdown,
         ..LiteParseConfig::default()
     });

@@ -1,5 +1,5 @@
 use clap::{Args, Parser, Subcommand};
-use liteparse::config::{ImageMode, LiteParseConfig, OutputFormat};
+use liteparse::config::{ImageMode, LiteParseConfig, OcrBackend, OutputFormat};
 use liteparse::conversion;
 use liteparse::output::{json, text};
 use liteparse::parser::LiteParse;
@@ -26,6 +26,28 @@ enum Commands {
     BatchParse(BatchParseCommand),
     /// Check if a document is 'complex' enough to require OCR or advanced parsing
     IsComplex(IsComplexCommand),
+    /// Download, list or remove optional model packages (ocria-nano)
+    #[cfg(feature = "ocria-nano")]
+    #[command(subcommand)]
+    Models(ModelsCommand),
+}
+
+#[cfg(feature = "ocria-nano")]
+#[derive(Subcommand, Debug)]
+enum ModelsCommand {
+    /// Download a model package, e.g. `lit models pull ocria-nano@latest`
+    Pull {
+        spec: String,
+        /// Install from a local directory holding the package files instead of downloading
+        #[arg(long)]
+        from: Option<std::path::PathBuf>,
+        #[arg(short, long)]
+        quiet: bool,
+    },
+    /// Show installed model packages
+    List,
+    /// Remove an installed model package
+    Rm { name: String },
 }
 
 #[derive(Args, Debug)]
@@ -47,6 +69,10 @@ struct ParseCommand {
     ocr_server_headers: Vec<(String, String)>,
     #[arg(long)]
     tessdata_path: Option<String>,
+    /// OCR engine when no --ocr-server-url is given: tesseract or ocria-nano [default:
+    /// ocria-nano once pulled, else tesseract]
+    #[arg(long, value_parser = parse_ocr_backend)]
+    ocr_backend: Option<OcrBackend>,
     #[arg(long, default_value = "1000")]
     max_pages: usize,
     #[arg(long)]
@@ -54,8 +80,9 @@ struct ParseCommand {
     /// Continue after page-level extraction errors and report them in JSON.
     #[arg(long)]
     continue_on_page_error: bool,
-    #[arg(long, default_value = "150")]
-    dpi: f32,
+    /// DPI for rendering [default: 250 with ocria-nano OCR, else 150]
+    #[arg(long)]
+    dpi: Option<f32>,
     #[arg(long)]
     preserve_small_text: bool,
     #[arg(long)]
@@ -83,6 +110,10 @@ struct ParseCommand {
     /// repeated page-band lines and page chrome.
     #[arg(long)]
     keep_headers_footers: bool,
+    /// Learned table-structure model (weights file). Born-digital pages get their tables from
+    /// the model wherever it finds one. Also read from LITEPARSE_TABLE_MODEL.
+    #[arg(long)]
+    table_model: Option<String>,
     /// Keep text hidden by rectangular clips (e.g. overflow from a
     /// fixed-height table cell) instead of dropping it.
     #[arg(long)]
@@ -171,10 +202,15 @@ struct BatchParseCommand {
     ocr_server_headers: Vec<(String, String)>,
     #[arg(long)]
     tessdata_path: Option<String>,
+    /// OCR engine when no --ocr-server-url is given: tesseract or ocria-nano [default:
+    /// ocria-nano once pulled, else tesseract]
+    #[arg(long, value_parser = parse_ocr_backend)]
+    ocr_backend: Option<OcrBackend>,
     #[arg(long, default_value = "1000")]
     max_pages: usize,
-    #[arg(long, default_value = "150")]
-    dpi: f32,
+    /// DPI for rendering [default: 250 with ocria-nano OCR, else 150]
+    #[arg(long)]
+    dpi: Option<f32>,
     #[arg(long)]
     recursive: bool,
     #[arg(long)]
@@ -218,9 +254,17 @@ struct BatchParseCommand {
     /// objects, viewport coords) in JSON output.
     #[arg(long)]
     extract_content_bounds: bool,
+    /// Learned table-structure model (weights file). Born-digital pages get their tables from
+    /// the model wherever it finds one. Also read from LITEPARSE_TABLE_MODEL.
+    #[arg(long)]
+    table_model: Option<String>,
 }
 
 /// Parse a `Name: Value` header string into a `(name, value)` pair.
+fn parse_ocr_backend(s: &str) -> Result<OcrBackend, String> {
+    s.parse()
+}
+
 fn parse_header(s: &str) -> Result<(String, String), String> {
     let (name, value) = s
         .split_once(':')
@@ -284,6 +328,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 ocr_language: cmd.ocr_language,
                 ocr_enabled: !cmd.no_ocr,
                 tessdata_path: cmd.tessdata_path,
+                ocr_backend: cmd.ocr_backend,
                 max_pages: cmd.max_pages,
                 target_pages: cmd.target_pages,
                 continue_on_page_error: cmd.continue_on_page_error,
@@ -299,6 +344,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 image_output_dir: cmd.image_output_dir.clone(),
                 extract_links: !cmd.no_links,
                 keep_headers_footers: cmd.keep_headers_footers,
+                table_model: cmd.table_model.clone(),
                 keep_clipped_text: cmd.keep_clipped_text,
                 extract_annotations: cmd.extract_annotations,
                 extract_form_fields: cmd.extract_form_fields,
@@ -358,7 +404,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 
             let config = LiteParseConfig {
                 target_pages: cmd.target_pages.clone(),
-                dpi: cmd.dpi,
+                dpi: Some(cmd.dpi),
                 password: cmd.password.clone(),
                 quiet: cmd.quiet,
                 ..Default::default()
@@ -393,6 +439,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 ocr_language: cmd.ocr_language,
                 ocr_enabled: !cmd.no_ocr,
                 tessdata_path: cmd.tessdata_path,
+                ocr_backend: cmd.ocr_backend,
                 max_pages: cmd.max_pages,
                 target_pages: None,
                 dpi: cmd.dpi,
@@ -412,6 +459,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 extract_blocks: cmd.extract_blocks,
                 extract_xfa_packets: cmd.extract_xfa_packets,
                 extract_content_bounds: cmd.extract_content_bounds,
+                table_model: cmd.table_model,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {
@@ -495,6 +543,20 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
+        #[cfg(feature = "ocria-nano")]
+        Commands::Models(cmd) => match cmd {
+            ModelsCommand::Pull { spec, from, quiet } => {
+                rt.block_on(liteparse::models::pull(
+                    &spec,
+                    &liteparse::models::PullOptions { from, quiet },
+                ))?;
+            }
+            ModelsCommand::List => println!("{}", liteparse::models::list_report()),
+            ModelsCommand::Rm { name } => match liteparse::models::remove(&name)? {
+                Some(dir) => println!("Removed {}", dir.display()),
+                None => println!("{name} is not installed."),
+            },
+        },
         Commands::IsComplex(cmd) => {
             let config = LiteParseConfig {
                 max_pages: cmd.max_pages,

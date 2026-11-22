@@ -2,6 +2,32 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Built-in OCR engine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OcrBackend {
+    /// Tesseract, compiled in (the `tesseract` feature).
+    #[default]
+    Tesseract,
+    /// LiteParse's own OCR models on ONNX Runtime (the `ocria-nano` feature); the models are
+    /// downloaded once with `lit models pull ocria-nano`.
+    OcriaNano,
+}
+
+impl std::str::FromStr for OcrBackend {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "tesseract" => Ok(OcrBackend::Tesseract),
+            "ocria-nano" | "ocria_nano" => Ok(OcrBackend::OcriaNano),
+            other => Err(format!(
+                "unknown OCR backend {other:?} (expected tesseract or ocria-nano)"
+            )),
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -42,6 +68,10 @@ pub struct LiteParseConfig {
     pub ocr_page_request_fields: HashMap<u32, HashMap<String, String>>,
     /// Path to tessdata directory. Falls back to TESSDATA_PREFIX env var if not set.
     pub tessdata_path: Option<String>,
+    /// Built-in OCR engine, used when no `ocr_server_url` is set. `None` picks ocria-nano when
+    /// its package is installed (`lit models pull ocria-nano`), else Tesseract.
+    #[serde(default)]
+    pub ocr_backend: Option<OcrBackend>,
     /// Maximum number of pages to parse.
     pub max_pages: usize,
     /// Specific pages to parse (e.g., "1-5,10,15-20"). None means all pages.
@@ -56,8 +86,10 @@ pub struct LiteParseConfig {
     /// fatal regardless of this setting.
     #[serde(default)]
     pub continue_on_page_error: bool,
-    /// DPI for rendering pages (used for OCR and screenshots).
-    pub dpi: f32,
+    /// DPI for rendering pages (used for OCR and screenshots). `None`: 250 when ocria-nano
+    /// does the OCR (its models need it for small print), 150 otherwise.
+    #[serde(default)]
+    pub dpi: Option<f32>,
     /// Output format.
     pub output_format: OutputFormat,
     /// Keep very small text that would normally be filtered out.
@@ -84,12 +116,17 @@ pub struct LiteParseConfig {
     pub extract_links: bool,
     /// Keep running header/footer chrome in markdown output instead of
     /// stripping it. By default the markdown renderer removes lines that
-    /// repeat in the top/bottom page bands across pages (and single-page
-    /// chrome like `Page N of M`). Set `true` to retain everything —
+    /// repeat in the top/bottom page bands across pages, single-page
+    /// chrome like `Page N of M`, and text the layout model labels as a page header / footer). Set `true` to retain everything —
     /// useful for extraction pipelines that would rather deduplicate
     /// downstream than risk losing content. Only affects Markdown output.
     #[serde(default)]
     pub keep_headers_footers: bool,
+    /// Path to a learned table-structure model (`bench/tables/export_tablenet_rs.py` output).
+    /// When set (or an ocria-nano package is installed), born-digital pages get their tables
+    /// from the model instead of the heuristic detectors wherever it finds one. Default `None`.
+    #[serde(default)]
+    pub table_model: Option<String>,
     /// Keep native text hidden by rectangular clips. By default a word that
     /// lies entirely outside its clip (e.g. overflow from a fixed-height
     /// table cell, which would otherwise land in the next row) is dropped;
@@ -286,6 +323,18 @@ pub enum OutputFormat {
 }
 
 impl LiteParseConfig {
+    /// The table model to use: the config path, else (with ocria-nano) the installed package's.
+    pub fn effective_table_model(&self) -> Option<String> {
+        let explicit = self.table_model.clone().filter(|p| !p.is_empty());
+        // TableNet ships in the ocria-nano package and runs with that backend
+        #[cfg(all(feature = "ocria-nano", not(target_arch = "wasm32")))]
+        if explicit.is_none() && self.effective_ocr_backend() == OcrBackend::OcriaNano {
+            return crate::models::installed_table_model()
+                .map(|p| p.to_string_lossy().into_owned());
+        }
+        explicit
+    }
+
     /// Whether embedded-image extraction should run. True when
     /// `extract_images` is set, or when the legacy `ImageMode::Embed` is
     /// configured (`Embed` implies byte extraction for backwards
@@ -311,6 +360,33 @@ impl LiteParseConfig {
     /// CLI JSON never does). Word boxes extracted only for `extract_blocks`
     /// are left out there, so turning on blocks doesn't grow their text-item
     /// payload. Rust callers still get them on `ParseResult`'s items.
+    /// The built-in OCR backend a parse uses: `ocr_backend`, else ocria-nano when its package
+    /// is installed, else Tesseract.
+    pub fn effective_ocr_backend(&self) -> OcrBackend {
+        if let Some(b) = self.ocr_backend {
+            return b;
+        }
+        #[cfg(all(feature = "ocria-nano", not(target_arch = "wasm32")))]
+        if crate::ocr::ocria::installed() {
+            return OcrBackend::OcriaNano;
+        }
+        OcrBackend::Tesseract
+    }
+
+    /// The rendering resolution: `dpi`, else 250 when ocria-nano does the OCR (no
+    /// `ocr_server_url`), else [`DEFAULT_DPI`].
+    pub fn effective_dpi(&self) -> f32 {
+        self.dpi.unwrap_or(
+            if self.ocr_server_url.is_none()
+                && self.effective_ocr_backend() == OcrBackend::OcriaNano
+            {
+                OCRIA_NANO_DPI
+            } else {
+                DEFAULT_DPI
+            },
+        )
+    }
+
     pub fn output_word_boxes(&self) -> bool {
         self.emit_word_boxes || self.output_format == OutputFormat::Markdown
     }
@@ -334,6 +410,7 @@ impl Default for LiteParseConfig {
             ocr_page_images: HashMap::new(),
             ocr_server_url: None,
             ocr_server_headers: Vec::new(),
+            ocr_backend: None,
             ocr_request_fields: HashMap::new(),
             ocr_page_request_fields: HashMap::new(),
             tessdata_path: None,
@@ -341,7 +418,7 @@ impl Default for LiteParseConfig {
             target_pages: None,
             extract_screenshots: false,
             continue_on_page_error: false,
-            dpi: DEFAULT_DPI,
+            dpi: None,
             output_format: OutputFormat::Json,
             preserve_very_small_text: false,
             password: None,
@@ -352,6 +429,7 @@ impl Default for LiteParseConfig {
             image_output_dir: None,
             extract_links: true,
             keep_headers_footers: false,
+            table_model: None,
             keep_clipped_text: false,
             extract_annotations: false,
             extract_form_fields: false,
@@ -401,6 +479,8 @@ pub const DEFAULT_PAGE_BATCH_SIZE: usize = 25;
 /// Default render resolution for OCR rasters and screenshots
 /// (`LiteParseConfig::dpi`).
 pub const DEFAULT_DPI: f32 = 150.0;
+/// Rendering resolution with the ocria-nano OCR backend.
+pub const OCRIA_NANO_DPI: f32 = 250.0;
 
 #[doc(hidden)]
 pub fn parse_target_pages(s: &str) -> Result<Vec<u32>, String> {
@@ -498,7 +578,19 @@ mod tests {
         assert_eq!(c.max_pages, 1000);
         assert!(!c.extract_screenshots);
         assert!(!c.continue_on_page_error);
-        assert_eq!(c.dpi, DEFAULT_DPI);
+        assert_eq!(c.dpi, None);
+        // the render default follows the OCR backend (explicit here: an installed ocria-nano
+        // package would otherwise make it the default)
+        let tess = LiteParseConfig {
+            ocr_backend: Some(OcrBackend::Tesseract),
+            ..LiteParseConfig::default()
+        };
+        assert_eq!(tess.effective_dpi(), DEFAULT_DPI);
+        let nano = LiteParseConfig {
+            ocr_backend: Some(OcrBackend::OcriaNano),
+            ..LiteParseConfig::default()
+        };
+        assert_eq!(nano.effective_dpi(), OCRIA_NANO_DPI);
         assert_eq!(c.output_format, OutputFormat::Json);
         assert!(!c.preserve_very_small_text);
         assert!(!c.quiet);

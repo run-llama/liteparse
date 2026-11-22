@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use liteparse::config::{
-    CropBox, ImageMode, LiteParseConfig, OutputFormat, PageOrientationCorrection,
+    CropBox, ImageMode, LiteParseConfig, OcrBackend, OutputFormat, PageOrientationCorrection,
 };
 use liteparse::types::PdfInput;
 
@@ -1257,6 +1257,8 @@ struct PyLiteParseConfig {
     #[pyo3(get)]
     tessdata_path: Option<String>,
     #[pyo3(get)]
+    ocr_backend: String,
+    #[pyo3(get)]
     max_pages: usize,
     #[pyo3(get)]
     target_pages: Option<String>,
@@ -1283,6 +1285,7 @@ struct PyLiteParseConfig {
     #[pyo3(get)]
     keep_headers_footers: bool,
     #[pyo3(get)]
+    table_model: Option<String>,
     keep_clipped_text: bool,
     #[pyo3(get)]
     extract_annotations: bool,
@@ -1352,11 +1355,16 @@ impl PyLiteParseConfig {
             ocr_request_fields: cfg.ocr_request_fields.clone(),
             ocr_page_request_fields: cfg.ocr_page_request_fields.clone(),
             tessdata_path: cfg.tessdata_path.clone(),
+            ocr_backend: match cfg.effective_ocr_backend() {
+                OcrBackend::Tesseract => "tesseract",
+                OcrBackend::OcriaNano => "ocria-nano",
+            }
+            .to_string(),
             max_pages: cfg.max_pages,
             target_pages: cfg.target_pages.clone(),
             extract_screenshots: cfg.extract_screenshots,
             continue_on_page_error: cfg.continue_on_page_error,
-            dpi: cfg.dpi,
+            dpi: cfg.effective_dpi(),
             output_format: match cfg.output_format {
                 OutputFormat::Json => "json".to_string(),
                 OutputFormat::Text => "text".to_string(),
@@ -1373,6 +1381,7 @@ impl PyLiteParseConfig {
             },
             extract_links: cfg.extract_links,
             keep_headers_footers: cfg.keep_headers_footers,
+            table_model: cfg.table_model.clone(),
             keep_clipped_text: cfg.keep_clipped_text,
             extract_annotations: cfg.extract_annotations,
             extract_form_fields: cfg.extract_form_fields,
@@ -1504,6 +1513,7 @@ impl LiteParse {
         ocr_request_fields = None,
         ocr_page_request_fields = None,
         tessdata_path = None,
+        ocr_backend = None,
         max_pages = None,
         target_pages = None,
         extract_screenshots = None,
@@ -1519,6 +1529,7 @@ impl LiteParse {
         image_output_dir = None,
         extract_links = None,
         keep_headers_footers = None,
+        table_model = None,
         keep_clipped_text = None,
         extract_annotations = None,
         extract_form_fields = None,
@@ -1548,6 +1559,7 @@ impl LiteParse {
         ocr_request_fields: Option<HashMap<String, String>>,
         ocr_page_request_fields: Option<HashMap<u32, HashMap<String, String>>>,
         tessdata_path: Option<String>,
+        ocr_backend: Option<String>,
         max_pages: Option<usize>,
         target_pages: Option<String>,
         extract_screenshots: Option<bool>,
@@ -1563,6 +1575,7 @@ impl LiteParse {
         image_output_dir: Option<String>,
         extract_links: Option<bool>,
         keep_headers_footers: Option<bool>,
+        table_model: Option<String>,
         keep_clipped_text: Option<bool>,
         extract_annotations: Option<bool>,
         extract_form_fields: Option<bool>,
@@ -1606,6 +1619,9 @@ impl LiteParse {
         if let Some(v) = tessdata_path {
             cfg.tessdata_path = Some(v);
         }
+        if let Some(v) = ocr_backend {
+            cfg.ocr_backend = Some(v.parse().map_err(pyo3::exceptions::PyValueError::new_err)?);
+        }
         if let Some(v) = max_pages {
             cfg.max_pages = v;
         }
@@ -1619,7 +1635,7 @@ impl LiteParse {
             cfg.continue_on_page_error = v;
         }
         if let Some(v) = dpi {
-            cfg.dpi = v;
+            cfg.dpi = Some(v);
         }
         if let Some(v) = output_format {
             cfg.output_format = parse_output_format(&v)?;
@@ -1654,6 +1670,9 @@ impl LiteParse {
         }
         if let Some(v) = keep_headers_footers {
             cfg.keep_headers_footers = v;
+        }
+        if let Some(v) = table_model {
+            cfg.table_model = Some(v);
         }
         if let Some(v) = keep_clipped_text {
             cfg.keep_clipped_text = v;
@@ -1867,7 +1886,9 @@ impl LiteParse {
     fn __repr__(&self) -> String {
         format!(
             "LiteParse(ocr_enabled={}, dpi={}, max_pages={})",
-            self.config.ocr_enabled, self.config.dpi, self.config.max_pages
+            self.config.ocr_enabled,
+            self.config.effective_dpi(),
+            self.config.max_pages
         )
     }
 }
@@ -1959,6 +1980,58 @@ fn search_items(
         .collect()
 }
 
+/// Install a model package (`lit models pull`); returns its directory.
+#[cfg(feature = "ocria-nano")]
+#[pyfunction]
+#[pyo3(signature = (spec = "ocria-nano".to_string(), *, from_dir = None, quiet = false))]
+fn models_pull(
+    py: Python<'_>,
+    spec: String,
+    from_dir: Option<String>,
+    quiet: bool,
+) -> PyResult<String> {
+    let opts = liteparse::models::PullOptions {
+        from: from_dir.map(std::path::PathBuf::from),
+        quiet,
+    };
+    let dir = py
+        .detach(|| {
+            tokio::runtime::Runtime::new()
+                .map_err(|e| e.to_string())?
+                .block_on(liteparse::models::pull(&spec, &opts))
+                .map_err(|e| e.to_string())
+        })
+        .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+/// Installed model packages: (name, version, directory, bytes, complete).
+#[cfg(feature = "ocria-nano")]
+#[pyfunction]
+fn models_list() -> Vec<(String, Option<String>, String, u64, bool)> {
+    liteparse::models::list()
+        .into_iter()
+        .map(|m| {
+            (
+                m.name.to_string(),
+                m.version,
+                m.dir.to_string_lossy().into_owned(),
+                m.bytes,
+                m.complete,
+            )
+        })
+        .collect()
+}
+
+/// Remove an installed model package; returns the removed directory, or None.
+#[cfg(feature = "ocria-nano")]
+#[pyfunction]
+fn models_rm(name: String) -> PyResult<Option<String>> {
+    liteparse::models::remove(&name)
+        .map(|d| d.map(|p| p.to_string_lossy().into_owned()))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+}
+
 /// Run the `lit` CLI with the given arguments.
 #[pyfunction]
 fn run_cli(args: Vec<String>) -> PyResult<()> {
@@ -1997,6 +2070,12 @@ fn _liteparse(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVectorLine>()?;
     m.add_class::<PyVectorGraphics>()?;
     m.add_function(wrap_pyfunction!(run_cli, m)?)?;
+    #[cfg(feature = "ocria-nano")]
+    {
+        m.add_function(wrap_pyfunction!(models_pull, m)?)?;
+        m.add_function(wrap_pyfunction!(models_list, m)?)?;
+        m.add_function(wrap_pyfunction!(models_rm, m)?)?;
+    }
     m.add_function(wrap_pyfunction!(search_items, m)?)?;
     Ok(())
 }

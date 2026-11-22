@@ -6,6 +6,11 @@ use serde::{Deserialize, Serialize};
 pub mod http_simple;
 #[cfg(all(feature = "oar-ocr", not(target_arch = "wasm32")))]
 pub mod oar;
+#[cfg(any(
+    all(feature = "ocria-nano", not(target_arch = "wasm32")),
+    all(feature = "ocria-nano-wasm", target_arch = "wasm32")
+))]
+pub mod ocria;
 #[cfg(all(feature = "tesseract", not(target_arch = "wasm32")))]
 pub mod tesseract;
 
