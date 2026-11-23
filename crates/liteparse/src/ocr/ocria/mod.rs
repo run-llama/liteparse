@@ -57,6 +57,13 @@ pub const DETECTOR_FILE: &str = "det.onnx";
 pub const ROUTER_FILE: &str = "router.onnx";
 /// The detector's recommended thresholds, `{"thresh": .., "merge": ..}` (optional).
 pub const DETECTOR_META_FILE: &str = "det.meta.json";
+/// `(text, confidence)` per box, whether the page was read upside down, the page's script group.
+type PageReads = (Vec<(String, f32)>, bool, usize);
+
+/// A faint candidate ([`det::Faint`]) is kept only at this confidence. Rule fragments and
+/// specks read as "|", "l" or a letter pair at 0.5-0.7; the lone "1"s of issue #615 read at 0.97+.
+const FAINT_CONF: f32 = 0.9;
+
 /// Detector thresholds for a model without `det.meta.json`.
 const DET_THRESH: f32 = 0.5;
 const DET_MERGE: f32 = 0.6;
@@ -83,6 +90,8 @@ pub struct OcriaOptions {
     pub rescue: bool,
     /// Drop readings with no letter or digit, or 1-2 unsure characters.
     pub junk: bool,
+    /// Read faint short tokens next to detected lines, kept at `FAINT_CONF` (None = off).
+    pub faint: Option<det::Faint>,
 }
 
 impl Default for OcriaOptions {
@@ -97,6 +106,10 @@ impl Default for OcriaOptions {
             orient: true,
             rescue: true,
             junk: true,
+            faint: Some(det::Faint {
+                thresh: 0.1,
+                max: 24,
+            }),
         }
     }
 }
@@ -277,6 +290,7 @@ impl OcriaEngine {
             opts.det_merge.or(from_meta("merge")).unwrap_or(DET_MERGE),
         );
         det.adaptive = opts.det_adaptive;
+        det.faint = opts.faint;
         OcriaEngine {
             det,
             router: Router::new(router_pool),
@@ -343,7 +357,7 @@ impl OcriaEngine {
                 data: img0.data.iter().flat_map(|&v| [v, v, v]).collect(),
             };
         }
-        let mut boxes = self.det.detect(&img0)?;
+        let (mut boxes, mut faint) = self.det.detect_with_faint(&img0)?;
         let mut sideways = false;
         let turned;
         let mut img = &img0;
@@ -355,19 +369,34 @@ impl OcriaEngine {
             if page::long_lines(&tboxes) > 2 * page::long_lines(&boxes) + 5 {
                 img = &turned;
                 boxes = tboxes;
+                faint.clear();
                 sideways = true;
             }
         }
         if self.opts.gutter {
             boxes = page::split_gutters(img, &boxes);
         }
-        let (reads, flip) = if boxes.is_empty() {
-            (Vec::new(), false)
+        let (mut reads, flip, dom) = if boxes.is_empty() {
+            (Vec::new(), false, 0)
         } else {
             self.read(img, &boxes)?
         };
+        let n_lines = boxes.len();
+        if !faint.is_empty() && !flip {
+            // with the page's recognizer: a lone glyph is too short for the router
+            let crops: Vec<Img> = faint.iter().map(|b| page::crop(img, b)).collect();
+            let refs: Vec<&Img> = crops.iter().collect();
+            let res = self.rec_for(dom).read(&refs)?;
+            for (quad, (text, conf)) in faint.into_iter().zip(res) {
+                let text = page::clean_latin(&text);
+                if conf >= FAINT_CONF && page::is_short_token(&text) {
+                    boxes.push(quad);
+                    reads.push((text, conf));
+                }
+            }
+        }
         let mut out = Vec::new();
-        for (quad, (text, conf)) in boxes.iter().zip(reads) {
+        for (k, (quad, (text, conf))) in boxes.iter().zip(reads).enumerate() {
             if text.trim().is_empty() || (self.opts.junk && page::is_junk(&text, conf)) {
                 continue;
             }
@@ -396,6 +425,7 @@ impl OcriaEngine {
                 polygon: Some(pts),
                 words: Vec::new(),
                 rotation: None,
+                faint: k >= n_lines,
             });
         }
         Ok(out)
@@ -405,8 +435,9 @@ impl OcriaEngine {
         &self.recs[group]
     }
 
-    /// Readings per box and whether the page was read upside down (`server.read`).
-    fn read(&self, img: &Img, boxes: &[Quad]) -> Result<(Vec<(String, f32)>, bool), OcriaError> {
+    /// Readings per box, whether the page was read upside down (`server.read`) and the page's
+    /// script group.
+    fn read(&self, img: &Img, boxes: &[Quad]) -> Result<PageReads, OcriaError> {
         let mut crops: Vec<Img> = boxes.iter().map(|b| page::crop(img, b)).collect();
         let (mut groups, flip, share) = self.router.route(&crops)?;
         if flip {
@@ -520,7 +551,7 @@ impl OcriaEngine {
         for o in out.iter_mut() {
             o.0 = page::clean_latin(&o.0);
         }
-        Ok((out, flip))
+        Ok((out, flip, dom))
     }
 }
 

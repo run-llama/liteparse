@@ -460,6 +460,16 @@ pub fn clean_latin(text: &str) -> String {
     out
 }
 
+/// A single short token ("1", "12", "x3"): no space, at least one letter or digit, at most six
+/// characters. Faint detector candidates are only kept as one.
+pub fn is_short_token(text: &str) -> bool {
+    let t = text.trim();
+    !t.is_empty()
+        && t.chars().count() <= 6
+        && !t.chars().any(char::is_whitespace)
+        && t.chars().any(char::is_alphanumeric)
+}
+
 /// A detector false positive on a picture: no letter or digit, or 1-2 unsure characters.
 pub fn is_junk(text: &str, conf: f32) -> bool {
     const JUNK_CONF: f32 = 0.8;
@@ -470,6 +480,16 @@ pub fn is_junk(text: &str, conf: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_tokens() {
+        for t in ["1", "12", " 7 ", "x3", "€1", "1,0"] {
+            assert!(is_short_token(t), "{t:?}");
+        }
+        for t in ["", "|", "--", "1 2", "1234567"] {
+            assert!(!is_short_token(t), "{t:?}");
+        }
+    }
 
     #[test]
     fn homoglyphs_fold_only_inside_latin_words() {

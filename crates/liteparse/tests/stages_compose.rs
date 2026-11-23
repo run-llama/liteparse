@@ -77,6 +77,7 @@ impl OcrEngine for MockOcr {
                     polygon: None,
                     rotation: None,
                     words: Vec::new(),
+                    faint: false,
                 },
                 OcrResult {
                     text: "rotated".into(),
@@ -90,6 +91,7 @@ impl OcrEngine for MockOcr {
                     ]),
                     rotation: None,
                     words: Vec::new(),
+                    faint: false,
                 },
             ])
         })
@@ -619,6 +621,7 @@ impl OcrEngine for SkewedMockOcr {
                         polygon: Some(polygon),
                         words: Vec::new(),
                         rotation: None,
+                        faint: false,
                     }
                 })
                 .collect())
@@ -873,6 +876,7 @@ fn merge_ocr_rejects_outcome_for_unknown_page() {
             polygon: None,
             rotation: None,
             words: Vec::new(),
+            faint: false,
         }],
         error: None,
     };

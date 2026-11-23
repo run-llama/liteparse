@@ -38,6 +38,10 @@ pub struct OcrResult {
     /// merging then infers it from the polygon's point order.
     #[serde(default)]
     pub rotation: Option<f32>,
+    /// A short token read from a region the detector scored under its threshold (ocria-nano's
+    /// faint pass). The table model reads it as an opaque token: see `table_model::ocr_units`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub faint: bool,
 }
 
 /// One word an OCR engine measured inside a line-level result.
@@ -172,6 +176,7 @@ mod tests {
                     polygon: None,
                     rotation: None,
                     words: Vec::new(),
+                    faint: false,
                 }])
             })
         }

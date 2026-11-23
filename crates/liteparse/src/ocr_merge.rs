@@ -1817,6 +1817,7 @@ fn merge_ocr_outcomes(
                 font_size: Some(font_size_hint),
                 confidence: Some((r.confidence * 1000.0).round() / 1000.0),
                 words,
+                ocr_faint: r.faint,
                 ..Default::default()
             });
             for i in inside {
@@ -3667,6 +3668,7 @@ mod tests {
                     polygon: None,
                     words: Vec::new(),
                     rotation: None,
+                    faint: false,
                 }]
             },
             error: error.map(str::to_owned),
@@ -4084,6 +4086,7 @@ mod tests {
                     polygon: None,
                     rotation: None,
                     words: Vec::new(),
+                    faint: false,
                 },
                 OcrResult {
                     text: "world".into(),
@@ -4092,6 +4095,7 @@ mod tests {
                     polygon: None,
                     rotation: None,
                     words: Vec::new(),
+                    faint: false,
                 },
             ],
             error: None,
@@ -4167,6 +4171,7 @@ mod tests {
             polygon: None,
             words,
             rotation: None,
+            faint: false,
         };
         let measured = vec![
             ocr_word("Invoice", [11.0, 21.0, 60.0, 29.0]),
@@ -4223,6 +4228,7 @@ mod tests {
                 ocr_word("total", [10.0, 35.0, 20.0, 55.0]),
                 ocr_word("amount", [10.0, 5.0, 20.0, 30.0]),
             ],
+            faint: false,
         };
         let page = merge_ocr_page(vec![line], 72.0);
         let item = &page.text_items[0];
@@ -4258,6 +4264,7 @@ mod tests {
                 polygon: Some(polygon),
                 words,
                 rotation,
+                faint: false,
             };
             merge_ocr_page(vec![line], 144.0).text_items.remove(0)
         };
@@ -4311,6 +4318,7 @@ mod tests {
             polygon: None,
             rotation: None,
             words: Vec::new(),
+            faint: false,
         };
         let results = vec![
             word("Logement", 10.0, 10.0),

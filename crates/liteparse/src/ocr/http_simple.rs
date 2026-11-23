@@ -35,6 +35,7 @@ impl HttpOcrResponseItem {
             polygon: self.polygon,
             words: self.words,
             rotation: None,
+            faint: false,
         }
     }
 }
@@ -92,6 +93,7 @@ impl ProdOcrItem {
             confidence,
             polygon,
             rotation,
+            faint: false,
             words: words
                 .into_iter()
                 .map(|w| OcrWord {

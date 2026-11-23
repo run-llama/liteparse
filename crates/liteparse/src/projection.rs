@@ -1183,6 +1183,8 @@ struct ProjDumpItem {
     rc: usize,
     cc: usize,
     px: usize,
+    #[serde(skip)]
+    faint: bool,
 }
 
 thread_local! {
@@ -1226,6 +1228,8 @@ pub struct ProjSignalItem {
     pub cc: usize,
     pub snap: char,
     pub block: usize,
+    /// from an ocria-nano faint-token read (`TextItem::ocr_faint`)
+    pub faint: bool,
 }
 
 thread_local! {
@@ -3088,6 +3092,7 @@ fn project_to_grid(
                     rc: m.right_count,
                     cc: m.center_count,
                     px: m.projected_x,
+                    faint: item.item.ocr_faint,
                 };
                 PROJ_DUMP.with(|d| d.borrow_mut().push(rec));
             }
@@ -5264,6 +5269,7 @@ fn dump_projection(page: &Page, items: &[ProjectedTextItem], regions: &Region) {
                     cc: r.cc,
                     snap: r.snap.chars().next().unwrap_or(' '),
                     block: r.block,
+                    faint: r.faint,
                 })
                 .collect(),
             leaves: leaf_items

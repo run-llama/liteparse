@@ -767,6 +767,7 @@ impl liteparse::ocr::OcrEngine for ProbeEngine {
                 polygon: None,
                 rotation: None,
                 words: Vec::new(),
+                faint: false,
             }])
         })
     }
@@ -1506,6 +1507,7 @@ impl liteparse::ocr::OcrEngine for FailingWidthsEngine {
                 polygon: None,
                 rotation: None,
                 words: Vec::new(),
+                faint: false,
             }])
         })
     }
