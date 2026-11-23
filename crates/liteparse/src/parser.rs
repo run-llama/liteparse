@@ -1660,6 +1660,7 @@ mod tests {
             polygon: Some(quad(100.0, y, 0.0, 800.0)),
             rotation: None,
             words,
+            faint: false,
         };
         let measured = vec![
             OcrWord {

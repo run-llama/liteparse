@@ -163,6 +163,9 @@ pub struct TextItem {
     /// and must survive a stage boundary (see `stages`), so it serializes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<WordBox>,
+    /// Read by ocria-nano's faint-token pass (see `OcrResult::faint`); internal only.
+    #[serde(skip)]
+    pub ocr_faint: bool,
 }
 
 /// The `TextItem` fields governed by `extract_text_metadata`, pre-gated by

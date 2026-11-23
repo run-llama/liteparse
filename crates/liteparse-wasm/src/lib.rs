@@ -1082,6 +1082,7 @@ impl OcrEngine for JsOcrEngine {
                     polygon: r.polygon,
                     words: Vec::new(),
                     rotation: None,
+                    faint: false,
                 })
                 .collect())
         })

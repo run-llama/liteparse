@@ -5,6 +5,8 @@
 /// LiteParse's grid-projection signals for one unit (absent when no projected item matched it).
 #[derive(Clone, Debug, Default)]
 pub struct Proj {
+    /// Text the text features read instead of the unit's own (an OCR faint-token read).
+    pub feat_text: Option<String>,
     pub flow: f32,
     pub lc: f32,
     pub rc: f32,
@@ -219,7 +221,11 @@ pub fn unit_features(units: &[FUnit], wh: (f32, f32), rules: Option<&Rules>) -> 
         }
         let cx = (b[i][0] + b[i][2]) / 2.0 / w_pg;
         let cy = (b[i][1] + b[i][3]) / 2.0 / h_pg;
-        let t = &units[i].text;
+        let t = units[i]
+            .proj
+            .as_ref()
+            .and_then(|p| p.feat_text.as_deref())
+            .unwrap_or(&units[i].text);
         let chars: Vec<char> = t.chars().collect();
         let len = chars.len() as f32;
         let n_alpha = chars.iter().filter(|c| c.is_alphabetic()).count() as f32;

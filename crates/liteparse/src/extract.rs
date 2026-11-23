@@ -4107,6 +4107,7 @@ impl SegmentBuilder {
                 trailing_space_generated: self.pending_space_generated,
                 followed_by_space: self.pending_space && self.dir_rtl != Some(true),
                 confidence: None,
+                ocr_faint: false,
                 link: None,
                 strike: false,
                 underline: false,

@@ -147,6 +147,7 @@ fn ocr_units(
             words: Vec::new(),
         });
         proj.push(Some(features::Proj {
+            feat_text: it.faint.then(|| faint_mask(t)),
             flow: it.flow as u8 as f32,
             lc: it.lc as f32,
             rc: it.rc as f32,
@@ -157,6 +158,14 @@ fn ocr_units(
         }));
     }
     (us, proj)
+}
+
+/// The text the table model's features read for an OCR faint-token read. LayoutNet reads a lone
+/// value-like token ("1", "€1", "1.0") recovered between two cells as a reason to fuse the table's
+/// rows (issue #615): the same token as an opaque word leaves the table intact. Tuned to the
+/// LayoutNet of OCRia-nano-1 v1.0.0; a retrained model that has seen such tokens may not need it.
+fn faint_mask(t: &str) -> String {
+    "x".repeat(t.chars().count())
 }
 
 /// One unit's block class probabilities (layout models): its box on the page (points, top-left
@@ -419,6 +428,7 @@ fn join_signals(
                 .map(|l| l.2)
                 .collect();
             Some(features::Proj {
+                feat_text: None,
                 flow: hit.iter().map(|it| it.flow as u8 as f32).sum::<f32>() / hit.len() as f32,
                 lc: hit.iter().map(|it| it.lc).max().unwrap() as f32,
                 rc: hit.iter().map(|it| it.rc).max().unwrap() as f32,
@@ -1002,4 +1012,15 @@ pub fn load(path: &std::path::Path) -> Option<&'static net::TableNet> {
         Some(net)
     })
     .as_ref()
+}
+
+#[cfg(test)]
+mod faint_mask_tests {
+    use super::*;
+
+    #[test]
+    fn masked_token_keeps_its_length_and_reads_as_a_word() {
+        assert_eq!(faint_mask("1"), "x");
+        assert_eq!(faint_mask("€1"), "xx");
+    }
 }

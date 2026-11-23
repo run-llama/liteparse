@@ -136,6 +136,7 @@ impl OcrEngine for TesseractOcrEngine {
                             confidence: conf,
                             polygon: None,
                             rotation: None,
+                            faint: false,
                             words: Vec::new(),
                         });
                     }

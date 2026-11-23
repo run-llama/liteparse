@@ -6146,6 +6146,7 @@ mod tests {
                         confidence: 0.99,
                         rotation: Some(0.0),
                         words,
+                        faint: false,
                     }
                 })
                 .collect();

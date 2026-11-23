@@ -75,6 +75,7 @@ impl OcrEngine for ControlledEngine {
                 polygon: None,
                 rotation: None,
                 words: Vec::new(),
+                faint: false,
             }]))
         }))
     }

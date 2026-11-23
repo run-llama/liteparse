@@ -84,6 +84,7 @@ impl OcrEngine for PixelOcr {
                     polygon: None,
                     words: Vec::new(),
                     rotation: None,
+                    faint: false,
                 },
                 OcrResult {
                     text: "DROP".into(),
@@ -92,6 +93,7 @@ impl OcrEngine for PixelOcr {
                     polygon: None,
                     words: Vec::new(),
                     rotation: None,
+                    faint: false,
                 },
             ])
         })

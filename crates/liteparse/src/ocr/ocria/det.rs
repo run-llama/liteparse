@@ -17,6 +17,20 @@ pub struct Detector {
     pub merge: f32,
     /// Re-detect at a larger size when lines are small (see [`Adaptive`]).
     pub adaptive: Option<Adaptive>,
+    /// Also return faint short tokens next to detected lines (see [`Faint`]).
+    pub faint: Option<Faint>,
+}
+
+/// Short tokens the detector scores under its threshold. A lone narrow glyph in a table cell
+/// (a "1", an "l") looks like a rule fragment, which the detector learned to suppress: the
+/// "1"s of issue #615 peak at 0.13 and 0.52 against 0.55, at every detection size. Regions of
+/// the same probability map above `thresh` that touch no detected line become candidate boxes
+/// when they sit in the middle of a detected line's row and are no taller than that line; at
+/// most `max` per page, strongest first. The caller reads them and keeps confident readings.
+#[derive(Clone, Copy, Debug)]
+pub struct Faint {
+    pub thresh: f32,
+    pub max: usize,
 }
 
 /// A second detection pass for small print: when the median line height at the first pass's
@@ -38,17 +52,24 @@ impl Detector {
             min_score: 0.6,
             merge,
             adaptive: None,
+            faint: None,
         }
     }
 
     /// Line quads (TL, TR, BR, BL along the line) in `img` pixels, in reading-ish order.
     pub fn detect(&self, img: &Img) -> Result<Vec<Quad>, OcriaError> {
-        let (boxes, scale) = self.detect_at(img, self.long_side)?;
+        Ok(self.detect_with_faint(img)?.0)
+    }
+
+    /// Line quads as [`Detector::detect`], and the faint short-token candidates of the same pass
+    /// (empty without [`Detector::faint`]).
+    pub fn detect_with_faint(&self, img: &Img) -> Result<(Vec<Quad>, Vec<Quad>), OcriaError> {
+        let (boxes, scale, faint) = self.detect_at(img, self.long_side)?;
         let Some(a) = self.adaptive else {
-            return Ok(boxes);
+            return Ok((boxes, faint));
         };
         if boxes.len() < 8 {
-            return Ok(boxes);
+            return Ok((boxes, faint));
         }
         let mut hs: Vec<f32> = boxes
             .iter()
@@ -57,18 +78,23 @@ impl Detector {
         hs.sort_by(f32::total_cmp);
         let med = hs[hs.len() / 2].max(1.0);
         if med >= a.min_h {
-            return Ok(boxes);
+            return Ok((boxes, faint));
         }
         let side = ((self.long_side as f32 * a.target_h / med) as usize).min(a.max_side) / 32 * 32;
         if side <= self.long_side {
-            return Ok(boxes);
+            return Ok((boxes, faint));
         }
-        Ok(self.detect_at(img, side)?.0)
+        let (boxes, _, faint) = self.detect_at(img, side)?;
+        Ok((boxes, faint))
     }
 
     /// One detection pass with the page's long side resized to `long_side` (never enlarged);
-    /// also returns the resize scale.
-    fn detect_at(&self, img: &Img, long_side: usize) -> Result<(Vec<Quad>, f64), OcriaError> {
+    /// also returns the resize scale and the faint candidates.
+    fn detect_at(
+        &self,
+        img: &Img,
+        long_side: usize,
+    ) -> Result<(Vec<Quad>, f64, Vec<Quad>), OcriaError> {
         let (big_h, big_w) = (img.h as f64, img.w as f64);
         let s = (long_side as f64 / big_h.max(big_w)).min(1.0);
         let h = 32usize.max(((big_h * s / 32.0).round_ties_even() as usize) * 32);
@@ -147,8 +173,109 @@ impl Detector {
             let kb = ((min_y(b) as f64 / 8.0).round_ties_even(), min_x(b));
             ka.0.total_cmp(&kb.0).then(ka.1.total_cmp(&kb.1))
         });
-        Ok((boxes, s))
+        let faint = match self.faint {
+            Some(f) => {
+                let to_img = |x: usize, y: usize| {
+                    (
+                        ((x as f32 * stride) as f64 / sx) as f32,
+                        ((y as f32 * stride) as f64 / sy) as f32,
+                    )
+                };
+                faint_boxes(&prob, &mask, pw, ph, to_img, &boxes, f, img)
+            }
+            None => Vec::new(),
+        };
+        Ok((boxes, s, faint))
     }
+}
+
+/// Candidate boxes for [`Faint`] tokens, in `img` pixels. `to_img` maps a probability-map cell
+/// corner to image pixels; `boxes` are the detected lines.
+#[allow(clippy::too_many_arguments)]
+fn faint_boxes(
+    prob: &[f32],
+    mask: &[bool],
+    pw: usize,
+    ph: usize,
+    to_img: impl Fn(usize, usize) -> (f32, f32),
+    boxes: &[Quad],
+    f: Faint,
+    img: &Img,
+) -> Vec<Quad> {
+    // a candidate keeps the side margin a detected line has around its text
+    const PAD: f32 = 0.35;
+    let bbox = |q: &Quad| {
+        let xs = q.iter().map(|p| p[0]);
+        let ys = q.iter().map(|p| p[1]);
+        (
+            xs.clone().fold(f32::INFINITY, f32::min),
+            ys.clone().fold(f32::INFINITY, f32::min),
+            xs.fold(f32::NEG_INFINITY, f32::max),
+            ys.fold(f32::NEG_INFINITY, f32::max),
+        )
+    };
+    let lines: Vec<(f32, f32, f32, f32)> = boxes.iter().map(bbox).collect();
+    // rows: lines that run level, so their box is the row's band
+    let rows: Vec<(f32, f32, f32, f32)> = boxes
+        .iter()
+        .zip(&lines)
+        .filter(|(q, l)| (q[1][1] - q[0][1]).abs() <= 0.1 * (l.2 - l.0))
+        .map(|(_, &l)| l)
+        .collect();
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let weak: Vec<bool> = prob.iter().map(|&p| p > f.thresh).collect();
+    let mut cands: Vec<(f32, Quad)> = Vec::new();
+    for comp in components4(&weak, pw, ph) {
+        if comp.pixels.iter().any(|&(x, y)| mask[y * pw + x]) {
+            continue;
+        }
+        let (x0, y0) = to_img(comp.x0, comp.y0);
+        let (x1, y1) = to_img(comp.x1 + 1, comp.y1 + 1);
+        let cy = (y0 + y1) / 2.0;
+        // the row: a level line whose middle half holds the region's centre
+        let Some(&(_, ry0, _, ry1)) = rows
+            .iter()
+            .filter(|r| {
+                let h = r.3 - r.1;
+                cy >= r.1 + 0.25 * h && cy <= r.3 - 0.25 * h
+            })
+            .min_by(|a, b| {
+                (a.1 + a.3 - 2.0 * cy)
+                    .abs()
+                    .total_cmp(&(b.1 + b.3 - 2.0 * cy).abs())
+            })
+        else {
+            continue;
+        };
+        let h = ry1 - ry0;
+        // a short token's core is lower than its row's line box and at most a few glyphs wide
+        if y1 - y0 > 0.8 * h || x1 - x0 > 1.5 * h {
+            continue;
+        }
+        let (bx0, bx1) = ((x0 - PAD * h).max(0.0), (x1 + PAD * h).min(img.w as f32));
+        let (by0, by1) = (ry0.max(0.0), ry1.min(img.h as f32));
+        let area = (bx1 - bx0) * (by1 - by0);
+        // not part of a detected line (a gap between words, an accent, a descender)
+        let covered = lines.iter().any(|l| {
+            let ix = (bx1.min(l.2) - bx0.max(l.0)).max(0.0);
+            let iy = (by1.min(l.3) - by0.max(l.1)).max(0.0);
+            ix * iy > 0.2 * area
+        });
+        if covered {
+            continue;
+        }
+        let peak = comp
+            .pixels
+            .iter()
+            .map(|&(x, y)| prob[y * pw + x])
+            .fold(0f32, f32::max);
+        cands.push((peak, [[bx0, by0], [bx1, by0], [bx1, by1], [bx0, by1]]));
+    }
+    cands.sort_by(|a, b| b.0.total_cmp(&a.0));
+    cands.truncate(f.max);
+    cands.into_iter().map(|(_, q)| q).collect()
 }
 
 fn min_y(q: &Quad) -> f32 {
@@ -350,4 +477,76 @@ pub fn merge_collinear(boxes: &[Quad], gap: f32) -> Vec<Quad> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 60 x 20 probability map at one image pixel per cell, with one detected line (cells
+    /// x 2..20, y 8..12) whose box is 20 px tall.
+    fn page() -> (Vec<f32>, Vec<bool>, Vec<Quad>, Img) {
+        let (pw, ph) = (60, 20);
+        let mut prob = vec![0f32; pw * ph];
+        for y in 8..12 {
+            for x in 2..20 {
+                prob[y * pw + x] = 0.9;
+            }
+        }
+        let mask = prob.iter().map(|&p| p > 0.55).collect();
+        let line = [[0.0, 0.0], [22.0, 0.0], [22.0, 20.0], [0.0, 20.0]];
+        let img = Img {
+            w: pw,
+            h: ph,
+            ch: 3,
+            data: vec![255; pw * ph * 3],
+        };
+        (prob, mask, vec![line], img)
+    }
+
+    fn faint(prob: &[f32], mask: &[bool], boxes: &[Quad], img: &Img) -> Vec<Quad> {
+        let f = Faint {
+            thresh: 0.1,
+            max: 24,
+        };
+        faint_boxes(
+            prob,
+            mask,
+            60,
+            20,
+            |x, y| (x as f32, y as f32),
+            boxes,
+            f,
+            img,
+        )
+    }
+
+    #[test]
+    fn faint_token_in_a_row_is_a_candidate() {
+        let (mut prob, mask, boxes, img) = page();
+        // a weak "1" in the same row, well right of the line
+        for y in 8..12 {
+            prob[y * 60 + 40] = 0.13;
+        }
+        let c = faint(&prob, &mask, &boxes, &img);
+        assert_eq!(c.len(), 1);
+        // the row's band, with a side margin around the region
+        assert_eq!((c[0][0][1], c[0][2][1]), (0.0, 20.0));
+        assert!(c[0][0][0] < 40.0 && c[0][1][0] > 41.0);
+    }
+
+    #[test]
+    fn faint_regions_off_row_touching_or_tall_are_not() {
+        let (mut prob, mask, boxes, img) = page();
+        // off the row: centred below the line's middle half
+        prob[18 * 60 + 40] = 0.2;
+        prob[19 * 60 + 40] = 0.2;
+        // touching the detected line
+        prob[10 * 60 + 20] = 0.2;
+        // taller than 0.8 of the row
+        for y in 0..20 {
+            prob[y * 60 + 50] = 0.2;
+        }
+        assert!(faint(&prob, &mask, &boxes, &img).is_empty());
+    }
 }
