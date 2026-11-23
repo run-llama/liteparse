@@ -17,8 +17,8 @@ ocria-nano = ["liteparse/ocria-nano"]
 
 [dependencies]
 liteparse = { package = "liteparse", version = "2.21.0", path = "../liteparse", default-features = false }
-pdfium-sys = { package = "liteparse-pdfium-sys", version = "1.14.0", path = "../pdfium-sys" }
-pdfium = { package = "liteparse-pdfium", version = "1.14.0", path = "../pdfium" }
+pdfium-sys = { package = "liteparse-pdfium-sys", version = "1.15.0", path = "../pdfium-sys" }
+pdfium = { package = "liteparse-pdfium", version = "1.15.0", path = "../pdfium" }
 clap = { version = "4.5.55", features = ["derive"] }
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
 anyhow = "1.0.102"

@@ -1,13 +1,13 @@
 [package]
 name = "liteparse-pdfium"
-version = "1.14.0"
+version = "1.15.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Safe Rust wrapper around PDFium for liteparse"
 
 [dependencies]
-pdfium-sys = { package = "liteparse-pdfium-sys", version = "1.14.0", path = "../pdfium-sys" }
+pdfium-sys = { package = "liteparse-pdfium-sys", version = "1.15.0", path = "../pdfium-sys" }
 
 [dev-dependencies]
 blake3 = "1"

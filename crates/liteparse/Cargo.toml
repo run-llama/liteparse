@@ -49,8 +49,8 @@ image = { version = "0.25", default-features = false, features = ["default-forma
 matrixmultiply = { version = "0.3", default-features = false, features = ["std"] }
 memchr = "2"
 ordered-float = "5.3.0"
-pdfium = { package = "liteparse-pdfium", version = "1.14.0", path = "../pdfium" }
-pdfium-sys = { package = "liteparse-pdfium-sys", version = "1.14.0", path = "../pdfium-sys" }
+pdfium = { package = "liteparse-pdfium", version = "1.15.0", path = "../pdfium" }
+pdfium-sys = { package = "liteparse-pdfium-sys", version = "1.15.0", path = "../pdfium-sys" }
 reqwest = { version = "0.13.3", default-features = false, features = ["json", "form", "multipart", "rustls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
