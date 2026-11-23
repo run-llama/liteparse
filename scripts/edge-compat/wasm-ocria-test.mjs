@@ -3,7 +3,7 @@
  * (Cloudflare Workers) instance loads the WASM module and the ocria-nano models
  * (as data modules) and OCRs a PDF.
  *
- * Usage: OCRIA_MODELS=<ocria-nano model dir> node scripts/edge-compat/wasm-ocria-test.mjs [file.pdf]
+ * Usage: OCRIA_MODELS=<ocria-nano model dir> [EXPECT_TEXT=<substring>] node scripts/edge-compat/wasm-ocria-test.mjs [file.pdf]
  *
  * Requires: miniflare (npm i -D miniflare)
  * Expects:  packages/wasm/pkg/ to contain the built WASM files
@@ -88,6 +88,11 @@ async function main() {
     }
     if (result.textLength < 20) {
       console.error(`FAIL: text too short: ${result.textLength} chars`);
+      process.exit(1);
+    }
+    const expected = process.env.EXPECT_TEXT;
+    if (expected && !result.head.includes(expected)) {
+      console.error(`FAIL: expected ${JSON.stringify(expected)} in the OCR text: ${JSON.stringify(result.head)}`);
       process.exit(1);
     }
     console.log(`PASS: ${result.pages} pages, ${result.textLength} chars, models ${result.loadMs} ms, parse ${result.parseMs} ms`);

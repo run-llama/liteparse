@@ -10,6 +10,7 @@ on:
       - 'packages/wasm/**'
       - 'scripts/browser-compat/**'
       - 'scripts/edge-compat/**'
+      - '.cargo/**'
       - '.github/workflows/ci-wasm.yml'
   pull_request:
     branches: [main]
@@ -20,6 +21,7 @@ on:
       - 'packages/wasm/**'
       - 'scripts/browser-compat/**'
       - 'scripts/edge-compat/**'
+      - '.cargo/**'
       - '.github/workflows/ci-wasm.yml'
 
 permissions:
@@ -135,3 +137,17 @@ jobs:
 
       - name: Run edge runtime parse test
         run: node scripts/edge-compat/wasm-test.mjs
+
+      - name: Download ocria-nano models (Latin + LayoutNet)
+        run: |
+          mkdir -p ocria-models
+          base=https://huggingface.co/llamaindex/OCRia-nano-1/resolve/v1.0.0
+          for f in det.onnx det.meta.json router.onnx rec_latin.onnx rec_latin.charset.json tablenet.bin; do
+            curl -fsSL --retry 3 "$base/$f" -o "ocria-models/$f"
+          done
+
+      - name: Run edge runtime OCR test (ocria-nano)
+        env:
+          OCRIA_MODELS: ocria-models
+          EXPECT_TEXT: SUM
+        run: node scripts/edge-compat/wasm-ocria-test.mjs integration_tests_data/receipt_scan.pdf
