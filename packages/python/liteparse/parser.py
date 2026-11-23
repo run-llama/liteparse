@@ -477,6 +477,7 @@ class LiteParse:
         ocr_page_request_fields: Optional[Dict[int, Dict[str, str]]] = None,
         ocr_language: Optional[str] = None,
         tessdata_path: Optional[str] = None,
+        ocr_backend: Optional[str] = None,
         max_pages: Optional[int] = None,
         target_pages: Optional[str] = None,
         extract_screenshots: Optional[bool] = None,
@@ -492,6 +493,7 @@ class LiteParse:
         image_output_dir: Optional[Union[str, Path]] = None,
         extract_links: Optional[bool] = None,
         keep_headers_footers: Optional[bool] = None,
+        table_model: Optional[Union[str, Path]] = None,
         keep_clipped_text: Optional[bool] = None,
         extract_annotations: Optional[bool] = None,
         extract_form_fields: Optional[bool] = None,
@@ -532,6 +534,9 @@ class LiteParse:
                 (default: none)
             ocr_language: Language code for OCR (e.g., "eng", "fra")
             tessdata_path: Path to tessdata directory for Tesseract
+            ocr_backend: Built-in OCR engine when no ``ocr_server_url`` is set:
+                ``"tesseract"`` or ``"ocria-nano"`` (LiteParse's own models). Default:
+                ocria-nano once pulled (``lit models pull ocria-nano``), else Tesseract
             max_pages: Maximum number of pages to parse
             target_pages: Specific pages to parse (e.g., "1-5,10,15-20")
             extract_screenshots: Render parsed pages to PNG and return them in
@@ -539,7 +544,8 @@ class LiteParse:
             continue_on_page_error: Skip page-level PDF extraction failures and
                 return them in ``ParseResult.page_errors``. Document-level
                 failures remain fatal. Default False.
-            dpi: DPI for rendering (affects OCR quality)
+            dpi: DPI for rendering, OCR and screenshots (default: 300 with the
+                ocria-nano OCR backend, else 150)
             output_format: Output format: "json", "text", or "markdown" (default: "json")
             preserve_very_small_text: Whether to preserve very small text
             password: Password for encrypted/protected documents
@@ -550,6 +556,9 @@ class LiteParse:
             keep_headers_footers: Keep running headers/footers in markdown
                 output instead of stripping repeated page-band lines and page
                 chrome (default: False).
+            table_model: Learned table-structure model (weights file path).
+                Born-digital pages get their tables from the model wherever it
+                finds one. Also read from ``LITEPARSE_TABLE_MODEL``.
             keep_clipped_text: Keep text hidden by rectangular clips (e.g.
                 overflow from a fixed-height table cell) instead of dropping it
                 (default: False).
@@ -637,6 +646,8 @@ class LiteParse:
             kwargs["ocr_language"] = ocr_language
         if tessdata_path is not None:
             kwargs["tessdata_path"] = tessdata_path
+        if ocr_backend is not None:
+            kwargs["ocr_backend"] = ocr_backend
         if max_pages is not None:
             kwargs["max_pages"] = max_pages
         if target_pages is not None:
@@ -667,6 +678,8 @@ class LiteParse:
             kwargs["extract_links"] = extract_links
         if keep_headers_footers is not None:
             kwargs["keep_headers_footers"] = keep_headers_footers
+        if table_model is not None:
+            kwargs["table_model"] = str(table_model)
         if keep_clipped_text is not None:
             kwargs["keep_clipped_text"] = keep_clipped_text
         if extract_annotations is not None:
@@ -998,6 +1011,7 @@ class LiteParse:
             ocr_request_fields=cfg.ocr_request_fields,
             ocr_page_request_fields=cfg.ocr_page_request_fields,
             tessdata_path=cfg.tessdata_path,
+            ocr_backend=cfg.ocr_backend,
             max_pages=cfg.max_pages,
             target_pages=cfg.target_pages,
             extract_screenshots=cfg.extract_screenshots,
@@ -1012,6 +1026,7 @@ class LiteParse:
             image_output_dir=cfg.image_output_dir,
             extract_links=cfg.extract_links,
             keep_headers_footers=cfg.keep_headers_footers,
+            table_model=cfg.table_model,
             keep_clipped_text=cfg.keep_clipped_text,
             extract_annotations=cfg.extract_annotations,
             extract_form_fields=cfg.extract_form_fields,

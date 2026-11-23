@@ -1,4 +1,5 @@
 //! Invented PDFs reproducing numbered prose misclassified as a table.
+use liteparse::config::OcrBackend;
 use liteparse::types::PdfInput;
 use liteparse::{LiteParse, LiteParseConfig, OutputFormat};
 
@@ -48,6 +49,8 @@ async fn word_positions_keep_numbered_sections_and_prose_out_of_tables_by_defaul
     ];
     for output_format in [OutputFormat::Markdown, OutputFormat::Json] {
         let parser = LiteParse::new(LiteParseConfig {
+            // the heuristic block path: an installed ocria-nano package would run LayoutNet instead
+            ocr_backend: Some(OcrBackend::Tesseract),
             ocr_enabled: false,
             output_format,
             extract_blocks: true,

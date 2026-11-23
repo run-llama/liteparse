@@ -35,6 +35,7 @@ hard stuff so your models see clean, structured data and markdown.
 - **Fast Text Parsing**: Spatial text parsing using PDFium, ~2-5ms per page
 - **Flexible OCR System**:
   - **Built-in**: Tesseract (zero setup, bundled with the library)
+  - **ocria-nano (opt-in)**: LiteParse's own CPU models (8.1M parameters): line detector, script router, four recognizers and LayoutNet, a learned table and layout model. `lit models pull ocria-nano` once, then it is the OCR backend ([details](#optional-ocria-nano-liteparses-own-models))
   - **HTTP Servers**: Plug in any OCR server (EasyOCR, PaddleOCR, custom)
   - **Standard API**: Simple, well-defined OCR API specification
 - **Complexity Detection**: Cheaply check whether a document needs OCR or heavier parsing — route, reject, or estimate cost before a full parse
@@ -118,6 +119,26 @@ flowchart LR
 ```
 
 ## Benchmarks
+
+### With ocria-nano
+
+With its optional models (`lit models pull ocria-nano`), LiteParse runs a full OCR and table/layout
+pipeline on CPU on pages that need it. 
+
+The following numbers are from the [ocria-nano technical report](https://www.llamaindex.ai/ocria/ocria-nano-1-report.pdf):
+
+| System (CPU) | ParseBench-2 | OmniParseBench | ParseBench-1 | olmOCR-bench | BHL CER ↓ | pages/s |
+|---|---:|---:|---:|---:|---:|---:|
+| **LiteParse + ocria-nano** | **59.2** | **74.8** | **52.7** | **60.9** | **0.048** | 27.8 |
+| Indra 1.1.2 | 55.1 | 70.9 | 42.6 | 60.8 | 0.062 | **29.6** |
+| Marker 2.2.0 (fast) | 52.5 | 69.8 | 40.4 | 60.8 | 0.067 | 24.7 |
+| LiteParse (Tesseract, default) | 48.7 | 42.3 | 40.5 | 45.7 | 0.275 | 14.2 |
+
+ParseBench-2 v2.07 with the official `parse-bench` scorer (`parse-bench run liteparse_ocria_nano`),
+OmniParseBench v1.7, ParseBench-1 and olmOCR-bench with their own harnesses, BHL IMPACT character error
+rate. Throughput: 300 random ParseBench pages on a 16-vCPU container, one worker per core.
+
+### Without ML models
 
 LiteParse is measured on multiple public Doc→Markdown benchmarks. All numbers below were produced on
 this machine from one command (see [Reproducing](#reproducing-the-benchmarks)), with every tool at
@@ -508,11 +529,13 @@ Options:
       --format <format>        Output format: json|text|markdown [default: text]
       --no-ocr                 Disable OCR
       --ocr-language <lang>    OCR language, Tesseract format [default: eng]
-      --ocr-server-url <url>   HTTP OCR server URL (uses Tesseract if not provided)
+      --ocr-server-url <url>   HTTP OCR server URL (instead of the built-in --ocr-backend)
+      --ocr-backend <engine>   Built-in OCR: tesseract|ocria-nano [default: ocria-nano once pulled, else tesseract]
       --tessdata-path <path>   Path to tessdata directory
       --max-pages <n>          Max pages to parse [default: 1000]
       --target-pages <pages>   Pages to parse (e.g., "1-5,10,15-20")
-      --dpi <dpi>              Rendering DPI [default: 150]
+      --dpi <dpi>              Rendering DPI [default: 250 with ocria-nano, else 150]
+      --table-model <file>     Learned table/layout model weights [default: the installed ocria-nano package's]
       --image-mode <mode>      Markdown image handling: off|placeholder|embed [default: placeholder]
       --extract-images         Extract embedded image bytes and metadata
       --image-output-dir <dir> Write extracted images; requires --extract-images
@@ -529,6 +552,16 @@ Options:
   -q, --quiet                  Suppress progress output
   -h, --help                   Print help
 ```
+
+#### Models Command
+
+```
+lit models pull <name>[@version] [--from <dir>] [-q]   Download (or install from <dir>) a model package
+lit models list                                         Show installed model packages
+lit models rm <name>                                    Remove an installed model package
+```
+
+The one package is `ocria-nano` (see [ocria-nano](#optional-ocria-nano-liteparses-own-models)).
 
 #### Batch Parse Command
 
@@ -607,6 +640,46 @@ Or pass the path directly:
 lit parse document.pdf --tessdata-path /path/to/tessdata
 ```
 
+### Optional: ocria-nano (LiteParse's own models)
+
+ocria-nano is LiteParse's own model package: a text-line detector, a script router, four
+recognizers (Latin, CJK, right-to-left, and a world-script model covering about 17 more scripts) and
+LayoutNet, a learned table and layout model. Everything runs in-process on CPU through ONNX Runtime,
+which is downloaded with the models. It is opt-in, the models are not bundled and are licensed
+separately from LiteParse.
+
+```bash
+lit models pull ocria-nano     # once: models + ONNX Runtime, checked against pinned sha256 (60-75 MB)
+lit parse scan.pdf             # ocria-nano is now the OCR backend
+lit parse scan.pdf --ocr-backend tesseract   # back to Tesseract for one run
+lit models list                # installed packages
+lit models rm ocria-nano       # remove
+```
+
+- Once pulled, ocria-nano is the default backend and pages are rendered at 250 dpi (150 with
+  Tesseract); `--dpi` overrides it. LayoutNet runs whenever ocria-nano is the backend, also with
+  `--no-ocr`.
+- Offline / air-gapped machines: `lit models pull ocria-nano --from <dir>` installs from a directory
+  holding the package files. `LITEPARSE_MODEL_DIR` moves the model directory (default
+  `~/.cache/liteparse/models`), and `ORT_DYLIB_PATH` points at an existing ONNX Runtime library.
+- `--ocr-language` applies to Tesseract only: ocria-nano detects the script of each line itself.
+- From Python and Node.js:
+
+```python
+from liteparse import LiteParse, models
+models.pull("ocria-nano")
+LiteParse(ocr_backend="ocria-nano").parse("scan.pdf")
+```
+
+```typescript
+import { LiteParse, models } from "@llamaindex/liteparse";
+models.pull("ocria-nano");
+await new LiteParse({ ocrBackend: "ocria-nano" }).parse("scan.pdf");
+```
+
+- In the browser and on edge runtimes, the WASM package runs the same models: see
+  [`packages/wasm`](packages/wasm/README.md#built-in-ocr-ocria-nano).
+
 ### Optional: HTTP OCR Servers
 
 For higher accuracy or better performance, you can use an HTTP OCR server. We provide ready-to-use example wrappers for popular OCR engines:
@@ -660,6 +733,9 @@ choco install libreoffice-fresh
 | Variable | Description |
 |----------|-------------|
 | `TESSDATA_PREFIX` | Path to a directory containing Tesseract `.traineddata` files. Used for offline/air-gapped environments. |
+| `LITEPARSE_MODEL_DIR` | Directory for optional model packages (`lit models`); default `~/.cache/liteparse/models` (`%LOCALAPPDATA%\liteparse\models` on Windows). |
+| `ORT_DYLIB_PATH` | An ONNX Runtime shared library to use for ocria-nano instead of the one `lit models pull` installs. |
+| `HF_TOKEN` | Hugging Face token, sent only to huggingface.co when pulling models (needed for a private mirror only). |
 
 ## Development
 

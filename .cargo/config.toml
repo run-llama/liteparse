@@ -1,0 +1,4 @@
+# WebAssembly SIMD (supported by every current browser, Node, Deno and Workers): tract, which runs
+# the ocria-nano models in the WASM build, only compiles its simd128 kernels with it (~2x faster).
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

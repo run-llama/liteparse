@@ -5,7 +5,7 @@ sidebar:
   order: 9
 ---
 
-LiteParse ships a WebAssembly package that runs entirely in the browser — no server, no cloud calls. It supports PDF parsing and custom OCR engines implemented in JavaScript.
+LiteParse ships a WebAssembly package that runs entirely in the browser. It supports PDF parsing, LiteParse's own OCR models (ocria-nano), and custom OCR engines implemented in JavaScript.
 
 ## Install
 
@@ -37,6 +37,7 @@ console.log(result.pages[0]);
 ## What works in the browser
 
 - **PDF parsing** from `Uint8Array` input (use `file.arrayBuffer()` to get bytes from a file picker for example)
+- **Built-in OCR with ocria-nano**: LiteParse's own models, including LayoutNet for tables and layout (see below)
 - **Custom OCR** via the `ocrEngine` callback interface (see below)
 - **Text, JSON, and markdown output formats**
 - **Document complexity** via `parser.isComplex(bytes)` — see the [complexity guide](/liteparse/guides/complexity/)
@@ -46,13 +47,40 @@ console.log(result.pages[0]);
 
 - **File path input** — pass `Uint8Array` instead
 - **DOCX/XLSX/PPTX conversion** — requires LibreOffice, which isn't available in the browser
-- **Built-in Tesseract or HTTP OCR** — use the custom `ocrEngine` interface instead
+- **Built-in Tesseract or HTTP OCR** — use ocria-nano or the custom `ocrEngine` interface instead
 - **Screenshots** — not available in the WASM build
 - **`imageOutputDir`** — there is no filesystem to write to. Use `extractImages` and read the bytes from the result instead
 
-## OCR in the browser
+## OCR with ocria-nano
 
-The native Tesseract and HTTP OCR backends are not available in WASM. To use OCR, pass a custom `ocrEngine` object with a `recognize` method:
+The WASM build runs ocria-nano, the same OCR and table models as the native CLI, inside WebAssembly (no server, no
+ONNX Runtime). The models are downloaded on first use: load them once and share the handle across parsers.
+
+```ts
+import init, { LiteParse, OcriaNano } from "@llamaindex/liteparse-wasm";
+await init();
+
+// Downloads this release's model files from Hugging Face and checks their sha256.
+const ocria = await OcriaNano.fromUrl();
+
+const parser = LiteParse.withOcriaNano({ ocrEnabled: true, outputFormat: "markdown" }, ocria);
+const result = await parser.parse(pdfBytes);
+```
+
+| `fromUrl` option | Default | |
+|---|---|---|
+| `baseUrl` | this release on Hugging Face | where the files are (`<baseUrl>/<file>`), e.g. your own CDN |
+| `scripts` | all | recognizers to download: `"latin"` (always), `"cjk"`, `"rtl"`, `"world"` |
+| `layout` | `true` | download LayoutNet (17 MB) for learned tables and layout |
+| `verify` | `true` | check each file's size and sha256 |
+
+`OcriaNano.fromUrl({ scripts: ["latin"], layout: false })` is the smallest setup (1.5 MB of models). To cache or bundle
+the files yourself, pass their bytes to `OcriaNano.load({ det, detMeta, router, recLatin: { onnx, charset }, ... })`.
+The models are licensed separately from LiteParse under a modified OpenRAIL license.
+
+## Custom OCR engines
+
+To use any other OCR, pass a custom `ocrEngine` object with a `recognize` method:
 
 ```typescript
 const parser = new LiteParse({
@@ -107,7 +135,7 @@ All optional, camelCase:
 | `ocrHedgeDelaysMs` | `number[]` | `[]` | Request-hedging schedule for a remote `ocrEngine` |
 | `maxPages` | `number` | `1000` | Stop after this many pages |
 | `targetPages` | `string` | — | e.g. `"1-5,10,15-20"` |
-| `dpi` | `number` | `150` | Render DPI for OCR |
+| `dpi` | `number` | `150` (`250` with ocria-nano) | Render DPI for OCR |
 | `outputFormat` | `"json" \| "text" \| "markdown"` | `"json"` | Shape of `result.text`. Also accepts `"md"`. Throws on any other value |
 | `preserveVerySmallText` | `boolean` | `false` | Keep tiny text that's normally filtered |
 | `skipDiagonalText` | `boolean` | `false` | Drop text more than 2° off the nearest right angle |

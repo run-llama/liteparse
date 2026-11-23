@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { program } from "commander";
-import { LiteParse, type LiteParseConfig } from "./lib.js";
+import { LiteParse, models, type LiteParseConfig } from "./lib.js";
 import { parseResultToCliJson } from "./cli-json.js";
 import { formatText } from "./cli-text.js";
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
@@ -94,6 +94,7 @@ program
     "--keep-headers-footers",
     "Keep running headers/footers in markdown output instead of stripping them",
   )
+  .option("--table-model <path>", "Learned table-structure model (weights file)")
   .option(
     "--keep-clipped-text",
     "Keep text hidden by clips (e.g. overflow from fixed-height table cells)",
@@ -114,6 +115,10 @@ program
     "Include each page's content_bounds in JSON output",
   )
   .option("--ocr-server-url <url>", "HTTP OCR server URL")
+  .option(
+    "--ocr-backend <backend>",
+    "OCR engine when no --ocr-server-url is given: tesseract or ocria-nano (default: ocria-nano once pulled)",
+  )
   .option(
     "--ocr-server-header <header>",
     'Extra header for OCR server requests, "Name: Value" (repeatable)',
@@ -169,6 +174,7 @@ program
       if (opts.extractImages) config.extractImages = true;
       if (opts.links === false) config.extractLinks = false;
       if (opts.keepHeadersFooters) config.keepHeadersFooters = true;
+      if (opts.tableModel) config.tableModel = opts.tableModel as string;
       if (opts.keepClippedText) config.keepClippedText = true;
       if (opts.extractAnnotations) config.extractAnnotations = true;
       if (opts.extractFormFields) config.extractFormFields = true;
@@ -178,6 +184,8 @@ program
       if (opts.extractContentBounds) config.extractContentBounds = true;
       if (opts.ocrServerUrl)
         config.ocrServerUrl = opts.ocrServerUrl as string;
+      if (opts.ocrBackend)
+        config.ocrBackend = opts.ocrBackend as LiteParseConfig["ocrBackend"];
       if (opts.ocrServerHeader)
         config.ocrServerHeaders = opts.ocrServerHeader as Record<string, string>;
       if (opts.ocr === false) config.ocrEnabled = false;
@@ -370,6 +378,10 @@ program
   .option("--ocr-language <lang>", "OCR language (default: eng)")
   .option("--ocr-server-url <url>", "HTTP OCR server URL")
   .option(
+    "--ocr-backend <backend>",
+    "OCR engine when no --ocr-server-url is given: tesseract or ocria-nano (default: ocria-nano once pulled)",
+  )
+  .option(
     "--ocr-server-header <header>",
     'Extra header for OCR server requests, "Name: Value" (repeatable)',
     collectHeader,
@@ -405,6 +417,7 @@ program
     "--extract-vector-graphics",
     "Include page-scoped vector shapes and merged horizontal/vertical lines",
   )
+  .option("--table-model <path>", "Learned table-structure model (weights file)")
   .action(
     async (
       inputDir: string,
@@ -419,6 +432,8 @@ program
         if (opts.ocrLanguage) config.ocrLanguage = opts.ocrLanguage as string;
         if (opts.ocrServerUrl)
           config.ocrServerUrl = opts.ocrServerUrl as string;
+        if (opts.ocrBackend)
+          config.ocrBackend = opts.ocrBackend as LiteParseConfig["ocrBackend"];
         if (opts.ocrServerHeader)
           config.ocrServerHeaders = opts.ocrServerHeader as Record<string, string>;
         if (opts.maxPages) config.maxPages = opts.maxPages as number;
@@ -438,6 +453,7 @@ program
       if (opts.extractXfaPackets) config.extractXfaPackets = true;
       if (opts.extractContentBounds) config.extractContentBounds = true;
         if (opts.extractVectorGraphics) config.extractVectorGraphics = true;
+        if (opts.tableModel) config.tableModel = opts.tableModel as string;
 
         const parser = new LiteParse(config);
         const outExt = format === "json" ? ".json" : format === "markdown" ? ".md" : ".txt";
@@ -620,5 +636,48 @@ function collectFilesInner(
     files.push(fullPath);
   }
 }
+
+const modelsCmd = program
+  .command("models")
+  .description("Download, list or remove optional model packages (ocria-nano)");
+
+modelsCmd
+  .command("pull")
+  .description("Download a model package, e.g. `lit models pull ocria-nano@latest`")
+  .argument("<spec>", "Package name, optionally @version")
+  .option("--from <dir>", "Install from a local directory holding the package files")
+  .option("-q, --quiet", "Suppress progress output")
+  .action(async (spec: string, opts: Record<string, unknown>) => {
+    try {
+      await models.pull(spec, { fromDir: opts.from as string | undefined, quiet: !!opts.quiet });
+    } catch (e) {
+      console.error(`Error: ${(e as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+modelsCmd
+  .command("list")
+  .description("Show installed model packages")
+  .action(() => {
+    const installed = models.list();
+    if (installed.length === 0) {
+      console.log("No model packages installed (try `lit models pull ocria-nano`).");
+    }
+    for (const m of installed) {
+      const size = (m.sizeBytes / 1e6).toFixed(1);
+      const note = m.complete ? "" : "  (incomplete: pull again)";
+      console.log(`${m.name}@${m.version ?? "?"}  ${size} MB  ${m.path}${note}`);
+    }
+  });
+
+modelsCmd
+  .command("rm")
+  .description("Remove an installed model package")
+  .argument("<name>", "Package name")
+  .action((name: string) => {
+    const dir = models.rm(name);
+    console.log(dir ? `Removed ${dir}` : `${name} is not installed.`);
+  });
 
 program.parse(process.argv);

@@ -283,10 +283,12 @@ fn extract_single_page(
     let extracted_refs = extract_page_image_refs(&page, page_number, output_options.extract_images);
     let mut image_refs = extracted_refs.refs;
     image_error_count += extracted_refs.error_count;
-    let pdf_annotations = (output_options.extract_annotations
-        || output_options.extract_structure_tree)
-        .then(|| page.annotations(&view_box))
-        .unwrap_or_default();
+    let pdf_annotations =
+        if output_options.extract_annotations || output_options.extract_structure_tree {
+            page.annotations(&view_box)
+        } else {
+            Default::default()
+        };
     let annotations = output_options
         .extract_annotations
         .then(|| pdf_annotations.iter().map(document_annotation).collect());
@@ -3547,15 +3549,15 @@ struct SegmentBuilder {
     emit_words: bool,
     // When false, source-code/trailing-space metadata is not accumulated.
     extract_text_metadata: bool,
+    // Right-to-left letters of the segment as (byte end in `text`, loose left, loose right), so
+    // a combining mark drawn over an earlier letter can be placed after it (see `push_char`).
+    rtl_spans: Vec<(usize, f32, f32)>,
     // Set on a run split off at a size step into smaller raised / lowered type: the host
     // segment's (top, bottom), which the item takes as its band (see `TextItem::script_geom`).
     host_band: Option<(f32, f32)>,
     // The last run that took a host band: (top, bottom, right edge), so a later small-type
     // segment continuing it ("LC" "50" ... "(mg/L)", other cells drawn in between) takes it too.
     last_script: Option<(f32, f32, f32)>,
-    // Right-to-left letters of the segment as (byte end in `text`, loose left, loose right), so
-    // a combining mark drawn over an earlier letter can be placed after it (see `push_char`).
-    rtl_spans: Vec<(usize, f32, f32)>,
 }
 
 impl SegmentBuilder {
@@ -3605,9 +3607,9 @@ impl SegmentBuilder {
             word_has: false,
             emit_words,
             extract_text_metadata,
+            rtl_spans: Vec::new(),
             host_band: None,
             last_script: None,
-            rtl_spans: Vec::new(),
         }
     }
 

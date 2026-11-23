@@ -34,13 +34,15 @@ lit parse [options] <file>
 | `--keep-clipped-text` | Keep text hidden by clips (e.g. overflow from fixed-height table cells) | — |
 | `--no-ocr` | Disable OCR entirely | — |
 | `--ocr-language <lang>` | OCR language code (Tesseract format) | `eng` |
-| `--ocr-server-url <url>` | HTTP OCR server URL | — (uses Tesseract) |
+| `--ocr-server-url <url>` | HTTP OCR server URL, instead of the built-in `--ocr-backend` | — |
+| `--ocr-backend <engine>` | Built-in OCR engine: `tesseract` or `ocria-nano` | `ocria-nano` once pulled (`lit models pull ocria-nano`), else `tesseract` |
 | `--ocr-server-header <header>` | Extra HTTP header for OCR server requests, as `"Name: Value"`. Repeatable | — |
 | `--tessdata-path <path>` | Path to tessdata directory | — (uses `TESSDATA_PREFIX` env var) |
 | `--num-workers <n>` | Pages to OCR in parallel | CPU cores - 1 |
 | `--max-pages <n>` | Maximum pages to parse | `1000` |
 | `--target-pages <pages>` | Pages to parse (e.g., `"1-5,10"`) | — (all pages) |
-| `--dpi <dpi>` | Rendering DPI | `150` |
+| `--dpi <dpi>` | Rendering DPI | `250` with ocria-nano, else `150` |
+| `--table-model <file>` | Learned table / layout model weights (LayoutNet) | the installed ocria-nano package's |
 | `--preserve-small-text` | Keep very small text | — |
 | `--password <password>` | Password for encrypted/protected documents | — |
 | `-q, --quiet` | Suppress progress output | — |
@@ -130,12 +132,14 @@ lit batch-parse [options] <input-dir> <output-dir>
 | `--format <format>` | Output format: `json`, `text`, or `markdown` | `text` |
 | `--no-ocr` | Disable OCR entirely | — |
 | `--ocr-language <lang>` | OCR language code | `eng` |
-| `--ocr-server-url <url>` | HTTP OCR server URL | — (uses Tesseract) |
+| `--ocr-server-url <url>` | HTTP OCR server URL, instead of the built-in `--ocr-backend` | — |
+| `--ocr-backend <engine>` | Built-in OCR engine: `tesseract` or `ocria-nano` | `ocria-nano` once pulled (`lit models pull ocria-nano`), else `tesseract` |
 | `--ocr-server-header <header>` | Extra HTTP header for OCR server requests, as `"Name: Value"`. Repeatable | — |
 | `--tessdata-path <path>` | Path to tessdata directory | — |
 | `--num-workers <n>` | Pages to OCR in parallel | CPU cores - 1 |
 | `--max-pages <n>` | Maximum pages per file | `1000` |
-| `--dpi <dpi>` | Rendering DPI | `150` |
+| `--dpi <dpi>` | Rendering DPI | `250` with ocria-nano, else `150` |
+| `--table-model <file>` | Learned table / layout model weights (LayoutNet) | the installed ocria-nano package's |
 | `--recursive` | Search subdirectories | — |
 | `--extension <ext>` | Only process this extension (e.g., `".pdf"`) | — (all supported) |
 | `--password <password>` | Password for encrypted/protected documents (applied to all files) | — |
@@ -242,6 +246,23 @@ lit is-complex document.pdf --compact | jq '[.[] | select(.needs_ocr) | .page_nu
 ```
 
 ---
+
+## `lit models`
+
+Download, list or remove optional model packages. The one package is `ocria-nano`, LiteParse's own OCR and table
+models (see [OCR configuration](/liteparse/guides/ocr/#ocria-nano-liteparses-own-models)).
+
+```bash
+lit models pull ocria-nano            # download + verify (models and ONNX Runtime)
+lit models pull ocria-nano --from dir # install from a local directory holding the package files
+lit models list                       # installed packages
+lit models rm ocria-nano              # remove
+```
+
+| Option | Description |
+|--------|-------------|
+| `--from <dir>` | `pull`: install from a local directory instead of downloading |
+| `-q, --quiet` | `pull`: suppress progress output |
 
 ## Global options
 

@@ -514,6 +514,18 @@ pub struct ParsedPage {
     /// text, which is the overwhelming majority.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub projected_item_frames: Vec<(Rect, Rect)>,
+    /// Tables decoded by the learned table model (`table_model`) when it is enabled; the
+    /// markdown classifier emits them and drops the lines they cover. Not serialized.
+    #[serde(skip)]
+    pub model_tables: Vec<crate::table_model::ModelTable>,
+    /// Block class per unit from a joint layout model (`table_model`), for markdown heading
+    /// decisions; empty without one.
+    #[serde(skip)]
+    pub model_classes: Vec<crate::table_model::UnitClass>,
+    /// Layout blocks from the table model's block head; they replace the heuristic text
+    /// blocks in `blocks`. Empty otherwise.
+    #[serde(skip)]
+    pub model_blocks: Vec<crate::table_model::ModelBlock>,
     /// Structure-tree nodes for this page (tagged PDFs only). Pre-flattened in
     /// pre-order. Consumed by the markdown classifier for highest-priority
     /// heading / figure / table detection.

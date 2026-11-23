@@ -122,6 +122,63 @@ failed and at least one failed page had little native text. Other parsing or
 callback errors can also reject parsing. If parsing fails, OCR calls that have
 already started can continue.
 
+### Built-in OCR: ocria-nano
+
+ocria-nano, LiteParse's own OCR models, also runs inside the WASM build: the
+same detector, script router and recognizers as the native CLI, executed in
+WebAssembly (no server, no ONNX Runtime). Optionally it also runs LayoutNet,
+LiteParse's learned table and layout model. The models are downloaded on first
+use; load them once and share the handle.
+
+```ts
+import init, { LiteParse, OcriaNano } from "@llamaindex/liteparse-wasm";
+await init();
+
+// Downloads this release's model files from Hugging Face and checks their sha256.
+const ocria = await OcriaNano.fromUrl();
+
+const parser = LiteParse.withOcriaNano({ ocrEnabled: true, outputFormat: "markdown" }, ocria);
+const result = await parser.parse(pdfBytes);
+```
+
+`fromUrl` options:
+
+| Option | Default | |
+| --- | --- | --- |
+| `baseUrl` | this release on Hugging Face | where the files are (`<baseUrl>/<file>`), e.g. your own CDN |
+| `scripts` | all | recognizers to download: `"latin"` (always), `"cjk"`, `"rtl"`, `"world"`; lines routed to a missing one are read by the Latin model |
+| `layout` | `true` | download LayoutNet (learned tables / layout) |
+| `verify` | `true` | check each file's size and sha256 against the release |
+
+```ts
+// smallest setup: Latin OCR only, from your own host (1.5 MB of models)
+const ocria = await OcriaNano.fromUrl({ baseUrl: "https://cdn.example.com/ocria-nano", scripts: ["latin"], layout: false });
+```
+
+To cache or bundle the files yourself, pass their bytes to `OcriaNano.load`
+instead: `OcriaNano.load({ det, detMeta, router, recLatin: { onnx, charset },
+recCjk, recRtl, recWorld, tablenet })`, each a `Uint8Array` of the file of that
+name in the model repository (`det.onnx`, `det.meta.json`, `router.onnx`,
+`rec_latin.onnx` + `rec_latin.charset.json`, ..., `tablenet.bin`).
+
+| Files | Size |
+| --- | --- |
+| Detector + router + Latin recognizer (`det`, `router`, `rec_latin`) | 1.5 MB |
+| All four recognizers (+ `rec_cjk`, `rec_rtl`, `rec_world`) | 13 MB |
+| LayoutNet (`tablenet.bin`) | 17 MB |
+
+Notes:
+
+- The ocria-nano models are licensed separately from LiteParse (see the
+  `LICENSE` in the model repository); using them is opt-in.
+- Output matches the native CLI on clean pages. On very noisy scans a few
+  characters can differ: the Latin recognizer is int8-quantized, and WASM
+  evaluates it with slightly different rounding than ONNX Runtime does natively.
+- OCR runs on one thread: about 1-4 s per scanned page on a laptop, versus
+  0.3-0.6 s natively with all cores. Pages with a text layer are not OCR'd.
+- The build uses WebAssembly SIMD, available in all current browsers, Node 16.4+,
+  Deno and Cloudflare Workers.
+
 ### Receive OCR pages before parsing ends
 
 With `onOcrPage`, LiteParse merges each completed OCR result into its page on

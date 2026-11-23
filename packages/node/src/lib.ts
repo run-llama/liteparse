@@ -60,6 +60,8 @@ export interface LiteParseConfig {
    */
   ocrPageRequestFields?: Record<number, Record<string, string>>;
   tessdataPath?: string;
+  /** Built-in OCR engine when no `ocrServerUrl` is set: "tesseract" or "ocria-nano". Default: ocria-nano once pulled (`lit models pull ocria-nano`), else "tesseract". */
+  ocrBackend?: "tesseract" | "ocria-nano";
   maxPages: number;
   targetPages?: string;
   /** Render parsed pages to PNG and return them in `ParseResult.screenshots`. */
@@ -78,6 +80,8 @@ export interface LiteParseConfig {
   extractLinks: boolean;
   /** Keep running headers/footers in markdown output instead of stripping repeated page-band lines and page chrome (default: false). */
   keepHeadersFooters: boolean;
+  /** Learned table-structure model (weights file path). Born-digital pages get their tables from the model wherever it finds one. Also read from `LITEPARSE_TABLE_MODEL`. */
+  tableModel?: string;
   /** Keep text hidden by rectangular clips (e.g. overflow from a fixed-height table cell) instead of dropping it (default: false). */
   keepClippedText: boolean;
   /** Extract all PDF annotations into each parsed page (default: false). */
@@ -697,6 +701,7 @@ export class LiteParse {
       ocrRequestFields: userConfig.ocrRequestFields,
       ocrPageRequestFields: userConfig.ocrPageRequestFields,
       tessdataPath: userConfig.tessdataPath,
+      ocrBackend: userConfig.ocrBackend,
       maxPages: userConfig.maxPages,
       targetPages: userConfig.targetPages,
       extractScreenshots: userConfig.extractScreenshots,
@@ -708,6 +713,7 @@ export class LiteParse {
       imageOutputDir: userConfig.imageOutputDir,
       extractLinks: userConfig.extractLinks,
       keepHeadersFooters: userConfig.keepHeadersFooters,
+      tableModel: userConfig.tableModel,
       keepClippedText: userConfig.keepClippedText,
       extractAnnotations: userConfig.extractAnnotations,
       extractFormFields: userConfig.extractFormFields,
@@ -762,6 +768,7 @@ export class LiteParse {
       ocrRequestFields: resolved.ocrRequestFields ?? {},
       ocrPageRequestFields: resolved.ocrPageRequestFields ?? {},
       tessdataPath: resolved.tessdataPath ?? undefined,
+      ocrBackend: (resolved.ocrBackend as LiteParseConfig["ocrBackend"]) ?? "tesseract",
       maxPages: resolved.maxPages ?? 1000,
       targetPages: resolved.targetPages ?? undefined,
       extractScreenshots: resolved.extractScreenshots ?? false,
@@ -773,6 +780,7 @@ export class LiteParse {
       imageOutputDir: resolved.imageOutputDir ?? undefined,
       extractLinks: resolved.extractLinks ?? true,
       keepHeadersFooters: resolved.keepHeadersFooters ?? false,
+      tableModel: resolved.tableModel ?? undefined,
       keepClippedText: resolved.keepClippedText ?? false,
       extractAnnotations: resolved.extractAnnotations ?? false,
       extractFormFields: resolved.extractFormFields ?? false,
@@ -1132,5 +1140,36 @@ export function searchItems(
   );
   return nativeResults.map(toTextItem);
 }
+
+// ---------------------------------------------------------------------------
+// models — optional model packages (`lit models`)
+// ---------------------------------------------------------------------------
+
+export interface InstalledModel {
+  name: string;
+  version?: string;
+  path: string;
+  sizeBytes: number;
+  /** Every file of the package is present (else pull again). */
+  complete: boolean;
+}
+
+/**
+ * LiteParse's own OCR and table models. Pull once (prints the model licence notice), then
+ * parse with `new LiteParse({ ocrBackend: "ocria-nano" })`.
+ */
+export const models = {
+  /** Download and verify "ocria-nano" (or "ocria-nano@<version>"); resolves to its directory. */
+  pull(spec = "ocria-nano", opts: { fromDir?: string; quiet?: boolean } = {}): Promise<string> {
+    return native.modelsPull(spec, opts.fromDir ?? null, opts.quiet ?? false);
+  },
+  list(): InstalledModel[] {
+    return native.modelsList().map((m) => ({ ...m, version: m.version ?? undefined }));
+  },
+  /** Remove an installed package; returns its directory, or undefined if not installed. */
+  rm(name: string): string | undefined {
+    return native.modelsRm(name) ?? undefined;
+  },
+};
 
 export default LiteParse;

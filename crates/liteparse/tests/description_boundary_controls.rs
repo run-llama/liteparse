@@ -1,9 +1,12 @@
 //! Invented PDF controls for description-table boundaries and row recovery.
+use liteparse::config::OcrBackend;
 use liteparse::types::PdfInput;
 use liteparse::{LiteParse, LiteParseConfig, OutputFormat};
 
 async fn parse(pdf: Vec<u8>) -> liteparse::ParseResult {
     LiteParse::new(LiteParseConfig {
+        // the heuristic table path: an installed ocria-nano package would run LayoutNet instead
+        ocr_backend: Some(OcrBackend::Tesseract),
         ocr_enabled: false,
         output_format: OutputFormat::Markdown,
         extract_blocks: true,

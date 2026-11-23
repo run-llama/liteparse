@@ -1,6 +1,6 @@
 [package]
 name = "liteparse-wasm"
-version = "2.20.0"
+version = "2.21.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -17,6 +17,7 @@ js-sys = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde-wasm-bindgen = "0.6"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tsify-next = { version = "0.5", default-features = false, features = ["js"] }
 console_error_panic_hook = { version = "0.1", optional = true }
 
@@ -32,8 +33,10 @@ pdfium-sys = { package = "liteparse-pdfium-sys", version = "1.14.0", path = "../
 wasm-bindgen-test = "0.3"
 
 [features]
-default = ["panic_hook"]
+default = ["panic_hook", "ocria-nano"]
 panic_hook = ["dep:console_error_panic_hook"]
+# ocria-nano OCR + LayoutNet on tract (`OcriaNano`, `LiteParse.withOcriaNano`); models come in as bytes
+ocria-nano = ["liteparse/ocria-nano-wasm"]
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-O3"]

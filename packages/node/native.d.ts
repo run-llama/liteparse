@@ -28,6 +28,13 @@ export interface JsLiteParseConfig {
   ocrPageRequestFields?: Record<string, Record<string, string>>
   /** Path to tessdata directory for Tesseract. */
   tessdataPath?: string
+  /**
+   * Built-in OCR engine when no `ocrServerUrl` is set: "tesseract" or "ocria-nano"
+   * (LiteParse's own models; download them once with `lit models pull ocria-nano`).
+   */
+  ocrBackend?: string
+  /** Resolution pages are rendered at for OCR (default: 250 for ocria-nano, `dpi` otherwise). */
+  ocrDpi?: number
   /** Maximum number of pages to parse. */
   maxPages?: number
   /** Specific pages to parse (e.g., "1-5,10,15-20"). */
@@ -78,6 +85,11 @@ export interface JsLiteParseConfig {
    */
   keepHeadersFooters?: boolean
   /**
+   * Learned table-structure model (weights file path). Born-digital pages get
+   * their tables from the model wherever it finds one. Also read from
+   * LITEPARSE_TABLE_MODEL.
+   */
+  tableModel?: string
    * Keep text hidden by rectangular clips (e.g. overflow from a
    * fixed-height table cell) instead of dropping it. Default false.
    */
@@ -614,6 +626,24 @@ export interface JsPageComplexityStats {
 }
 /** Search text items for phrase matches, returning merged items with combined bounding boxes. */
 export declare function searchItems(items: Array<JsTextItem>, phrase: string, caseSensitive?: boolean | undefined | null): Array<JsTextItem>
+/** An installed model package (`lit models list`). */
+export interface JsInstalledModel {
+  name: string
+  version?: string
+  path: string
+  sizeBytes: number
+  /** Every file of the package is present (else pull again). */
+  complete: boolean
+}
+/**
+ * Download and verify a model package ("ocria-nano" or "ocria-nano@<version>"); `fromDir`
+ * installs from a local directory instead. Resolves to the installed directory.
+ */
+export declare function modelsPull(spec: string, fromDir?: string | undefined | null, quiet?: boolean | undefined | null): Promise<string>
+/** Installed model packages. */
+export declare function modelsList(): Array<JsInstalledModel>
+/** Remove an installed model package; returns its directory, or null if not installed. */
+export declare function modelsRm(name: string): string | null
 /** Main LiteParse parser class. */
 export declare class LiteParse {
   /**

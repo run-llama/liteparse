@@ -16,6 +16,7 @@ mod inline;
 mod lists;
 mod paragraphs;
 mod repetition;
+mod table_fix;
 mod tables;
 
 pub use blocks::{
@@ -23,9 +24,10 @@ pub use blocks::{
     splice_soft_hyphens, split_repeated_header_tables,
 };
 pub use classify::classify_page_with_filters;
+pub(crate) use classify::line_page_boxes;
 pub use headings::{build_heading_map, compute_body_size};
 pub use inline::{apply_link, escape_inline};
-pub use repetition::{compute_header_footer_set, detect_single_page_chrome};
+pub use repetition::{compute_header_footer_set, detect_single_page_chrome, model_furniture_lines};
 pub use tables::detect_table_rects;
 pub(crate) use tables::{count_text_table_runs, validated_ruled_table_rects};
 

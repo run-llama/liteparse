@@ -17,6 +17,17 @@ interface NativeBindings {
     phrase: string,
     caseSensitive?: boolean | null,
   ): NativeTextItem[];
+  modelsPull(spec: string, fromDir?: string | null, quiet?: boolean | null): Promise<string>;
+  modelsList(): NativeInstalledModel[];
+  modelsRm(name: string): string | null;
+}
+
+export interface NativeInstalledModel {
+  name: string;
+  version?: string | null;
+  path: string;
+  sizeBytes: number;
+  complete: boolean;
 }
 
 export interface LiteParseNativeConfig {
@@ -27,6 +38,7 @@ export interface LiteParseNativeConfig {
   ocrRequestFields?: Record<string, string>;
   ocrPageRequestFields?: Record<number, Record<string, string>>;
   tessdataPath?: string;
+  ocrBackend?: string;
   maxPages?: number;
   targetPages?: string;
   extractScreenshots?: boolean;
@@ -38,6 +50,7 @@ export interface LiteParseNativeConfig {
   imageOutputDir?: string;
   extractLinks?: boolean;
   keepHeadersFooters?: boolean;
+  tableModel?: string;
   keepClippedText?: boolean;
   extractAnnotations?: boolean;
   extractFormFields?: boolean;

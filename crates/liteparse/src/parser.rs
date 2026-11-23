@@ -190,11 +190,46 @@ pub struct LiteParse {
     /// mechanism for plugging an OCR engine in environments without the
     /// built-ins (e.g. WASM, where the JS side supplies a callback engine).
     ocr_engine_override: Option<std::sync::Arc<dyn OcrEngine>>,
+    /// Optional caller-provided learned table / layout model (LayoutNet). When set, it is used
+    /// instead of loading `config.table_model` from disk (e.g. WASM, where the JS side supplies
+    /// the weights as bytes).
+    table_net_override: Option<&'static crate::table_model::net::TableNet>,
     /// Optional caller-provided glyph recovery hook. When set, it is consulted
     /// as a last resort for buggy/obfuscated-font glyphs that liteparse's
     /// built-in cmap/AGL recovery could not decode. The published package ships
     /// none; the platform build injects an outline → unicode font-DB resolver.
     glyph_resolver: Option<std::sync::Arc<dyn crate::GlyphResolver>>,
+}
+
+/// The learned table model's per-page inputs for `pages`, appended in page order. These need the
+/// open page (PDFium isn't thread-safe), so they are built under the PDFium lock and joined with
+/// projection signals later. `render: false` leaves out the page render (ruling lines, image
+/// branch), for [`render_table_inputs`] to add later.
+fn build_table_inputs(
+    document: &pdfium::Document<'_>,
+    pages: &[Page],
+    net: &crate::table_model::net::TableNet,
+    render: bool,
+    out: &mut Vec<(usize, crate::table_model::PageInput)>,
+) {
+    out.extend(pages.iter().filter_map(|p| {
+        let page = document.page(p.page_number as i32 - 1).ok()?;
+        crate::table_model::page_input(&page, render, render && net.has_img())
+            .map(|inp| (p.page_number, inp))
+    }));
+}
+
+/// Add the page render to inputs built by [`build_table_inputs`] with `render: false`.
+fn render_table_inputs(
+    document: &pdfium::Document<'_>,
+    inputs: &mut [(usize, crate::table_model::PageInput)],
+    net: &crate::table_model::net::TableNet,
+) {
+    for (page_number, input) in inputs {
+        if let Ok(page) = document.page(*page_number as i32 - 1) {
+            input.attach_render(&page, true, net.has_img());
+        }
+    }
 }
 
 /// Run block classification once and fan the result out to everything that
@@ -223,10 +258,12 @@ fn apply_layout(
             // A page with no structural decomposition reports an empty list,
             // not `None` — extraction *was* enabled, there was just nothing to
             // decompose.
-            page.blocks = Some(stages::layout_blocks(
-                page,
-                blocks.as_deref().unwrap_or_default(),
-            ));
+            let heuristic = stages::layout_blocks(page, blocks.as_deref().unwrap_or_default());
+            page.blocks = Some(if page.model_blocks.is_empty() {
+                heuristic
+            } else {
+                crate::layout::with_model_blocks(page, heuristic)
+            });
         }
         if wants_markdown {
             page_md.push(stages::render_page_markdown(page, blocks.as_deref()));
@@ -247,6 +284,7 @@ impl LiteParse {
         Self {
             config,
             ocr_engine_override: None,
+            table_net_override: None,
             glyph_resolver: default_glyph_resolver(),
         }
     }
@@ -255,6 +293,13 @@ impl LiteParse {
     /// `ocr_server_url` / built-in Tesseract availability.
     pub fn with_ocr_engine(mut self, engine: std::sync::Arc<dyn OcrEngine>) -> Self {
         self.ocr_engine_override = Some(engine);
+        self
+    }
+
+    /// Use this learned table / layout model (see [`crate::table_model::load_bytes`]) instead
+    /// of loading `config.table_model` from disk.
+    pub fn with_table_net(mut self, net: &'static crate::table_model::net::TableNet) -> Self {
+        self.table_net_override = Some(net);
         self
     }
 
@@ -364,7 +409,7 @@ impl LiteParse {
             // `parse()` uses `OcrWindow::render_next`, which limits rendering
             // by free slots and ignores this field.
             max_rasters: self.config.num_workers.max(1),
-            dpi: self.config.dpi,
+            dpi: self.config.effective_dpi(),
             page_images: self.config.ocr_page_images.clone(),
             max_long_edge: None,
             grayscale,
@@ -382,7 +427,7 @@ impl LiteParse {
     /// `config.continue_on_page_error`; `screenshot()` is always fail-fast.
     pub fn screenshot_options(&self, continue_on_page_error: bool) -> stages::ScreenshotOptions {
         stages::ScreenshotOptions {
-            dpi: self.config.dpi,
+            dpi: self.config.effective_dpi(),
             detect_rects: self.config.detect_screenshot_rects,
             render_form_fields: self.config.render_form_fields,
             continue_on_page_error,
@@ -429,6 +474,15 @@ impl LiteParse {
                         ..Default::default()
                     }),
                 )));
+            }
+            if self.config.effective_ocr_backend() == crate::config::OcrBackend::OcriaNano {
+                #[cfg(feature = "ocria-nano")]
+                return crate::ocr::ocria::lazy_engine()
+                    .map(|e| Some(e as std::sync::Arc<dyn OcrEngine>));
+                #[cfg(not(feature = "ocria-nano"))]
+                return Err(
+                    "this build has no ocria-nano OCR backend (the `ocria-nano` feature)".into(),
+                );
             }
             #[cfg(feature = "tesseract")]
             {
@@ -681,6 +735,14 @@ impl LiteParse {
         // grayscale buffer (cheaper, for engines that binarize internally) or RGB.
         let ocr_engine = self.ocr_engine()?;
         let ocr_grayscale = ocr_engine.as_ref().is_some_and(|e| e.prefers_grayscale());
+        // The learned table model (weights loaded once per process).
+        let table_net = self.table_net_override.or_else(|| {
+            self.config
+                .effective_table_model()
+                .and_then(|p| crate::table_model::load(std::path::Path::new(&p)))
+        });
+        // a separate block-class model alongside the table model (a two-model setup): none ships
+        let layout_net: Option<&crate::table_model::net::TableNet> = None;
 
         #[allow(unused_mut)] // mutated only by the native image-output writer
         let (
@@ -699,6 +761,8 @@ impl LiteParse {
             xfa_packets,
             ocr_render_options,
             repaired_input,
+            mut table_inputs,
+            defer_table_inputs,
         ) = {
             let lib = Library::init();
             #[cfg(not(target_arch = "wasm32"))]
@@ -765,6 +829,13 @@ impl LiteParse {
                 .then(|| self.open_document(&lib, document_input, password))
                 .transpose()?;
             let analysis_document = pristine_document.as_ref().unwrap_or(&document);
+            // With OCR on, the table inputs' page renders (nearly all of their cost) are made
+            // inside the OCR loop instead, overlapping recognition, from the document each round
+            // reopens. A reopened document renders the same only when extraction flattened
+            // nothing. The units still come from this document: PDFium reports slightly
+            // different character boxes on a page extraction has run on.
+            let defer_table_inputs =
+                table_net.is_some() && ocr_engine.is_some() && !extracted.flattened_form_widgets;
             let stages::ExtractedPages {
                 pages,
                 page_errors,
@@ -806,6 +877,25 @@ impl LiteParse {
             } else {
                 Vec::new()
             };
+            // Learned table model: units and ruling lines need the open page (PDFium isn't
+            // thread-safe), so they are built here and joined with projection signals later.
+            let t_tin = web_time::Instant::now();
+            let mut table_inputs = Vec::new();
+            if let Some(net) = table_net {
+                build_table_inputs(
+                    analysis_document,
+                    &pages,
+                    net,
+                    !defer_table_inputs,
+                    &mut table_inputs,
+                );
+            }
+            if !table_inputs.is_empty() {
+                log(&format!(
+                    "[liteparse] table inputs: {:.1}ms",
+                    t_tin.elapsed().as_secs_f64() * 1000.0
+                ));
+            }
             #[cfg(target_arch = "wasm32")]
             let repaired_input: Option<crate::types::PdfInput> = None;
             // `lib` is dropped here, releasing the PDFium lock.
@@ -825,6 +915,8 @@ impl LiteParse {
                 xfa_packets,
                 ocr_render_options,
                 repaired_input,
+                table_inputs,
+                defer_table_inputs,
             )
         };
         let mut pages = pages;
@@ -838,6 +930,10 @@ impl LiteParse {
             let mut scan_start = 0usize;
             let mut ocr_tasks =
                 stages::OcrWindow::new(engine, &self.config.ocr_language, self.config.num_workers);
+            // Deferred table-input renders: inputs before `table_next` have theirs.
+            let deferred_net = table_net.filter(|_| defer_table_inputs);
+            let mut table_next = 0usize;
+            let mut t_tin = std::time::Duration::ZERO;
             #[cfg(target_arch = "wasm32")]
             let mut preview_merge = on_ocr_page.map(|_| {
                 let indices: std::collections::HashMap<_, _> = pages
@@ -898,6 +994,33 @@ impl LiteParse {
                 }
 
                 if scan_start >= pages.len() || ocr_tasks.available_capacity() == 0 {
+                    // About to wait on recognition: first render the table inputs of the pages
+                    // the OCR scan has passed, while the recognitions run.
+                    let passed = scan_start
+                        .checked_sub(1)
+                        .map_or(0, |i| pages[i].page_number);
+                    let upto = table_next
+                        + table_inputs[table_next..]
+                            .iter()
+                            .take_while(|(n, _)| *n <= passed)
+                            .count();
+                    if let Some(net) = deferred_net
+                        && table_next < upto
+                    {
+                        let t = web_time::Instant::now();
+                        {
+                            let lib = Library::init();
+                            let document = self.open_document(&lib, ocr_input, password)?;
+                            render_table_inputs(
+                                &document,
+                                &mut table_inputs[table_next..upto],
+                                net,
+                            );
+                        }
+                        table_next = upto;
+                        t_tin += t.elapsed();
+                        continue;
+                    }
                     if !ocr_tasks.complete_one().await {
                         break;
                     }
@@ -916,6 +1039,12 @@ impl LiteParse {
                 for raster in rendered {
                     ocr_tasks.submit(raster).await;
                 }
+            }
+            if deferred_net.is_some() && !table_inputs.is_empty() {
+                log(&format!(
+                    "[liteparse] table renders: {:.1}ms (during OCR)",
+                    t_tin.as_secs_f64() * 1000.0
+                ));
             }
 
             // Merge once, after every page has been recognized:
@@ -945,7 +1074,35 @@ impl LiteParse {
         // crop region, and before projection so filtered items never surface.
         stages::apply_content_filters(&mut pages, &self.content_filters());
 
-        // Grid projection
+        // A page whose text is now mostly OCR (an invisible old OCR layer or a garbled layer
+        // replaced by fresh OCR) is an OCR page for the table model too: built from the PDF's
+        // characters, its units would rebuild tables out of the discarded layer, and the
+        // replacement OCR text would then repeat below them.
+        for (page_number, input) in table_inputs.iter_mut() {
+            if input.ocr {
+                continue;
+            }
+            let Some(page) = pages.iter().find(|p| p.page_number == *page_number) else {
+                continue;
+            };
+            let (mut ocr, mut all) = (0usize, 0usize);
+            for item in &page.text_items {
+                let n = item.text.chars().filter(|c| !c.is_whitespace()).count();
+                all += n;
+                if item.confidence.is_some() {
+                    ocr += n;
+                }
+            }
+            if all > 0 && ocr * 5 >= all * 4 {
+                input.ocr = true;
+                input.units.clear();
+            }
+        }
+
+        // Grid projection (keeping per-item projection signals for the table model)
+        if !table_inputs.is_empty() {
+            crate::projection::collect_signals(true);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         let mut parsed_pages = self.project(pages);
         #[cfg(target_arch = "wasm32")]
@@ -963,6 +1120,71 @@ impl LiteParse {
                 })
                 .collect::<Vec<_>>()
         };
+        if !table_inputs.is_empty() {
+            crate::projection::collect_signals(false);
+            let signals = crate::projection::take_signals();
+            let t_tm = web_time::Instant::now();
+            let opt = crate::table_model::decode::DecodeOptions {
+                ..Default::default()
+            };
+            if let Some(net) = table_net {
+                // pages are independent here (pure compute on built inputs): run them on up to
+                // num_workers threads, then assign in page order
+                let run = |(page_number, input): &(usize, crate::table_model::PageInput)| {
+                    crate::table_model::run_page(
+                        net,
+                        layout_net,
+                        input,
+                        signals.get(page_number),
+                        &opt,
+                    )
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                let models: Vec<crate::table_model::PageModel> = {
+                    let workers = self
+                        .config
+                        .num_workers
+                        .max(1)
+                        .min(table_inputs.len().max(1));
+                    if workers <= 1 {
+                        table_inputs.iter().map(run).collect()
+                    } else {
+                        let chunk = table_inputs.len().div_ceil(workers);
+                        std::thread::scope(|sc| {
+                            let hs: Vec<_> = table_inputs
+                                .chunks(chunk)
+                                .map(|part| {
+                                    sc.spawn(move || part.iter().map(run).collect::<Vec<_>>())
+                                })
+                                .collect();
+                            hs.into_iter()
+                                .flat_map(|h| h.join().expect("table model thread"))
+                                .collect()
+                        })
+                    }
+                };
+                #[cfg(target_arch = "wasm32")]
+                let models: Vec<crate::table_model::PageModel> =
+                    table_inputs.iter().map(run).collect();
+                for ((page_number, _), pm) in table_inputs.iter().zip(models) {
+                    if let Some(pp) = parsed_pages
+                        .iter_mut()
+                        .find(|p| p.page_number == *page_number)
+                    {
+                        pp.model_tables = pm.tables;
+                        pp.model_classes = pm.classes;
+                        pp.model_blocks = pm.blocks;
+                        // split lines the projection ran across two of the model's blocks (narrow gutters)
+                        crate::resegment::resegment_by_model_blocks(pp);
+                    }
+                }
+            }
+            log(&format!(
+                "[liteparse] table model: {:.1}ms over {} pages",
+                t_tm.elapsed().as_secs_f64() * 1000.0,
+                table_inputs.len()
+            ));
+        }
 
         // Attach per-page complexity signals, including the layout signals
         // that need the projected page (same as `is_complex()` reports).
@@ -1749,6 +1971,9 @@ mod tests {
             vector_graphics: None,
             figures: vec![],
             projected_item_frames: vec![],
+            model_tables: Vec::new(),
+            model_classes: Vec::new(),
+            model_blocks: Vec::new(),
             struct_nodes: vec![],
             image_refs: vec![],
             complexity: None,

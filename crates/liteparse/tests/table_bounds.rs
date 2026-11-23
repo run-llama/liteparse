@@ -75,7 +75,11 @@ async fn table_boxes_stay_on_the_page() {
         .unwrap();
     let page = &result.pages[0];
     let blocks = page.blocks.as_ref().unwrap();
-    let table = blocks.iter().find(|b| b.kind == "table").unwrap();
+    // a heuristic table, or a learned one when an ocria-nano package is installed: clipped alike
+    let table = blocks
+        .iter()
+        .find(|b| b.kind == "table" || b.kind == "merged_table")
+        .unwrap();
     let (width, height) = (page.page_width, page.page_height);
     assert_on_page(table.bbox.as_ref().unwrap(), width, height);
     let cells = table
