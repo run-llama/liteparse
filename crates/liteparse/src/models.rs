@@ -474,8 +474,9 @@ fn extract_one(archive: &Path, member: &str, dst: &Path) -> Result<(), LiteParse
         let mut z = zip::ZipArchive::new(f).map_err(|e| err(e.to_string()))?;
         let found = z
             .file_names()
+            .filter_map(Result::ok)
             .find(|n| n.trim_start_matches("./") == member)
-            .map(str::to_string);
+            .map(|n| n.into_owned());
         let found = found.ok_or_else(|| err(format!("{member} not found in {name}")))?;
         let mut m = z
             .by_name(&found)
@@ -607,4 +608,46 @@ pub fn installed_table_model() -> Option<PathBuf> {
         ["tablenet.onnx", "tablenet.bin"]
     };
     names.iter().map(|n| dir.join(n)).find(|p| p.exists())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    /// A stored (uncompressed) zip with `entries`, as a .nupkg would hold the runtime library.
+    fn write_zip(path: &std::path::Path, entries: &[(&str, &[u8])]) {
+        let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, data) in entries {
+            z.start_file(*name, opts).unwrap();
+            z.write_all(data).unwrap();
+        }
+        z.finish().unwrap();
+    }
+
+    #[test]
+    fn extract_one_reads_a_zip_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("pkg.nupkg");
+        write_zip(
+            &archive,
+            &[
+                ("runtimes/linux-x64/native/libonnxruntime.so", b"lib bytes"),
+                ("./LICENSE", b"licence"),
+            ],
+        );
+        let out = dir.path().join("lib.so");
+        super::extract_one(
+            &archive,
+            "runtimes/linux-x64/native/libonnxruntime.so",
+            &out,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"lib bytes");
+        // members named "./..." match without the prefix
+        super::extract_one(&archive, "LICENSE", &out).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"licence");
+        assert!(super::extract_one(&archive, "missing.so", &out).is_err());
+    }
 }
