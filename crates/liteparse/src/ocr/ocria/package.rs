@@ -6,7 +6,7 @@ pub const OCRIA_NANO: &str = "ocria-nano";
 /// The ocria-nano release this build of lit installs.
 pub const OCRIA_NANO_VERSION: &str = "0.1.7";
 /// Where released model files are fetched from (`<base>/<file>`).
-pub const MODEL_BASE_URL: &str = "https://huggingface.co/llamaindex/ocria-nano/resolve/v0.1.7";
+pub const MODEL_BASE_URL: &str = "https://huggingface.co/llamaindex/OCRia-nano-1/resolve/v0.1.7";
 
 pub struct PinnedFile {
     pub name: &'static str,

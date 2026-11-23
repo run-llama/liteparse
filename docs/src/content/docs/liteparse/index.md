@@ -31,7 +31,7 @@ parser that runs locally on your CPU. It's open-weights are on HuggingFace and i
 - [Learn how to use it](/liteparse/guides/ocr/)
 - [Read the launch blog](https://www.llamaindex.ai/blog/introducing-ocria-nano-1)
 - [Read the technical report](https://www.llamaindex.ai/ocria/ocria-nano-1-report.pdf)
-- [Find it on huggingface](https://huggingface.co/llamaindex/ocria-nano-1)
+- [Find it on huggingface](https://huggingface.co/llamaindex/OCRia-nano-1)
 
 ## Get started
 
