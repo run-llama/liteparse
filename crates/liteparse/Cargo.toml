@@ -73,7 +73,7 @@ oar-ocr = { version = "0.8", optional = true }
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-24"], optional = true }
 tar = { version = "0.4.46", default-features = false, optional = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "multipart", "json"], optional = true }
-zip = { version = "2.4.2", default-features = false, features = ["deflate"], optional = true }
+zip = { version = "9.0.0", default-features = false, features = ["deflate"], optional = true }
 rmp = "0.8"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "fs", "process"] }
 
