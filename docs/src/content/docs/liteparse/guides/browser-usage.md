@@ -5,7 +5,7 @@ sidebar:
   order: 9
 ---
 
-LiteParse ships a WebAssembly package that runs entirely in the browser — no server, no cloud calls. It supports PDF parsing, LiteParse's own OCR models (ocria-nano), and custom OCR engines implemented in JavaScript.
+LiteParse ships a WebAssembly package that runs entirely in the browser. It supports PDF parsing, LiteParse's own OCR models (ocria-nano), and custom OCR engines implemented in JavaScript.
 
 ## Install
 
@@ -76,11 +76,7 @@ const result = await parser.parse(pdfBytes);
 
 `OcriaNano.fromUrl({ scripts: ["latin"], layout: false })` is the smallest setup (1.5 MB of models). To cache or bundle
 the files yourself, pass their bytes to `OcriaNano.load({ det, detMeta, router, recLatin: { onnx, charset }, ... })`.
-The models are licensed separately from LiteParse (see the `LICENSE` in the model repository).
-
-OCR runs on one thread, about 1-4 s per scanned page; pages with a text layer are not OCR'd. Output matches the native
-CLI on clean pages; on very noisy scans a few characters can differ. The build needs WebAssembly SIMD (all current
-browsers, Node 16.4+, Deno, Cloudflare Workers).
+The models are licensed separately from LiteParse under a modified OpenRAIL license.
 
 ## Custom OCR engines
 

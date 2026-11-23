@@ -123,9 +123,9 @@ flowchart LR
 ### With ocria-nano
 
 With its optional models (`lit models pull ocria-nano`), LiteParse runs a full OCR and table/layout
-pipeline on CPU. Numbers from the ocria-nano technical report, every local system run by us on the
-same 16-vCPU machine:
-<!-- TODO(launch): link the ocria-nano technical report -->
+pipeline on CPU on pages that need it. 
+
+The following numbers are from the [ocria-nano technical report](https://www.llamaindex.ai/ocria/ocria-nano-1-report.pdf):
 
 | System (CPU) | ParseBench-2 | OmniParseBench | ParseBench-1 | olmOCR-bench | BHL CER ↓ | pages/s |
 |---|---:|---:|---:|---:|---:|---:|
@@ -136,7 +136,7 @@ same 16-vCPU machine:
 
 ParseBench-2 v2.07 with the official `parse-bench` scorer (`parse-bench run liteparse_ocria_nano`),
 OmniParseBench v1.7, ParseBench-1 and olmOCR-bench with their own harnesses, BHL IMPACT character error
-rate. Throughput: 300 ParseBench-1 pages on a 16-vCPU container, one worker per core.
+rate. Throughput: 300 random ParseBench pages on a 16-vCPU container, one worker per core.
 
 ### Without ML models
 
@@ -645,8 +645,8 @@ lit parse document.pdf --tessdata-path /path/to/tessdata
 ocria-nano is LiteParse's own model package: a text-line detector, a script router, four
 recognizers (Latin, CJK, right-to-left, and a world-script model covering about 17 more scripts) and
 LayoutNet, a learned table and layout model. Everything runs in-process on CPU through ONNX Runtime,
-which is downloaded with the models. It is opt-in: the models are not bundled and are licensed
-separately from LiteParse (the ocria-nano model licence, installed next to them as `LICENSE`).
+which is downloaded with the models. It is opt-in, the models are not bundled and are licensed
+separately from LiteParse.
 
 ```bash
 lit models pull ocria-nano     # once: models + ONNX Runtime, checked against pinned sha256 (60-75 MB)
@@ -658,7 +658,7 @@ lit models rm ocria-nano       # remove
 
 - Once pulled, ocria-nano is the default backend and pages are rendered at 250 dpi (150 with
   Tesseract); `--dpi` overrides it. LayoutNet runs whenever ocria-nano is the backend, also with
-  `--no-ocr` (`--table-model` points at another weights file).
+  `--no-ocr`.
 - Offline / air-gapped machines: `lit models pull ocria-nano --from <dir>` installs from a directory
   holding the package files. `LITEPARSE_MODEL_DIR` moves the model directory (default
   `~/.cache/liteparse/models`), and `ORT_DYLIB_PATH` points at an existing ONNX Runtime library.

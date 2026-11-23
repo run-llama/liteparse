@@ -23,6 +23,16 @@ LiteParse is designed specifically for use cases that require fast, accurate tex
 - **Score document complexity** before you parse, so you can route scanned or multi-column documents to the right pipeline
 - **Use from Node.js/TypeScript, Python, Rust, or the browser (WASM)** — whatever fits your stack
 
+## Using OCRia-nano with LiteParse
+
+OCRia-nano is our 8.1M parameter model pipeline for better parsing with LiteParse, built to be the fastest and most accurate 
+parser that runs locally on your CPU. It's open-weights are on HuggingFace and is provied under a modifed OpenRAIL license. 
+
+- [Learn how to use it](/liteparse/guides/ocr/)
+- [Read the launch blog](https://www.llamaindex.ai/blog/introducing-ocria-nano-1)
+- [Read the technical report](https://www.llamaindex.ai/ocria/ocria-nano-1-report.pdf)
+- [Find it on huggingface](https://huggingface.co/llamaindex/ocria-nano-1)
+
 ## Get started
 
 - [Getting started](/liteparse/getting_started/): Install LiteParse and parse your first document.

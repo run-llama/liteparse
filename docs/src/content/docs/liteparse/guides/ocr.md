@@ -72,13 +72,12 @@ lit parse document.pdf --no-ocr
 
 ## ocria-nano (LiteParse's own models)
 
-ocria-nano is LiteParse's own OCR and table model package, built to run on CPU: a text-line detector, a script
+ocria-nano is LiteParse's own OCR and table model package, built to run fast on CPU. It consists of a text-line detector, a script
 router, four recognizers (Latin, CJK, right-to-left, and a world-script model) and LayoutNet, a learned table and
 layout model, 8.1M parameters in total. It runs in-process through ONNX Runtime, which is downloaded with the models.
-On ParseBench-2 it raises LiteParse from 48.7 (Tesseract) to 59.2, while parsing about twice as many pages per second.
+On ParseBench-2 it raises LiteParse from 48.7 (Tesseract) to 59.2, while parsing over twice as many pages per second.
 
-It is opt-in: the weights are not bundled with LiteParse and come under their own licence (the ocria-nano model
-licence, installed next to them as `LICENSE`).
+The weights are not bundled with LiteParse and come under their own modified OpenRAIL license licence.
 
 ```bash
 lit models pull ocria-nano                  # once: models + ONNX Runtime (60-75 MB), sha256-checked
@@ -92,7 +91,6 @@ Behaviour once installed:
 
 - ocria-nano becomes the default OCR backend, and pages render at 250 dpi (Tesseract: 150). `--dpi` overrides it.
 - LayoutNet runs whenever ocria-nano is the backend (also with `--no-ocr`), finding tables and layout blocks.
-  `--table-model` points at another weights file.
 - `--ocr-language` is ignored: ocria-nano detects each line's script and picks the recognizer itself.
 
 Offline installs: `lit models pull ocria-nano --from <dir>` installs from a directory holding the package files.
@@ -115,7 +113,7 @@ models.pull("ocria-nano");
 const result = await new LiteParse({ ocrBackend: "ocria-nano" }).parse("scan.pdf");
 ```
 
-In the browser and on edge runtimes, the WASM package runs ocria-nano too; see [Browser usage](../browser-usage/).
+In the browser and on edge runtimes, the WASM package supports ocria-nano too; see [Browser usage](../browser-usage/).
 
 ## HTTP OCR servers
 
