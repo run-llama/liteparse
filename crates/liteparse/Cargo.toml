@@ -1,6 +1,6 @@
 [package]
 name = "liteparse"
-version = "2.21.1"
+version = "2.21.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
