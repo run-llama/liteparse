@@ -69,6 +69,13 @@ fn standard_text(doc: &pdfium::Document, keep_clipped_text: bool) -> String {
         .join(" ")
 }
 
+fn without_clip_metadata(mut result: (Vec<RawTextItem>, String)) -> (Vec<RawTextItem>, String) {
+    for item in &mut result.0 {
+        item.clip_bounds = None;
+    }
+    result
+}
+
 fn assert_text(bytes: &[u8], expected: &str) {
     let (raw, standard) = extract(bytes);
     let raw: String = raw.iter().map(|i| i.text.as_str()).collect();
@@ -192,7 +199,7 @@ fn unclipped_raw_items_are_identical_with_redundant_clip() {
     let text = "BT /F1 10 Tf 10 20 Td (UNCHANGED WORDS) Tj ET";
     let plain = extract(&pdf(text, &[], 0));
     let clipped = extract(&pdf(&format!("q 0 0 600 800 re W n {text} Q"), &[], 0));
-    assert_eq!(plain, clipped);
+    assert_eq!(plain, without_clip_metadata(clipped));
 }
 
 #[test]
@@ -269,7 +276,10 @@ fn partial_glyphs_keep_the_full_text_and_geometry_at_all_clip_edges() {
     ];
     for (x, y, width, height) in clips {
         let content = format!("q {x} {y} {width} {height} re W n {text} Q");
-        assert_eq!(extract(&pdf(&content, &[], 0)), original);
+        assert_eq!(
+            without_clip_metadata(extract(&pdf(&content, &[], 0))),
+            original
+        );
     }
 }
 
@@ -321,7 +331,10 @@ fn ink_just_outside_the_clip_is_kept_within_a_small_share_of_the_em() {
         top + 0.1,
         right - left + 2.0
     );
-    assert_eq!(extract(&pdf(&content, &[], 0)), original);
+    assert_eq!(
+        without_clip_metadata(extract(&pdf(&content, &[], 0))),
+        original
+    );
     let content = format!(
         "q {} {} {} 5 re W n {text} Q",
         left - 1.0,
@@ -329,4 +342,100 @@ fn ink_just_outside_the_clip_is_kept_within_a_small_share_of_the_em() {
         right - left + 2.0
     );
     assert_text(&pdf(&content, &[], 0), "");
+}
+
+#[test]
+fn partial_words_retain_distinct_cell_ownership_without_changing_geometry() {
+    let text = "BT /F1 10 Tf 95 210 Td (OVERFLOW) Tj ET";
+    let plain = extract(&pdf(text, &[], 0));
+    for (left, right) in [(100.0, 120.0), (125.0, 145.0)] {
+        let content = format!("q {left} 200 {} 25 re W n {text} Q", right - left);
+        let clipped = extract(&pdf(&content, &[], 0));
+        let word = clipped
+            .0
+            .iter()
+            .find(|item| item.text == "OVERFLOW")
+            .unwrap();
+        assert_eq!(
+            word.clip_bounds,
+            Some(pdfium::RectF {
+                left,
+                right,
+                top: 575.0,
+                bottom: 600.0
+            })
+        );
+        assert_eq!(without_clip_metadata(clipped), plain);
+    }
+}
+
+#[test]
+fn clip_ownership_follows_page_rotation_and_restored_graphics_state() {
+    let content = "q 100 200 40 25 re W n BT /F1 10 Tf 95 210 Td (OVERFLOW) Tj ET Q BT /F1 10 Tf 200 210 Td (PLAIN) Tj ET";
+    for rotation in [0, 90, 180, 270] {
+        let bytes = pdf(content, &[], rotation);
+        let lib = Library::init();
+        let doc = lib.load_document_from_bytes(&bytes, None).unwrap();
+        let page = doc.page(0).unwrap();
+        let view = page.view_box().unwrap();
+        let raw = extract_raw_text_items(&page, &page.text().unwrap(), &view, None);
+        let expected = page.bounds_to_viewport(
+            &view,
+            &pdfium::RectF {
+                left: 100.0,
+                right: 140.0,
+                bottom: 200.0,
+                top: 225.0,
+            },
+        );
+        assert_eq!(
+            raw.iter()
+                .find(|item| item.text == "OVERFLOW")
+                .unwrap()
+                .clip_bounds,
+            Some(expected)
+        );
+        assert!(
+            raw.iter()
+                .filter(|item| item.text.contains("PLAIN"))
+                .all(|item| item.clip_bounds.is_none())
+        );
+    }
+}
+
+#[test]
+fn ownership_intersects_ancestor_clips_and_abstains_on_unknown_paths() {
+    let inner = stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << /Font << /F1 4 0 R >> >>",
+        "0 0 25 80 re W n BT /F1 10 Tf 5 20 Td (A B C D E) Tj ET",
+    );
+    let outer = stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 200 200] /Resources << /XObject << /Inner 7 0 R >> >>",
+        "2 0 0 2 10 15 cm /Inner Do",
+    );
+    let raw = extract(&pdf(
+        "q 100 100 35 300 re W n 1 0 0 1 100 100 cm /Outer Do Q",
+        &[&outer, &inner],
+        0,
+    ))
+    .0;
+    let a = raw.iter().find(|item| item.text.trim() == "A").unwrap();
+    assert_eq!(
+        a.clip_bounds,
+        Some(pdfium::RectF {
+            left: 110.0,
+            right: 135.0,
+            top: 525.0,
+            bottom: 685.0
+        })
+    );
+    for path in [
+        "0 0 m 1 0 l 1 1 l h",
+        "0 0 1 1 re 2 2 1 1 re",
+        "0 0 m 1 0 1 1 0 1 c h",
+    ] {
+        let content = format!("q {path} W* n BT /F1 10 Tf 10 20 Td (KEEP) Tj ET Q");
+        let raw = extract(&pdf(&content, &[], 0)).0;
+        assert!(raw.iter().all(|item| item.clip_bounds.is_none()));
+    }
 }

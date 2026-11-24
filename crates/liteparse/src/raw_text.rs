@@ -107,6 +107,10 @@ pub struct RawTextItem {
     /// Tight box of the item's real glyphs, as a rectangle to rotate about its
     /// centre by `angle_radians`; see the module docs. Viewport space.
     pub grounding_bounds: Option<RectF>,
+    /// Complete rectangular graphics-state clip of the source text object, in
+    /// viewport coordinates. Absent for unclipped or unsupported clip stacks.
+    /// Ownership evidence only; text and glyph boxes retain their original extent.
+    pub clip_bounds: Option<RectF>,
     /// Advance gap across a lone generated space, in page points; see the module
     /// docs. Zero or negative when the neighbours overlap.
     pub baseline_gap: Option<f64>,
@@ -209,7 +213,7 @@ fn extract(
         if run.is_empty() {
             return;
         }
-        if let Some(item) = build_item(
+        if let Some(mut item) = build_item(
             page,
             text_page,
             view_box,
@@ -218,6 +222,12 @@ fn extract(
             &mut outline_cache,
             keep_glyph_widths,
         ) {
+            item.clip_bounds = run
+                .first()
+                .and_then(|glyph| glyph.text_object)
+                .and_then(|object| clips.object_bounds(object as usize))
+                .filter(|bounds| bounds.right > bounds.left && bounds.top > bounds.bottom)
+                .map(|bounds| page.bounds_to_viewport(view_box, &bounds));
             items.push(item);
         }
         run.clear();
@@ -497,6 +507,7 @@ fn build_item(
         width: bounds.right - bounds.left,
         height: bounds.bottom - bounds.top,
         grounding_bounds,
+        clip_bounds: None,
         baseline_gap,
         mcid: first_char.marked_content_id(),
         font_name,
@@ -1095,6 +1106,7 @@ mod tests {
             width,
             height,
             grounding_bounds: None,
+            clip_bounds: None,
             baseline_gap: None,
             mcid: Some(3),
             font_name: String::new(),

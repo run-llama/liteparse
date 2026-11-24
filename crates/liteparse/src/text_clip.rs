@@ -26,6 +26,7 @@ const IDENTITY: Matrix = Matrix {
 /// Char indices of a text page hidden by rectangular clips.
 pub(crate) struct TextClip {
     hidden: HashSet<i32>,
+    object_clips: HashMap<usize, RectF>,
 }
 
 impl TextClip {
@@ -33,12 +34,18 @@ impl TextClip {
     pub(crate) fn new(page: &Page, text_page: &TextPage, keep: bool) -> Self {
         let mut hidden = HashSet::new();
         if keep {
-            return Self { hidden };
+            return Self {
+                hidden,
+                object_clips: HashMap::new(),
+            };
         }
         let clips = ObjectClips::new(page);
         // Most pages clip no text: skip the char pass entirely.
         if clips.objects.is_empty() {
-            return Self { hidden };
+            return Self {
+                hidden,
+                object_clips: clips.objects,
+            };
         }
         let mut chunks = CharInfoChunks::new(text_page);
         let mut word = Word::default();
@@ -77,7 +84,15 @@ impl TextClip {
             word.glyphs.push((i, c, clips.hides(&cv)));
         }
         word.close(&mut hidden);
-        Self { hidden }
+        Self {
+            hidden,
+            object_clips: clips.objects,
+        }
+    }
+
+    /// Complete rectangular clip intersection in page space for one source object.
+    pub(crate) fn object_bounds(&self, object: usize) -> Option<RectF> {
+        self.object_clips.get(&object).copied()
     }
 
     pub(crate) fn hides(&self, index: i32) -> bool {
