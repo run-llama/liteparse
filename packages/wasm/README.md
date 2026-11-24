@@ -31,6 +31,20 @@ console.log(result.text);          // full document text
 console.log(result.pages[0]);      // per-page items with bboxes
 ```
 
+### Images
+
+`parse`, `isComplex` and `openBatchSession` also take image bytes: PNG, JPEG,
+TIFF, WebP, BMP, GIF and SVG. An image is read as a one-page document, its
+page sized from the image's DPI metadata (150 dpi when it has none). The format
+is detected from the bytes, so no file name or MIME type is needed. An image has
+no text layer, so its text comes from OCR (`ocrEnabled: true` with an
+`ocrEngine`, or [ocria-nano](#built-in-ocr-ocria-nano)).
+
+```ts
+const png = new Uint8Array(await (await fetch("/scan.png")).arrayBuffer());
+const result = await parser.parse(png);
+```
+
 ## Document complexity
 
 Before committing to a full parse, check whether a document needs OCR or heavier

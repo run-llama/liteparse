@@ -1488,9 +1488,10 @@ impl LiteParse {
         LiteParseConfig::from_core(&self.config)
     }
 
-    /// Parse PDF bytes. Returns `Promise<ParseResult>`.
+    /// Parse PDF bytes, or an image's (PNG, JPEG, TIFF, WebP, BMP, GIF, SVG), which is read as a
+    /// one-page document. Returns `Promise<ParseResult>`.
     pub async fn parse(&self, data: Vec<u8>) -> Result<ParseResult, JsError> {
-        let input = PdfInput::Bytes(data);
+        let input = PdfInput::Bytes(pdf_bytes(data)?);
         let result = if let Some(callback) = &self.on_ocr_page {
             let on_page = |page: &liteparse::types::ParsedPage| {
                 let pages = to_js_pages(
@@ -1520,6 +1521,12 @@ impl LiteParse {
             self.inner.config().output_word_boxes(),
         ))
     }
+}
+
+/// Input bytes as PDF: images are wrapped as a one-page PDF.
+fn pdf_bytes(data: Vec<u8>) -> Result<Vec<u8>, JsError> {
+    liteparse::image_pdf::pdf_or_image_to_pdf(data)
+        .map_err(|e| JsError::new(&format!("could not read the image: {e}")))
 }
 
 /// Shared by previews and final results so output options stay identical.
@@ -1747,7 +1754,7 @@ impl LiteParse {
     pub async fn is_complex(&self, data: Vec<u8>) -> Result<Vec<PageComplexityStats>, JsError> {
         let stats = self
             .inner
-            .is_complex(PdfInput::Bytes(data))
+            .is_complex(PdfInput::Bytes(pdf_bytes(data)?))
             .await
             .map_err(|e| JsError::new(&format!("is_complex failed: {}", e)))?;
 
@@ -1773,7 +1780,7 @@ impl LiteParse {
         let batch_size = batch_size.unwrap_or(liteparse::DEFAULT_PAGE_BATCH_SIZE);
         let session = self
             .inner
-            .open_batch_session(PdfInput::Bytes(data), batch_size)
+            .open_batch_session(PdfInput::Bytes(pdf_bytes(data)?), batch_size)
             .await
             .map_err(|e| JsError::new(&format!("open failed: {}", e)))?;
 
