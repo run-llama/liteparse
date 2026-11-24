@@ -1878,7 +1878,10 @@ fn extract_page_text_items(
                 // (2x+). The 2x cutoff avoids shearing the trailing period off
                 // abbreviations like "Sci."/"Chem." when the font kerns the
                 // period a hair loose, which would drop it entirely downstream.
-                c == '.' && seg.has_non_dot_content() && gap > seg.avg_char_width() * 2.0
+                // Content right after a dot-only run is a leader's value
+                // ("......4711000001"); 4+ dots so a "...word" ellipsis stays whole.
+                (c == '.' && seg.has_non_dot_content() && gap > seg.avg_char_width() * 2.0)
+                    || (c != '.' && !seg.has_non_dot_content() && seg.char_count >= 4)
             };
 
             if dbg_gaps && y_overlap && !line_changed && gap > 0.0 {
@@ -2360,6 +2363,21 @@ fn dedup_pair_drops_earlier(items: &[TextItem], i: usize, j: usize, debug: bool)
         return true;
     }
 
+    // Dotted leaders are decoration, not a text layer: a value that shares an
+    // item with the dots under its label, or that has a dot run painted under
+    // it, would otherwise read as overpainted (#622). Only items that still
+    // match once the leaders are gone are the same content.
+    let (sa, sb) = (strip_leader_runs(&a.text), strip_leader_runs(&b.text));
+    if (sa != a.text || sb != b.text) && sa != sb {
+        if debug {
+            eprintln!(
+                "[extract-debug] DEDUP skip (leader) i={i} text='{}' j={j} text='{}'",
+                a.text, b.text
+            );
+        }
+        return false;
+    }
+
     // Different text but strong overlap: likely overpainted text layers
     // (e.g. old/new branding); keep the later one (on top in paint order).
     // Skip when sizes differ wildly (area ratio > 5x) — a small cell value
@@ -2393,6 +2411,41 @@ fn dedup_pair_drops_earlier(items: &[TextItem], i: usize, j: usize, debug: bool)
         );
     }
     true
+}
+
+/// `t` with every run of 4+ leader characters (`.` `_` `·` `…`, spaces
+/// allowed between) removed and whitespace collapsed.
+fn strip_leader_runs(t: &str) -> String {
+    let leader = |ch: char| matches!(ch, '.' | '_' | '\u{00B7}' | '\u{2026}');
+    if !t.contains(leader) {
+        return t.to_string();
+    }
+    let chars: Vec<char> = t.chars().collect();
+    let mut out = String::with_capacity(t.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if leader(chars[i]) {
+            let mut j = i;
+            let mut n = 0;
+            while j < chars.len() && (leader(chars[j]) || chars[j] == ' ') {
+                n += leader(chars[j]) as usize;
+                j += 1;
+            }
+            if n >= 4 {
+                out.push(' ');
+                i = j;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    let out = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    if out == t.split_whitespace().collect::<Vec<_>>().join(" ") {
+        t.to_string()
+    } else {
+        out
+    }
 }
 
 /// Remove items an overlapping later item duplicates or overpaints.
@@ -2508,12 +2561,63 @@ fn dedup_overlapping_items(items: &mut Vec<TextItem>, debug: bool) {
         }
     }
 
+    // A dot run painted under a label or value on its line is decoration;
+    // the content stays (the pair predicate never lets a leader drop it).
+    for &l in &upright {
+        let l = l as usize;
+        if !keep[l] || !is_pure_leader(&items[l]) {
+            continue;
+        }
+        let covers = |c: u32| {
+            let c = c as usize;
+            c != l && leader_covered(&items[l], &items[c])
+        };
+        let (cx0, cx1, cy0, cy1) = cell_range(&items[l]);
+        let cells = (cx1 as i64 - cx0 as i64 + 1) * (cy1 as i64 - cy0 as i64 + 1);
+        let covered = if cells <= DEDUP_MAX_CELLS_PER_ITEM {
+            (cx0..=cx1)
+                .flat_map(|cx| (cy0..=cy1).map(move |cy| (cx, cy)))
+                .filter_map(|k| grid.get(&k))
+                .flatten()
+                .chain(&oversized)
+                .any(|&c| covers(c))
+        } else {
+            upright.iter().any(|&c| covers(c))
+        };
+        if covered {
+            if debug {
+                eprintln!(
+                    "[extract-debug] DEDUP leader drop i={l} text='{}' under content",
+                    items[l].text
+                );
+            }
+            keep[l] = false;
+        }
+    }
+
     let mut idx = 0;
     items.retain(|_| {
         let k = keep[idx];
         idx += 1;
         k
     });
+}
+
+/// A text item made only of leader runs (see [`strip_leader_runs`]).
+fn is_pure_leader(it: &TextItem) -> bool {
+    !it.text.trim().is_empty() && strip_leader_runs(&it.text).is_empty()
+}
+
+/// Is the pure leader `l` painted under the non-leader item `c` — same line,
+/// more than half of the smaller box shared?
+fn leader_covered(l: &TextItem, c: &TextItem) -> bool {
+    if is_pure_leader(c) || c.text.trim().is_empty() || !dedup_same_line(l, c) {
+        return false;
+    }
+    let w = (l.x + l.width).min(c.x + c.width) - l.x.max(c.x);
+    let h = (l.y + l.height).min(c.y + c.height) - l.y.max(c.y);
+    let smaller = (l.width * l.height).min(c.width * c.height);
+    w > 0.0 && h > 0.0 && smaller > 0.0 && w * h / smaller > 0.5
 }
 
 /// True when `rotation` (degrees) is more than 2° off the nearest right angle
@@ -4808,6 +4912,56 @@ mod tests {
         assert_eq!(items.len(), 2);
     }
 
+    #[test]
+    fn dedup_keeps_value_merged_with_leader_under_label() {
+        // #622: the dots under a label and the value after them are one item;
+        // the label painted later must not take it for an overpainted layer.
+        let mut items = vec![
+            ti("....................4711000001", 48.0, 172.0, 189.6, 12.3),
+            ti("Invoice number", 48.0, 172.0, 75.4, 12.3),
+        ];
+        dedup_overlapping_items(&mut items, false);
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn dedup_drops_leader_under_value_not_value() {
+        // #622: a dot run painted under (after) a value is decoration.
+        let mut items = vec![
+            ti("0A1B2C-3D4E5F-6A7B8C", 176.4, 214.0, 81.6, 12.3),
+            ti("....................", 176.4, 214.0, 61.2, 12.3),
+            ti(
+                "..........................................",
+                48.0,
+                214.0,
+                128.4,
+                12.3,
+            ),
+            ti("Account", 48.0, 214.0, 41.6, 12.3),
+        ];
+        dedup_overlapping_items(&mut items, false);
+        let texts: Vec<_> = items.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, ["0A1B2C-3D4E5F-6A7B8C", "Account"]);
+    }
+
+    #[test]
+    fn dedup_still_drops_restamp_differing_only_in_leader_length() {
+        let mut items = vec![
+            ti("Intro ....... 3", 0.0, 0.0, 100.0, 10.0),
+            ti("Intro ......... 3", 0.0, 0.0, 100.0, 10.0),
+        ];
+        dedup_overlapping_items(&mut items, false);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "Intro ......... 3");
+    }
+
+    #[test]
+    fn strip_leader_runs_keeps_short_dot_runs() {
+        assert_eq!(strip_leader_runs("U.S. Inc..."), "U.S. Inc...");
+        assert_eq!(strip_leader_runs("Total . . . . 330"), "Total 330");
+        assert_eq!(strip_leader_runs("________"), "");
+    }
+
     /// Exhaustive-search oracle: applies the dedup rule ("drop an item iff
     /// some later upright item passes the pair predicate") by checking every
     /// pair. The grid-backed search must match this on any layout.
@@ -4827,6 +4981,19 @@ mod tests {
                     keep[i] = false;
                     break;
                 }
+            }
+        }
+        for l in 0..items.len() {
+            if keep[l]
+                && !is_diagonal_rotation(items[l].rotation)
+                && is_pure_leader(&items[l])
+                && (0..items.len()).any(|c| {
+                    c != l
+                        && !is_diagonal_rotation(items[c].rotation)
+                        && leader_covered(&items[l], &items[c])
+                })
+            {
+                keep[l] = false;
             }
         }
         let mut idx = 0;
