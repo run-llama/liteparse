@@ -11,6 +11,13 @@ const STRIDE: usize = 4;
 const MAX_W: usize = 1280;
 const BUCKET_W: usize = 128;
 const BATCH: usize = 32;
+/// Most input pixels in one recognizer run. Natively a batch runs whole; on tract (the WebAssembly
+/// build) a wide batch runs a few lines at a time, at the batch's padded width, so its activations
+/// stay small enough for a 128 MB isolate. Lines don't interact, so the readings are the same.
+#[cfg(any(target_arch = "wasm32", feature = "ocria-tract"))]
+const RUN_PIXELS: usize = 4 * H * MAX_W;
+#[cfg(not(any(target_arch = "wasm32", feature = "ocria-tract")))]
+const RUN_PIXELS: usize = usize::MAX;
 
 /// Grey line image at height `H`, width scaled with the aspect ratio (`Recognizer._prep`).
 fn prep(crop: &Img, min_w: usize, max_w: usize) -> Img {
@@ -60,48 +67,61 @@ impl Recognizer {
         let mut order: Vec<usize> = (0..lines.len()).collect();
         order.sort_by_key(|&i| lines[i].w);
         let mut out = vec![(String::new(), 0f32); lines.len()];
-        for idx in order.chunks(BATCH) {
-            let maxw = idx.iter().map(|&i| lines[i].w).max().unwrap_or(1);
+        for batch in order.chunks(BATCH) {
+            let maxw = batch.iter().map(|&i| lines[i].w).max().unwrap_or(1);
             let w = maxw.div_ceil(BUCKET_W) * BUCKET_W;
-            let mut x = vec![1f32; idx.len() * H * w];
-            for (j, &i) in idx.iter().enumerate() {
-                let l = &lines[i];
-                for y in 0..H {
-                    for xx in 0..l.w {
-                        x[(j * H + y) * w + xx] =
-                            (l.data[y * l.w + xx] as f64 / 127.5 - 1.0) as f32;
-                    }
-                }
-            }
-            let mut res = self.pool.infer([idx.len(), 1, H, w], x, &["ids", "conf"])?;
-            let (shape, ids) = res.i64("ids")?;
-            let (_, conf) = res.f32("conf")?;
-            let t_all = shape[1];
-            for (j, &i) in idx.iter().enumerate() {
-                let t = (lines[i].w / self.stride).min(t_all);
-                let (mut text, mut cs, mut prev) = (String::new(), Vec::new(), 0i64);
-                for k in 0..t {
-                    let c = ids[j * t_all + k];
-                    if c != 0 && c != prev {
-                        if let Some(s) = self.chars.get((c - 1) as usize) {
-                            text.push_str(s);
-                        }
-                        cs.push(conf[j * t_all + k]);
-                    }
-                    prev = c;
-                }
-                if self.visual_rtl && text.chars().any(is_rtl_char) {
-                    text = visual_to_logical(&text);
-                }
-                let mean = if cs.is_empty() {
-                    0.0
-                } else {
-                    (cs.iter().map(|&v| v as f64).sum::<f64>() / cs.len() as f64) as f32
-                };
-                out[i] = (text, mean);
+            for idx in batch.chunks((RUN_PIXELS / (H * w)).max(1)) {
+                self.read_run(&lines, idx, w, &mut out)?;
             }
         }
         Ok(out)
+    }
+
+    /// Read the lines `idx` in one run, padded to width `w`, into `out`.
+    fn read_run(
+        &self,
+        lines: &[Img],
+        idx: &[usize],
+        w: usize,
+        out: &mut [(String, f32)],
+    ) -> Result<(), OcriaError> {
+        let mut x = vec![1f32; idx.len() * H * w];
+        for (j, &i) in idx.iter().enumerate() {
+            let l = &lines[i];
+            for y in 0..H {
+                for xx in 0..l.w {
+                    x[(j * H + y) * w + xx] = (l.data[y * l.w + xx] as f64 / 127.5 - 1.0) as f32;
+                }
+            }
+        }
+        let mut res = self.pool.infer([idx.len(), 1, H, w], x, &["ids", "conf"])?;
+        let (shape, ids) = res.i64("ids")?;
+        let (_, conf) = res.f32("conf")?;
+        let t_all = shape[1];
+        for (j, &i) in idx.iter().enumerate() {
+            let t = (lines[i].w / self.stride).min(t_all);
+            let (mut text, mut cs, mut prev) = (String::new(), Vec::new(), 0i64);
+            for k in 0..t {
+                let c = ids[j * t_all + k];
+                if c != 0 && c != prev {
+                    if let Some(s) = self.chars.get((c - 1) as usize) {
+                        text.push_str(s);
+                    }
+                    cs.push(conf[j * t_all + k]);
+                }
+                prev = c;
+            }
+            if self.visual_rtl && text.chars().any(is_rtl_char) {
+                text = visual_to_logical(&text);
+            }
+            let mean = if cs.is_empty() {
+                0.0
+            } else {
+                (cs.iter().map(|&v| v as f64).sum::<f64>() / cs.len() as f64) as f32
+            };
+            out[i] = (text, mean);
+        }
+        Ok(())
     }
 }
 
