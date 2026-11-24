@@ -164,10 +164,11 @@ fn read_structure_element(elem: pdfium_sys::FPDF_STRUCTELEMENT) -> StructureElem
 }
 
 fn read_marked_content_ids(elem: pdfium_sys::FPDF_STRUCTELEMENT) -> Vec<i32> {
-    let count = unsafe { ffi!(FPDF_StructElement_GetMarkedContentIdCount(elem)) };
+    let count = unsafe { ffi!(FPDF_StructElement_CountChildren(elem)) };
     let mut ids = Vec::with_capacity(count.max(0) as usize);
     for index in 0..count {
-        let id = unsafe { ffi!(FPDF_StructElement_GetMarkedContentIdAtIndex(elem, index)) };
+        // The page's child slots omit content belonging to another page.
+        let id = unsafe { ffi!(FPDF_StructElement_GetChildMarkedContentID(elem, index)) };
         if id >= 0 {
             ids.push(id);
         }
@@ -372,30 +373,8 @@ fn walk_element(
     let role = read_element_type(elem);
     let alt_text = read_alt_text(elem);
 
-    // Collect mcids: the multi-mcid getters + per-child marked-content-only children.
-    let mut mcids: Vec<i32> = Vec::new();
-    let n_mcids = unsafe { ffi!(FPDF_StructElement_GetMarkedContentIdCount(elem)) };
-    for i in 0..n_mcids {
-        let m = unsafe { ffi!(FPDF_StructElement_GetMarkedContentIdAtIndex(elem, i)) };
-        if m >= 0 {
-            mcids.push(m);
-        }
-    }
-    // Also legacy: single direct mcid getter (older tag-trees expose it here).
-    let single = unsafe { ffi!(FPDF_StructElement_GetMarkedContentID(elem)) };
-    if single >= 0 && !mcids.contains(&single) {
-        mcids.push(single);
-    }
-
+    let mcids = read_marked_content_ids(elem);
     let n_children = unsafe { ffi!(FPDF_StructElement_CountChildren(elem)) };
-    for i in 0..n_children {
-        // Non-struct children expose their mcid via GetChildMarkedContentID
-        // (returns -1 when the child is itself a struct element).
-        let child_mcid = unsafe { ffi!(FPDF_StructElement_GetChildMarkedContentID(elem, i)) };
-        if child_mcid >= 0 && !mcids.contains(&child_mcid) {
-            mcids.push(child_mcid);
-        }
-    }
 
     let bbox = union_mcid_bboxes(&mcids, mcid_bboxes);
     out.push(StructNode {
