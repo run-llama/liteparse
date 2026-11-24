@@ -1921,9 +1921,9 @@ fn extract_page_text_items(
             // text it follows. A declared size change alone is no script: producers draw the same
             // visible text with different size / matrix pairs ("290-300." after a reference's
             // "Nat. Energy 2018, 3,"), and splitting those let projection misplace the piece.
-            let size_break = split_scripts
-                && seg.font_height.is_some_and(|sh| {
-                    let m = obj_meta.meta_for(&ch, cv.text_object());
+            let (size_break, bold_break) = if split_scripts {
+                let m = obj_meta.meta_for(&ch, cv.text_object());
+                let size_break = seg.font_height.is_some_and(|sh| {
                     let fh = if m.font_size > 0.0 {
                         m.scale_y.map(|sy| m.font_size * sy)
                     } else {
@@ -1939,7 +1939,29 @@ fn extract_page_text_items(
                             sh > 0.0 && fh > 0.0 && (fh < sh * 0.78 || sh < fh * 0.78)
                         })
                 });
-            if !y_overlap || line_changed || gap >= MAX_INLINE_GAP || dot_leader_break || size_break
+                // Styled output needs a separate run when adjacent text objects switch weight.
+                let bold_break = (seg.font_name != m.font_name
+                    || seg.font_weight != m.font_weight
+                    || seg.font_flags != m.font_flags)
+                    && crate::projection::font_is_bold(
+                        seg.font_name.as_deref(),
+                        seg.font_weight,
+                        seg.font_flags,
+                    ) != crate::projection::font_is_bold(
+                        m.font_name.as_deref(),
+                        m.font_weight,
+                        m.font_flags,
+                    );
+                (size_break, bold_break)
+            } else {
+                (false, false)
+            };
+            if !y_overlap
+                || line_changed
+                || gap >= MAX_INLINE_GAP
+                || dot_leader_break
+                || size_break
+                || bold_break
             {
                 // A break for the size step alone into smaller type: the run keeps its host's band.
                 let host = (size_break

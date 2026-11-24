@@ -1,6 +1,8 @@
 use crate::types::{Anchor, ProjectedLine};
 
-use super::inline::{SpanStyle, line_all_bold, line_uniform_style, render_line_inline};
+use super::inline::{
+    SpanStyle, line_all_bold, line_starts_bold, line_uniform_style, render_line_inline,
+};
 
 /// Multiplier on line height used as the paragraph-break threshold.
 const PARAGRAPH_GAP_MULTIPLIER: f32 = 1.5;
@@ -282,7 +284,8 @@ fn paragraph_flow(prev: &ProjectedLine, cur: &ProjectedLine, allow_hanging_inden
     // and bold-italic spans, so `line_uniform_style` yields None) adjacent to
     // a non-all-bold line is a paragraph break. Catches a bold section heading
     // hugging the body paragraph below it.
-    if line_all_bold(prev) != line_all_bold(cur) {
+    let current_all_bold = line_all_bold(cur);
+    if line_all_bold(prev) != current_all_bold {
         return false;
     }
     if prev.region_path != cur.region_path {
@@ -322,6 +325,15 @@ fn paragraph_flow(prev: &ProjectedLine, cur: &ProjectedLine, allow_hanging_inden
     let prev_bottom = prev.bbox.y + prev.bbox.height;
     let gap = cur.bbox.y - prev_bottom;
     let line_height = prev.bbox.height.max(cur.bbox.height).max(1.0);
+    // A spaced, bold lead-in after a completed sentence begins a new definition.
+    if !allow_hanging_indent
+        && !current_all_bold
+        && gap > line_height
+        && ends_sentence_final(&prev.text)
+        && line_starts_bold(cur)
+    {
+        return false;
+    }
     gap <= line_height * PARAGRAPH_GAP_MULTIPLIER
 }
 

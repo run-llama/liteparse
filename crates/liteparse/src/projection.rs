@@ -660,7 +660,7 @@ fn form_lines(
         if (cur.item.y - prev.item.y).abs() <= y_tolerance
             && (cur.item.height - prev.item.height).abs() <= h_tolerance
         {
-            // This early merge keeps one style. Preserve its grid behavior across style changes.
+            // Preserve the grid's gap rules across style changes.
             let measured = (use_native_gaps && same_emphasis(&prev.item, &cur.item))
                 .then(|| native_gap(prev, cur))
                 .flatten();
@@ -714,6 +714,12 @@ fn form_lines(
     // Merge continuous bbox items in a single linear pass.
     let merge_y_tolerance = 0.1;
     let merge_h_tolerance = 0.1;
+    let keep_style_pieces = |prev: &TextItem, next: &TextItem| {
+        style_runs
+            && (!prev.style_pieces.is_empty()
+                || !next.style_pieces.is_empty()
+                || !same_emphasis(prev, next))
+    };
 
     let mut merged_items: Vec<ProjectedTextItem> = Vec::with_capacity(items.len());
     for mut cur in items.drain(..) {
@@ -733,9 +739,15 @@ fn form_lines(
         if should_merge {
             if let Some(prev) = merged_items.last_mut() {
                 let merged = merge_bbox(prev, &cur);
-                if prev.item.followed_by_space && !prev.item.text.ends_with(' ') {
-                    prev.item.text.push(' ');
+                let sep = if prev.item.text.ends_with(' ') {
+                    ""
+                } else {
+                    trailing_sep(prev)
+                };
+                if keep_style_pieces(&prev.item, &cur.item) {
+                    record_style_piece(&mut prev.item, &cur.item, sep);
                 }
+                prev.item.text.push_str(sep);
                 prev.item.text.push_str(&cur.item.text);
                 prev.item.followed_by_space = cur.item.followed_by_space;
                 prev.item.words.append(&mut cur.item.words);
@@ -943,10 +955,7 @@ fn form_lines(
                     };
                 if is_decimal_continuation {
                     // Markdown renders the pieces, so a numeric suffix must join both views.
-                    if style_runs
-                        && (!prev.item.style_pieces.is_empty()
-                            || !same_emphasis(&prev.item, &item.item))
-                    {
+                    if keep_style_pieces(&prev.item, &item.item) {
                         record_style_piece(&mut prev.item, &item.item, "");
                     }
                     prev.item.width = item.item.x + item.item.width - prev.item.x;
@@ -985,9 +994,7 @@ fn form_lines(
                 // Items merge whatever their emphasis, so lines, tables and blocks see the same
                 // items in every output; for markdown a merge across an emphasis change keeps
                 // the pieces, so each renders in its own style (`record_style_piece`).
-                let keep_pieces = style_runs
-                    && (!prev.item.style_pieces.is_empty()
-                        || !same_emphasis(&prev.item, &item.item));
+                let keep_pieces = keep_style_pieces(&prev.item, &item.item);
                 if y_compatible
                     && !both_are_numbers
                     && !alpha_alpha_gap
