@@ -453,6 +453,11 @@ fn ownership_intersects_ancestor_clips_and_abstains_on_unknown_paths() {
         let content = format!("q {path} W* n BT /F1 10 Tf 10 20 Td (KEEP) Tj ET Q");
         let raw = extract(&pdf(&content, &[], 0)).0;
         assert!(raw.iter().all(|item| item.clip_bounds.is_none()));
+        assert!(
+            raw.iter()
+                .filter(|item| !item.text.trim().is_empty())
+                .all(|item| item.clip_text_complete == Some(false))
+        );
     }
 }
 
