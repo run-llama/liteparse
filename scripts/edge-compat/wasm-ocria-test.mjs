@@ -1,9 +1,9 @@
 /**
  * Edge runtime test for ocria-nano in the LiteParse WASM module: a Miniflare
  * (Cloudflare Workers) instance loads the WASM module and the ocria-nano models
- * (as data modules) and OCRs a PDF.
+ * (as data modules) and OCRs a PDF or an image (PNG, JPEG, ...).
  *
- * Usage: OCRIA_MODELS=<ocria-nano model dir> [EXPECT_TEXT=<substring>] node scripts/edge-compat/wasm-ocria-test.mjs [file.pdf]
+ * Usage: OCRIA_MODELS=<ocria-nano model dir> [EXPECT_TEXT=<substring>] node scripts/edge-compat/wasm-ocria-test.mjs [file.pdf|file.png]
  *
  * Requires: miniflare (npm i -D miniflare)
  * Expects:  packages/wasm/pkg/ to contain the built WASM files

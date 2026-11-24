@@ -151,3 +151,9 @@ jobs:
           OCRIA_MODELS: ocria-models
           EXPECT_TEXT: SUM
         run: node scripts/edge-compat/wasm-ocria-test.mjs integration_tests_data/receipt_scan.pdf
+
+      - name: Run edge runtime OCR test on an image (ocria-nano, PNG input)
+        env:
+          OCRIA_MODELS: ocria-models
+          EXPECT_TEXT: SUM
+        run: node scripts/edge-compat/wasm-ocria-test.mjs integration_tests_data/receipt.png
