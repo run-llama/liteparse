@@ -481,3 +481,13 @@ fn complete_clip_text_requires_visible_ink_for_each_character() {
             .all(|item| item.clip_text_complete == Some(false))
     );
 }
+
+#[test]
+fn nonpainting_and_stroke_only_modes_cannot_certify_visible_filled_text() {
+    for mode in [1, 3, 5, 7] {
+        let content = format!("BT /F1 10 Tf {mode} Tr 100 210 Td (RETAINED) Tj ET");
+        let raw = extract(&pdf(&content, &[], 0)).0;
+        let word = raw.iter().find(|item| item.text == "RETAINED").unwrap();
+        assert_eq!(word.clip_text_complete, Some(false));
+    }
+}
