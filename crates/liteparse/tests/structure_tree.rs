@@ -31,6 +31,10 @@ fn paragraph_across_pages() -> Vec<u8> {
         "<< /Type /StructElem /S /P /P 9 0 R /Pg 4 0 R /K 1 >>",
         "<< /Nums [0 [10 0 R 11 0 R] 1 [11 0 R 12 0 R]] >>",
     ];
+    build_pdf(&objects)
+}
+
+fn build_pdf(objects: &[&str]) -> Vec<u8> {
     let mut data = b"%PDF-1.7\n".to_vec();
     let mut offsets = Vec::with_capacity(objects.len());
     for (index, object) in objects.iter().enumerate() {
@@ -49,6 +53,34 @@ fn paragraph_across_pages() -> Vec<u8> {
     )
     .unwrap();
     data
+}
+
+#[tokio::test]
+async fn one_page_structure_tree_keeps_legacy_integer_ids() {
+    let content = "/P << /MCID 0 >> BDC BT /F1 12 Tf 50 713 Td (One paragraph) Tj ET EMC";
+    let stream = format!(
+        "<< /Length {} >>\nstream\n{content}\nendstream",
+        content.len()
+    );
+    let pdf = build_pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 6 0 R /MarkInfo << /Marked true >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R /StructParents 0 >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        &stream,
+        "<< /Type /StructTreeRoot /K 7 0 R /ParentTree 8 0 R /ParentTreeNextKey 1 >>",
+        "<< /Type /StructElem /S /P /P 6 0 R /K 0 >>",
+        "<< /Nums [0 [7 0 R]] >>",
+    ]);
+    let parser = LiteParse::new(LiteParseConfig {
+        extract_structure_tree: true,
+        ocr_enabled: false,
+        quiet: true,
+        ..LiteParseConfig::default()
+    });
+    let parsed = parser.parse_input(PdfInput::Bytes(pdf)).await.unwrap();
+    let root = &parsed.pages[0].structure_tree.as_ref().unwrap().roots[0];
+    assert_eq!(root.marked_content_ids, [0]);
 }
 
 #[tokio::test]
