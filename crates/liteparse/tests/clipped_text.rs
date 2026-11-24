@@ -72,6 +72,7 @@ fn standard_text(doc: &pdfium::Document, keep_clipped_text: bool) -> String {
 fn without_clip_metadata(mut result: (Vec<RawTextItem>, String)) -> (Vec<RawTextItem>, String) {
     for item in &mut result.0 {
         item.clip_bounds = None;
+        item.clip_text_complete = None;
     }
     result
 }
@@ -276,10 +277,17 @@ fn partial_glyphs_keep_the_full_text_and_geometry_at_all_clip_edges() {
     ];
     for (x, y, width, height) in clips {
         let content = format!("q {x} {y} {width} {height} re W n {text} Q");
+        let clipped = extract(&pdf(&content, &[], 0));
         assert_eq!(
-            without_clip_metadata(extract(&pdf(&content, &[], 0))),
-            original
+            clipped
+                .0
+                .iter()
+                .find(|item| item.text == "A")
+                .unwrap()
+                .clip_text_complete,
+            Some(true)
         );
+        assert_eq!(without_clip_metadata(clipped), original);
     }
 }
 
@@ -356,6 +364,7 @@ fn partial_words_retain_distinct_cell_ownership_without_changing_geometry() {
             .iter()
             .find(|item| item.text == "OVERFLOW")
             .unwrap();
+        assert_eq!(word.clip_text_complete, Some(false));
         assert_eq!(
             word.clip_bounds,
             Some(pdfium::RectF {
@@ -394,6 +403,13 @@ fn clip_ownership_follows_page_rotation_and_restored_graphics_state() {
                 .unwrap()
                 .clip_bounds,
             Some(expected)
+        );
+        assert_eq!(
+            raw.iter()
+                .find(|item| item.text == "OVERFLOW")
+                .unwrap()
+                .clip_text_complete,
+            Some(true)
         );
         assert!(
             raw.iter()
@@ -438,4 +454,21 @@ fn ownership_intersects_ancestor_clips_and_abstains_on_unknown_paths() {
         let raw = extract(&pdf(&content, &[], 0)).0;
         assert!(raw.iter().all(|item| item.clip_bounds.is_none()));
     }
+}
+
+#[test]
+fn complete_clip_text_requires_visible_ink_for_each_character() {
+    let text = "BT /F1 10 Tf 100 210 Td (ABCDEFGH) Tj ET";
+    for (left, width, complete) in [
+        (100.5, 47.0, true),
+        (99.0, 20.0, false),
+        (125.0, 30.0, false),
+    ] {
+        let content = format!("q {left} 200 {width} 25 re W n {text} Q");
+        let raw = extract(&pdf(&content, &[], 0)).0;
+        let word = raw.iter().find(|item| item.text == "ABCDEFGH").unwrap();
+        assert_eq!(word.clip_text_complete, Some(complete));
+    }
+    let raw = extract(&pdf(&format!("q 0 0 m 1 0 l 1 1 l h W n {text} Q"), &[], 0)).0;
+    assert!(raw.iter().all(|item| item.clip_text_complete.is_none()));
 }
