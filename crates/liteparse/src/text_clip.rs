@@ -27,6 +27,7 @@ const IDENTITY: Matrix = Matrix {
 pub(crate) struct TextClip {
     hidden: HashSet<i32>,
     object_clips: HashMap<usize, RectF>,
+    known_objects: HashSet<usize>,
 }
 
 impl TextClip {
@@ -37,6 +38,7 @@ impl TextClip {
             return Self {
                 hidden,
                 object_clips: HashMap::new(),
+                known_objects: HashSet::new(),
             };
         }
         let clips = ObjectClips::new(page);
@@ -45,6 +47,7 @@ impl TextClip {
             return Self {
                 hidden,
                 object_clips: clips.objects,
+                known_objects: clips.known_objects,
             };
         }
         let mut chunks = CharInfoChunks::new(text_page);
@@ -87,7 +90,13 @@ impl TextClip {
         Self {
             hidden,
             object_clips: clips.objects,
+            known_objects: clips.known_objects,
         }
+    }
+
+    /// Whether the complete clip stack of this source object was understood.
+    pub(crate) fn object_clip_known(&self, object: usize) -> bool {
+        self.known_objects.contains(&object)
     }
 
     /// Complete rectangular clip intersection in page space for one source object.
@@ -162,12 +171,14 @@ fn leader_runs(glyphs: &[(i32, Option<char>, bool)]) -> Vec<bool> {
 /// Bounds are y-up page coordinates; inverted bounds mean an empty intersection.
 struct ObjectClips {
     objects: HashMap<usize, RectF>,
+    known_objects: HashSet<usize>,
 }
 
 impl ObjectClips {
     fn new(page: &Page) -> Self {
         let mut clips = Self {
             objects: HashMap::new(),
+            known_objects: HashSet::new(),
         };
         for index in 0..page.object_count() {
             if let Some(object) = page.object(index) {
@@ -207,6 +218,7 @@ impl ObjectClips {
         }
         match object.kind() {
             PageObjectKind::Text => {
+                self.known_objects.insert(object.id());
                 if let Some(bounds) = bounds {
                     self.objects.insert(object.id(), bounds);
                 }

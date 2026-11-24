@@ -470,5 +470,9 @@ fn complete_clip_text_requires_visible_ink_for_each_character() {
         assert_eq!(word.clip_text_complete, Some(complete));
     }
     let raw = extract(&pdf(&format!("q 0 0 m 1 0 l 1 1 l h W n {text} Q"), &[], 0)).0;
-    assert!(raw.iter().all(|item| item.clip_text_complete.is_none()));
+    assert!(
+        raw.iter()
+            .filter(|item| !item.text.trim().is_empty())
+            .all(|item| item.clip_text_complete == Some(false))
+    );
 }

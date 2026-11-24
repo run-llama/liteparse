@@ -113,7 +113,8 @@ pub struct RawTextItem {
     pub clip_bounds: Option<RectF>,
     /// Whether every non-whitespace source glyph has nonempty ink intersecting
     /// the known rectangular clip. Partial glyph ink is sufficient; a fully
-    /// clipped or unknown ink box makes this false. Absent without clip bounds.
+    /// clipped or unknown ink box makes this false. Unknown clip stacks are
+    /// also false; absent for source objects known to have no clipping.
     pub clip_text_complete: Option<bool>,
     /// Advance gap across a lone generated space, in page points; see the module
     /// docs. Zero or negative when the neighbours overlap.
@@ -254,6 +255,13 @@ fn extract(
                     .collect();
                 !real.is_empty() && real.into_iter().all(visible)
             });
+            if run
+                .first()
+                .and_then(|glyph| glyph.text_object)
+                .is_some_and(|object| !clips.object_clip_known(object as usize))
+            {
+                item.clip_text_complete = Some(false);
+            }
             items.push(item);
         }
         run.clear();
