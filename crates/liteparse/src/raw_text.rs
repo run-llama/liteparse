@@ -114,8 +114,8 @@ pub struct RawTextItem {
     /// Whether every non-whitespace source glyph has nonempty ink intersecting
     /// the known rectangular clip. Partial glyph ink is sufficient; a fully
     /// clipped or unknown ink box makes this false. Unknown clip stacks are
-    /// also false, as are modes without a known painted fill. Absent for
-    /// filled source objects known to have no clipping.
+    /// also false, as are modes without a known painted fill. Known unclipped
+    /// filled words report true; absent means no real glyph proof is available.
     pub clip_text_complete: Option<bool>,
     /// Advance gap across a lone generated space, in page points; see the module
     /// docs. Zero or negative when the neighbours overlap.
@@ -228,34 +228,39 @@ fn extract(
             &mut outline_cache,
             keep_glyph_widths,
         ) {
-            item.clip_bounds = run
+            let source_clip = run
                 .first()
                 .and_then(|glyph| glyph.text_object)
-                .and_then(|object| clips.object_bounds(object as usize))
+                .and_then(|object| clips.object_bounds(object as usize));
+            item.clip_bounds = source_clip
                 .filter(|bounds| bounds.right > bounds.left && bounds.top > bounds.bottom)
                 .map(|bounds| page.bounds_to_viewport(view_box, &bounds));
-            item.clip_text_complete = item.clip_bounds.map(|clip| {
-                let visible = |glyph: &Glyph| {
+            let real: Vec<_> = run
+                .iter()
+                .filter(|glyph| {
+                    !glyph.generated
+                        && !char::from_u32(glyph.unicode).is_some_and(char::is_whitespace)
+                })
+                .collect();
+            item.clip_text_complete = (!real.is_empty()).then(|| {
+                real.into_iter().all(|glyph| {
                     let ink = glyph.strict;
                     [ink.left, ink.right, ink.top, ink.bottom]
                         .iter()
                         .all(|v| v.is_finite())
                         && ink.right > ink.left
                         && ink.bottom > ink.top
-                        && ink.left < clip.right
-                        && ink.right > clip.left
-                        && ink.top < clip.bottom
-                        && ink.bottom > clip.top
-                };
-                let real: Vec<_> = run
-                    .iter()
-                    .filter(|glyph| {
-                        !glyph.generated
-                            && !char::from_u32(glyph.unicode).is_some_and(char::is_whitespace)
-                    })
-                    .collect();
-                !real.is_empty() && real.into_iter().all(visible)
+                        && item.clip_bounds.is_none_or(|clip| {
+                            ink.left < clip.right
+                                && ink.right > clip.left
+                                && ink.top < clip.bottom
+                                && ink.bottom > clip.top
+                        })
+                })
             });
+            if source_clip.is_some() && item.clip_bounds.is_none() {
+                item.clip_text_complete = Some(false);
+            }
             if run
                 .first()
                 .and_then(|glyph| glyph.text_object)

@@ -200,7 +200,7 @@ fn unclipped_raw_items_are_identical_with_redundant_clip() {
     let text = "BT /F1 10 Tf 10 20 Td (UNCHANGED WORDS) Tj ET";
     let plain = extract(&pdf(text, &[], 0));
     let clipped = extract(&pdf(&format!("q 0 0 600 800 re W n {text} Q"), &[], 0));
-    assert_eq!(plain, without_clip_metadata(clipped));
+    assert_eq!(without_clip_metadata(plain), without_clip_metadata(clipped));
 }
 
 #[test]
@@ -287,7 +287,10 @@ fn partial_glyphs_keep_the_full_text_and_geometry_at_all_clip_edges() {
                 .clip_text_complete,
             Some(true)
         );
-        assert_eq!(without_clip_metadata(clipped), original);
+        assert_eq!(
+            without_clip_metadata(clipped),
+            without_clip_metadata(original.clone())
+        );
     }
 }
 
@@ -341,7 +344,7 @@ fn ink_just_outside_the_clip_is_kept_within_a_small_share_of_the_em() {
     );
     assert_eq!(
         without_clip_metadata(extract(&pdf(&content, &[], 0))),
-        original
+        without_clip_metadata(original)
     );
     let content = format!(
         "q {} {} {} 5 re W n {text} Q",
@@ -374,7 +377,10 @@ fn partial_words_retain_distinct_cell_ownership_without_changing_geometry() {
                 bottom: 600.0
             })
         );
-        assert_eq!(without_clip_metadata(clipped), plain);
+        assert_eq!(
+            without_clip_metadata(clipped),
+            without_clip_metadata(plain.clone())
+        );
     }
 }
 
@@ -490,4 +496,24 @@ fn nonpainting_and_stroke_only_modes_cannot_certify_visible_filled_text() {
         let word = raw.iter().find(|item| item.text == "RETAINED").unwrap();
         assert_eq!(word.clip_text_complete, Some(false));
     }
+}
+
+#[test]
+fn ordinary_unclipped_words_carry_explicit_rendered_glyph_proof() {
+    let raw = extract(&pdf(
+        "BT /F1 10 Tf 100 210 Td (VISIBLE WORDS) Tj ET",
+        &[],
+        0,
+    ))
+    .0;
+    let words: Vec<_> = raw
+        .iter()
+        .filter(|item| !item.text.trim().is_empty())
+        .collect();
+    assert!(!words.is_empty());
+    assert!(
+        words
+            .iter()
+            .all(|item| item.clip_bounds.is_none() && item.clip_text_complete == Some(true))
+    );
 }
