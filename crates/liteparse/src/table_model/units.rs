@@ -756,14 +756,18 @@ pub fn pdf_units(page: &Page) -> (Vec<Unit>, (f64, f64)) {
             chars.push(None);
             continue;
         }
-        if u == 0
-            || matches!(
-                ch,
-                Some('\r') | Some('\n') | Some('\u{2}') | Some('\u{fffe}')
-            )
-        {
+        if u == 0 || matches!(ch, Some('\r') | Some('\n') | Some('\u{fffe}')) {
             continue;
         }
+        // PDFium reports U+0002 both for a hyphen it found at a line end and for a font that
+        // encodes a drawn '-' (often a minus) as code 0x02 with no ToUnicode map. The line-end
+        // hyphen is dropped (a wrapped cell's word break); the real code reads as '-', since
+        // dropping it flips the sign of negative table values.
+        let (u, ch) = match u {
+            0x02 if c.is_hyphen() => continue,
+            0x02 => (u32::from('-'), Some('-')),
+            _ => (u, ch),
+        };
         let Some(b) = c.char_box() else { continue };
         let pb = rotate_page(
             [b.left - cl, ct - b.top, b.right - cl, ct - b.bottom],
