@@ -642,7 +642,11 @@ fn run_page_framed(
         if g.len() < 2 {
             continue;
         }
-        let grid = decode::decode_grid(&du, &g, &logits, opt);
+        let mut grid = decode::decode_grid(&du, &g, &logits, opt);
+        // rules are in page points, cell boxes in the reading frame: the same on upright text
+        if let Some(r) = rules.filter(|_| g.iter().all(|&i| units[i].q == 0)) {
+            grid.merge_unruled_rows(&r.h);
+        }
         // one column is a list or a stack of lines, not a table (seen on OCR pages: a
         // signature block's lines grouped into a 1-wide grid); tables of contents, charts and
         // multi-column prose read as grids are no tables either

@@ -3839,13 +3839,56 @@ pub(super) fn extract_rule_segments(graphics: &[GraphicPrimitive]) -> RuleSegmen
 /// Extract horizontal and vertical line segments from a page's graphics. Each
 /// `Stroke` becomes one HSeg or VSeg depending on orientation; each stroked
 /// `Rect` contributes its four edges (cell-border rects, table frames).
+/// An ARGB hex colour (`ffd9d9d9`) that leaves no mark on a white page: fully transparent, or
+/// near-white.
+fn is_invisible_ink(argb: &str) -> bool {
+    let Ok(v) = u32::from_str_radix(argb.trim_start_matches('#'), 16) else {
+        return false;
+    };
+    let (a, r, g, b) = (v >> 24, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff);
+    (argb.len() == 8 && a == 0) || (r >= 0xf5 && g >= 0xf5 && b >= 0xf5)
+}
+
 fn extract_h_v_segments(graphics: &[GraphicPrimitive]) -> (Vec<HSeg>, Vec<VSeg>) {
     let mut hs = Vec::new();
     let mut vs = Vec::new();
+    // A white (or fully transparent) rule shows only over a coloured fill (a white separator in
+    // a dark header band). On the white page it is invisible: Word draws a white border per
+    // text line inside a tall cell, which cut one row of a SWOT table into 35.
+    let tinted: Vec<&Rect> = graphics
+        .iter()
+        .filter_map(|g| match g {
+            GraphicPrimitive::Rect {
+                bbox,
+                fill: Some(f),
+                ..
+            } if !is_invisible_ink(f) => Some(bbox),
+            _ => None,
+        })
+        .collect();
+    let invisible = |color: &Option<String>, mx: f32, my: f32| {
+        color.as_deref().is_some_and(is_invisible_ink)
+            && !tinted.iter().any(|r| {
+                mx >= r.x - 1.0
+                    && mx <= r.x + r.width + 1.0
+                    && my >= r.y - 1.0
+                    && my <= r.y + r.height + 1.0
+            })
+    };
     for g in graphics {
         match g {
-            GraphicPrimitive::Stroke { x1, y1, x2, y2, .. } => {
+            GraphicPrimitive::Stroke {
+                x1,
+                y1,
+                x2,
+                y2,
+                color,
+                ..
+            } => {
                 let (x1, y1, x2, y2) = (*x1, *y1, *x2, *y2);
+                if invisible(color, (x1 + x2) * 0.5, (y1 + y2) * 0.5) {
+                    continue;
+                }
                 let dy = (y1 - y2).abs();
                 let dx = (x1 - x2).abs();
                 if dy <= TABLE_AXIS_TOLERANCE_PT && dx > 1.0 {
@@ -3862,8 +3905,14 @@ fn extract_h_v_segments(graphics: &[GraphicPrimitive]) -> (Vec<HSeg>, Vec<VSeg>)
                     });
                 }
             }
-            GraphicPrimitive::Rect { bbox, stroke, .. } => {
-                if stroke.is_none() {
+            GraphicPrimitive::Rect { bbox, stroke, fill } => {
+                // A box shows its edges through a visible border or a visible fill (shaded
+                // cells, Word's borders drawn as thin filled bars); a white fill-only box (a
+                // per-line cell background in a Word table) shows nothing.
+                let (mx, my) = (bbox.x + bbox.width * 0.5, bbox.y + bbox.height * 0.5);
+                let stroked = stroke.is_some() && !invisible(stroke, mx, my);
+                let filled = fill.as_deref().is_some_and(|f| !is_invisible_ink(f));
+                if !stroked && !filled {
                     continue;
                 }
                 let top = bbox.y;
@@ -4612,12 +4661,17 @@ fn assign_cells(
             continue;
         }
 
-        let mut text_spans: Vec<(&TextItem, Option<usize>)> = line
+        let mut text_spans: Vec<(TextItem, Option<usize>)> = line
             .spans
             .iter()
             .enumerate()
             .filter(|(_, s)| !s.text.trim().is_empty())
-            .map(|(i, s)| (s, line.span_item_indices.get(i).copied()))
+            .flat_map(|(i, s)| {
+                let item = line.span_item_indices.get(i).copied();
+                split_span_at_rules(s, &xs[1..n_cols])
+                    .into_iter()
+                    .map(move |p| (p, item))
+            })
             .collect();
         text_spans.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
 
@@ -4680,14 +4734,14 @@ fn assign_cells(
             // its own centre falls in, which is exact. `split_span_at_anchors`
             // has to guess an x from a character index, so on a proportional
             // font it can cut a word or two off from the true boundary.
-            if let Some(by_word) = bucket_words_into_columns(span, xs) {
+            if let Some(by_word) = bucket_words_into_columns(&span, xs) {
                 for (col, text) in by_word {
                     grid.push_text(row, col, &text, items);
                     if !line.all_bold {
                         grid.is_bold[row][col] = false;
                     }
                 }
-            } else if let Some(pieces) = split_span_at_anchors(span, &covered, xs) {
+            } else if let Some(pieces) = split_span_at_anchors(&span, &covered, xs) {
                 for (k, piece) in pieces.iter().enumerate() {
                     grid.push_text(row, c_lo + k, piece, items);
                     if !line.all_bold {
@@ -5625,6 +5679,54 @@ fn bucket_words_into_columns(span: &TextItem, xs: &[f32]) -> Option<Vec<(usize, 
     Some(out)
 }
 
+/// Split a span at the spaces a ruled column boundary passes through. PDFium can hand a whole
+/// ruled row ("214015-E 234459-E 394897-E ...", one cell per word) over as one item when the
+/// cells sit a single space apart; the straddle census then read every row as text crossing the
+/// rules and rejected the grid. Character positions are estimated evenly over the span's width,
+/// so a cut is taken only when a space lies within a character of the boundary.
+fn split_span_at_rules(span: &TextItem, inner_xs: &[f32]) -> Vec<TextItem> {
+    let chars: Vec<char> = span.text.chars().collect();
+    let n = chars.len();
+    if n < 3 || span.width <= 0.0 {
+        return vec![span.clone()];
+    }
+    let cw = span.width / n as f32;
+    let mut cuts: Vec<usize> = Vec::new(); // char index of the space each piece ends at
+    for &bx in inner_xs {
+        if bx <= span.x + cw || bx >= span.x + span.width - cw {
+            continue;
+        }
+        let best = (1..n - 1)
+            .filter(|&i| chars[i] == ' ')
+            .map(|i| (i, (span.x + (i as f32 + 0.5) * cw - bx).abs()))
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((i, d)) = best
+            && d <= cw
+            && !cuts.contains(&i)
+        {
+            cuts.push(i);
+        }
+    }
+    if cuts.is_empty() {
+        return vec![span.clone()];
+    }
+    cuts.sort_unstable();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for end in cuts.into_iter().chain(std::iter::once(n)) {
+        let text: String = chars[start..end].iter().collect::<String>();
+        if !text.trim().is_empty() {
+            let mut piece = span.clone();
+            piece.text = text.trim().to_string();
+            piece.x = span.x + start as f32 * cw;
+            piece.width = (end - start) as f32 * cw;
+            out.push(piece);
+        }
+        start = end + 1;
+    }
+    out
+}
+
 fn find_bucket(boundaries: &[f32], val: f32) -> Option<usize> {
     if boundaries.len() < 2 || val < boundaries[0] || val > *boundaries.last().unwrap() {
         return None;
@@ -6087,6 +6189,31 @@ pub(super) fn escape_table_cell(s: &str) -> String {
 mod tests {
     use super::super::test_helpers::{line, line_with_spans, page, rect_borders, stroke};
     use super::*;
+
+    /// A ruled row PDFium hands over as one item: cut at the spaces the rules pass through, and
+    /// leave a span with no space near a rule (a real straddle) whole.
+    #[test]
+    fn ruled_row_item_splits_at_rules() {
+        let span = TextItem {
+            text: "214015-E 234459-E 394897-E".into(),
+            x: 82.6,
+            width: 26.0 * 6.67,
+            height: 8.0,
+            ..Default::default()
+        };
+        let parts = split_span_at_rules(&span, &[139.3, 200.0]);
+        let texts: Vec<&str> = parts.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(texts, ["214015-E", "234459-E", "394897-E"]);
+        assert!(parts[1].x > 139.3 && parts[0].x + parts[0].width < 142.0);
+        let prose = TextItem {
+            text: "Continuous prose crossing".into(),
+            x: 82.6,
+            width: 25.0 * 6.0,
+            height: 8.0,
+            ..Default::default()
+        };
+        assert_eq!(split_span_at_rules(&prose, &[120.0]).len(), 1);
+    }
 
     #[test]
     fn deskewed_measured_words_keep_three_table_columns() {

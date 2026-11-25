@@ -515,6 +515,122 @@ pub struct Grid {
     pub n_cols: usize,
 }
 
+impl Grid {
+    /// Merge rows a ruled table draws as one: when most row boundaries carry a horizontal rule
+    /// across the table, a boundary without one is a wrapped cell's next line (a tall SWOT cell
+    /// read as 35 rows, "подметание территории ... 1 раз в" / "сутки" split in two). `h_rules`
+    /// are `[y, x0, x1]` in the frame of the cell boxes.
+    pub fn merge_unruled_rows(&mut self, h_rules: &[[f32; 3]]) {
+        if self.n_rows < 3 || h_rules.is_empty() {
+            return;
+        }
+        let x0 = self
+            .cells
+            .iter()
+            .map(|c| c.bx[0])
+            .fold(f64::INFINITY, f64::min);
+        let x1 = self
+            .cells
+            .iter()
+            .map(|c| c.bx[2])
+            .fold(f64::NEG_INFINITY, f64::max);
+        let width = (x1 - x0).max(1.0);
+        // each row's ink band, from its one-row cells
+        let mut band = vec![(f64::INFINITY, f64::NEG_INFINITY); self.n_rows];
+        for c in self
+            .cells
+            .iter()
+            .filter(|c| c.r0 == c.r1 && !c.text.is_empty())
+        {
+            band[c.r0].0 = band[c.r0].0.min(c.bx[1]);
+            band[c.r0].1 = band[c.r0].1.max(c.bx[3]);
+        }
+        if band.iter().any(|b| !b.0.is_finite()) {
+            return;
+        }
+        let ruled: Vec<bool> = (0..self.n_rows - 1)
+            .map(|r| {
+                let (lo, hi) = (band[r].1 - 2.0, band[r + 1].0 + 2.0);
+                h_rules.iter().any(|&[y, a, b]| {
+                    let y = y as f64;
+                    let cover = (x1.min(b as f64) - x0.max(a as f64)).max(0.0);
+                    y >= lo && y <= hi && cover >= 0.5 * width
+                })
+            })
+            .collect();
+        let n_ruled = ruled.iter().filter(|&&r| r).count();
+        if n_ruled < 2 || n_ruled * 5 < ruled.len() * 3 || n_ruled == ruled.len() {
+            return;
+        }
+        // a rule-less boundary folds only a continuation line: the row below starts with an empty
+        // first column, fills at most half the columns, or fills columns the row above left
+        // empty; two complete records (a table ruled every other row) stay apart, as do header rows
+        let filled = |r: usize| -> Vec<usize> {
+            let mut cols: Vec<usize> = self
+                .cells
+                .iter()
+                .filter(|c| c.r0 <= r && r <= c.r1 && !c.text.is_empty())
+                .flat_map(|c| c.c0..=c.c1)
+                .collect();
+            cols.sort_unstable();
+            cols.dedup();
+            cols
+        };
+        let fold: Vec<bool> = (0..self.n_rows - 1)
+            .map(|r| {
+                if ruled[r] || self.head_rows.contains(&r) || self.head_rows.contains(&(r + 1)) {
+                    return false;
+                }
+                let (a, b) = (filled(r), filled(r + 1));
+                let overlap = b.iter().filter(|q| a.contains(q)).count();
+                !b.contains(&0) || b.len() * 2 <= self.n_cols || overlap <= 1
+            })
+            .collect();
+        if !fold.iter().any(|&f| f) {
+            return;
+        }
+        let mut map = vec![0usize; self.n_rows];
+        for r in 1..self.n_rows {
+            map[r] = map[r - 1] + !fold[r - 1] as usize;
+        }
+        let mut merged: Vec<GridCell> = Vec::new();
+        let mut cells = std::mem::take(&mut self.cells);
+        cells.sort_by(|a, b| (a.c0, a.bx[1]).partial_cmp(&(b.c0, b.bx[1])).unwrap());
+        for mut c in cells {
+            c.r0 = map[c.r0];
+            c.r1 = map[c.r1];
+            if let Some(m) = merged
+                .iter_mut()
+                .find(|m| m.c0 == c.c0 && m.r0 <= c.r1 && c.r0 <= m.r1)
+            {
+                if !c.text.is_empty() {
+                    if !m.text.is_empty() {
+                        m.text.push(' ');
+                    }
+                    m.text.push_str(&c.text);
+                }
+                m.r0 = m.r0.min(c.r0);
+                m.r1 = m.r1.max(c.r1);
+                m.c1 = m.c1.max(c.c1);
+                m.bx = [
+                    m.bx[0].min(c.bx[0]),
+                    m.bx[1].min(c.bx[1]),
+                    m.bx[2].max(c.bx[2]),
+                    m.bx[3].max(c.bx[3]),
+                ];
+            } else {
+                merged.push(c);
+            }
+        }
+        merged.sort_by_key(|c| (c.r0, c.c0));
+        self.cells = merged;
+        let mut head: Vec<usize> = self.head_rows.iter().map(|&r| map[r]).collect();
+        head.dedup();
+        self.head_rows = head;
+        self.n_rows = map[self.n_rows - 1] + 1;
+    }
+}
+
 /// Fold near-empty columns into their nearest neighbour (tn_core._squeeze, column rule).
 fn squeeze_cols(cells: &mut Vec<GridCell>, head: &[usize], n_cols: &mut usize, hh: f64) {
     let mut changed = true;
@@ -1146,6 +1262,59 @@ impl Grid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Four ruled rows, the second's label wrapping onto a fifth line with no rule above it:
+    /// the wrap folds into its row; a table with no interior rules is left alone.
+    #[test]
+    fn merge_unruled_rows_folds_wrapped_lines() {
+        let cell = |r: usize, c: usize, t: &str, y: f64| GridCell {
+            r0: r,
+            c0: c,
+            r1: r,
+            c1: c,
+            text: t.into(),
+            bx: [
+                10.0 + 100.0 * c as f64,
+                y,
+                90.0 + 100.0 * c as f64,
+                y + 10.0,
+            ],
+        };
+        let rows = [
+            ("a", "1", 0.0),
+            ("b first", "2", 20.0),
+            ("b second", "", 32.0),
+            ("c", "3", 50.0),
+            ("d", "4", 70.0),
+        ];
+        let mk = || Grid {
+            cells: rows
+                .iter()
+                .enumerate()
+                .flat_map(|(r, &(l, v, y))| [cell(r, 0, l, y), cell(r, 1, v, y)])
+                .collect(),
+            head_rows: vec![0],
+            n_rows: 5,
+            n_cols: 2,
+        };
+        let rules: Vec<[f32; 3]> = [15.0, 45.0, 65.0]
+            .iter()
+            .map(|&y| [y, 10.0, 190.0])
+            .collect();
+        let mut g = mk();
+        g.merge_unruled_rows(&rules);
+        assert_eq!(g.n_rows, 4);
+        let b: Vec<&str> = g
+            .cells
+            .iter()
+            .filter(|c| c.r0 == 1)
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(b, ["b first b second", "2"]);
+        let mut g = mk();
+        g.merge_unruled_rows(&[]);
+        assert_eq!(g.n_rows, 5);
+    }
 
     /// The exhaustive average linkage `avg_link` replaced (rescans every live pair per merge):
     /// the reference its merges, order and sums must match exactly.

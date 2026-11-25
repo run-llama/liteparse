@@ -352,17 +352,36 @@ fn cut(chars: &[(Ch, [f64; 4])], h: f64) -> Vec<Unit> {
 fn run_units(chars: &[Ch], q: u8, w: f64, h: f64, minor: bool) -> Vec<Unit> {
     let mut runs: Vec<Vec<(Ch, [f64; 4])>> = Vec::new();
     let mut cur: Vec<(Ch, [f64; 4])> = Vec::new();
+    // apostrophes and quotes sit high, commas and periods low, combining marks above or below:
+    // one right after a glyph rides with it, and the glyph after one is placed against the last
+    // other glyph ("Treasurer's" stayed three units, "Treasurer ' s", and the "'s" could land in
+    // another table row; Thai vowel and tone marks split "วันที่" into fake cells)
+    let is_mark = |x: &Ch| {
+        x.c.len() == 1
+            && char::from_u32(x.c[0]).is_some_and(|c| {
+                matches!(c, '\'' | '’' | '‘' | 'ʼ' | '`' | '´' | '"' | '“' | '”' | ',' | '.')
+                    // Thai / Arabic / Indic marks stacked over or under their base
+                    || crate::extract::is_combining_mark(c)
+            })
+    };
     for c in chars {
         let bx = to_frame(c.pb, q, w, h);
-        if !cur.is_empty()
-            && !c.is_space()
-            && let Some((_, bb)) = cur.iter().rev().find(|(x, _)| !x.is_space())
-        {
-            let hh = (bb[3] - bb[1]).max(bx[3] - bx[1]).max(1.0);
-            if ((bx[1] + bx[3]) / 2.0 - (bb[1] + bb[3]) / 2.0).abs() > 0.6 * hh
-                || bx[0] < bb[0] - hh
-            {
-                runs.push(std::mem::take(&mut cur));
+        if !cur.is_empty() && !c.is_space() {
+            let prev = cur.iter().rev().find(|(x, _)| !x.is_space());
+            let anchor = cur
+                .iter()
+                .rev()
+                .find(|(x, _)| !x.is_space() && !is_mark(x))
+                .or(prev);
+            if let (Some((_, pb)), Some((_, bb))) = (prev, anchor) {
+                let hh = (bb[3] - bb[1]).max(bx[3] - bx[1]).max(1.0);
+                let rides = is_mark(c) && bx[0] >= pb[0] && bx[0] - pb[2] < 0.5 * hh;
+                if !rides
+                    && (((bx[1] + bx[3]) / 2.0 - (bb[1] + bb[3]) / 2.0).abs() > 0.6 * hh
+                        || bx[0] < bb[0] - hh)
+                {
+                    runs.push(std::mem::take(&mut cur));
+                }
             }
         }
         cur.push((c.clone(), bx));
