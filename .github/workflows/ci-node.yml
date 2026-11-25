@@ -113,18 +113,44 @@ jobs:
         shell: bash
         run: npx napi build --cargo-cwd ../../crates/liteparse-napi --platform --release --js false --dts native.d.ts --target ${{ matrix.target }} .
 
+      # tesseract-rs compiles leptonica + tesseract from C/C++ source into the container's
+      # /root/.tesseract-rs, outside target/. Mount it from the host and cache it, keyed on
+      # the tesseract-rs version, so the musl build stops recompiling it every run.
+      - name: Read tesseract-rs version (musl)
+        if: ${{ matrix.use-container }}
+        id: tesseract-rs-musl
+        shell: bash
+        run: |
+          v=$(grep -A1 '^name = "tesseract-rs"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Cache tesseract-rs build (musl)
+        if: ${{ matrix.use-container }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.tesseract-rs-musl
+          key: tesseract-rs-${{ matrix.os }}-${{ matrix.target }}-${{ steps.tesseract-rs-musl.outputs.version }}
+
       - name: Build native module (musl container)
         if: ${{ matrix.use-container }}
         run: |
           chmod +x scripts/build-musl-node.sh
+          mkdir -p "$HOME/.tesseract-rs-musl"
           docker run --rm \
             -v "$GITHUB_WORKSPACE":/work \
             -v "$HOME/.cargo/registry":/root/.cargo/registry \
             -v "$HOME/.cargo/git":/root/.cargo/git \
             -v "$HOME/.cache/pdfium-rs":/root/.cache/pdfium-rs \
+            -v "$HOME/.tesseract-rs-musl":/root/.tesseract-rs \
             -w /work/packages/node \
             node:20-alpine \
             /work/scripts/build-musl-node.sh
+          # The container runs as root. Hand its output back to the runner user, or the
+          # actions/cache post step can't read ~/.cargo/registry and the save fails
+          # ("tar: Cannot open: Permission denied"): this job never saved a cache.
+          sudo chown -R "$(id -u):$(id -g)" "$HOME/.cargo/registry" "$HOME/.cargo/git" \
+            "$HOME/.cache/pdfium-rs" "$HOME/.tesseract-rs-musl" "$GITHUB_WORKSPACE"
 
       - name: Copy pdfium dylib (Unix)
         if: runner.os != 'Windows'
