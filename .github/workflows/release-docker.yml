@@ -133,8 +133,10 @@ jobs:
 
       - name: Create git tag
         run: |
-          git tag "docker-v${{ inputs.version }}"
-          git push origin "docker-v${{ inputs.version }}"
+          git tag "docker-v${INPUTS_VERSION}"
+          git push origin "docker-v${INPUTS_VERSION}"
+        env:
+          INPUTS_VERSION: ${{ inputs.version }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

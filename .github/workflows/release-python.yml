@@ -32,11 +32,13 @@ jobs:
               match = re.search(r'^version\s*=\s*\"(.+?)\"', f.read(), re.MULTILINE)
               print(match.group(1))
           ")
-          if [ "$PYPROJECT_VERSION" != "${{ inputs.version }}" ]; then
-            echo "::error::Version mismatch: pyproject.toml has $PYPROJECT_VERSION, expected ${{ inputs.version }}"
+          if [ "$PYPROJECT_VERSION" != "${INPUTS_VERSION}" ]; then
+            echo "::error::Version mismatch: pyproject.toml has $PYPROJECT_VERSION, expected ${INPUTS_VERSION}"
             exit 1
           fi
-          echo "Version validated: ${{ inputs.version }}"
+          echo "Version validated: ${INPUTS_VERSION}"
+        env:
+          INPUTS_VERSION: ${{ inputs.version }}
 
   build-wheels:
     needs: validate
@@ -385,8 +387,10 @@ jobs:
       - name: Create git tag
         if: ${{ !inputs.dry-run }}
         run: |
-          git tag "python-v${{ inputs.version }}"
-          git push origin "python-v${{ inputs.version }}"
+          git tag "python-v${INPUTS_VERSION}"
+          git push origin "python-v${INPUTS_VERSION}"
+        env:
+          INPUTS_VERSION: ${{ inputs.version }}
 
       - name: Create GitHub Release
         if: ${{ !inputs.dry-run }}
@@ -401,8 +405,10 @@ jobs:
         if: ${{ inputs.dry-run }}
         run: |
           echo "## Dry Run Summary" >> $GITHUB_STEP_SUMMARY
-          echo "Would release python-v${{ inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "Would release python-v${INPUTS_VERSION}" >> $GITHUB_STEP_SUMMARY
           echo "### Wheels:" >> $GITHUB_STEP_SUMMARY
           find dist -name "*.whl" -exec echo "- {}" \; >> $GITHUB_STEP_SUMMARY
           echo "### CLI artifacts:" >> $GITHUB_STEP_SUMMARY
           find cli-artifacts -name "*.tar.gz" -exec echo "- {}" \; >> $GITHUB_STEP_SUMMARY
+        env:
+          INPUTS_VERSION: ${{ inputs.version }}

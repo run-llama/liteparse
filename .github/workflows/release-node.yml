@@ -31,11 +31,13 @@ jobs:
       - name: Validate version
         run: |
           PKG_VERSION=$(node -p "require('./packages/node/package.json').version")
-          if [ "$PKG_VERSION" != "${{ inputs.version }}" ]; then
-            echo "::error::Version mismatch: package.json has $PKG_VERSION, expected ${{ inputs.version }}"
+          if [ "$PKG_VERSION" != "${INPUTS_VERSION}" ]; then
+            echo "::error::Version mismatch: package.json has $PKG_VERSION, expected ${INPUTS_VERSION}"
             exit 1
           fi
-          echo "Version validated: ${{ inputs.version }}"
+          echo "Version validated: ${INPUTS_VERSION}"
+        env:
+          INPUTS_VERSION: ${{ inputs.version }}
 
   build-bindings:
     needs: validate
@@ -401,7 +403,7 @@ jobs:
               linux-arm64-gnu) OS="linux";  CPU="arm64"; LIBC="glibc" ;;
             esac
 
-            VERSION=${{ inputs.version }}
+            VERSION=${INPUTS_VERSION}
 
             LIBC_LINE=""
             if [ -n "$LIBC" ]; then
@@ -428,6 +430,8 @@ jobs:
             echo "Created platform package: ${PKG_NAME}"
             ls -la "$PKG_DIR/"
           done
+        env:
+          INPUTS_VERSION: ${{ inputs.version }}
 
       - name: Publish platform packages
         if: ${{ !inputs.dry-run }}
@@ -454,8 +458,10 @@ jobs:
       - name: Create git tag
         if: ${{ !inputs.dry-run }}
         run: |
-          git tag "node-v${{ inputs.version }}"
-          git push origin "node-v${{ inputs.version }}"
+          git tag "node-v${INPUTS_VERSION}"
+          git push origin "node-v${INPUTS_VERSION}"
+        env:
+          INPUTS_VERSION: ${{ inputs.version }}
 
       - name: Create GitHub Release
         if: ${{ !inputs.dry-run }}
@@ -470,7 +476,7 @@ jobs:
         if: ${{ inputs.dry-run }}
         run: |
           echo "## Dry Run Summary" >> $GITHUB_STEP_SUMMARY
-          echo "Would release node-v${{ inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "Would release node-v${INPUTS_VERSION}" >> $GITHUB_STEP_SUMMARY
           echo "### Platform packages:" >> $GITHUB_STEP_SUMMARY
           for dir in packages/node/npm/*/; do
             if [ -f "$dir/package.json" ]; then
@@ -479,3 +485,5 @@ jobs:
           done
           echo "### CLI artifacts:" >> $GITHUB_STEP_SUMMARY
           find cli-artifacts -name "*.tar.gz" -exec echo "- {}" \; >> $GITHUB_STEP_SUMMARY
+        env:
+          INPUTS_VERSION: ${{ inputs.version }}

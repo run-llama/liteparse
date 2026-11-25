@@ -31,11 +31,13 @@ jobs:
       - name: Validate version
         run: |
           PKG_VERSION=$(node -p "require('./packages/wasm/package.json').version")
-          if [ "$PKG_VERSION" != "${{ inputs.version }}" ]; then
-            echo "::error::Version mismatch: package.json has $PKG_VERSION, expected ${{ inputs.version }}"
+          if [ "$PKG_VERSION" != "${INPUTS_VERSION}" ]; then
+            echo "::error::Version mismatch: package.json has $PKG_VERSION, expected ${INPUTS_VERSION}"
             exit 1
           fi
-          echo "Version validated: ${{ inputs.version }}"
+          echo "Version validated: ${INPUTS_VERSION}"
+        env:
+          INPUTS_VERSION: ${{ inputs.version }}
 
   build:
     needs: validate
@@ -115,8 +117,10 @@ jobs:
       - name: Create git tag
         if: ${{ !inputs.dry-run }}
         run: |
-          git tag "wasm-v${{ inputs.version }}"
-          git push origin "wasm-v${{ inputs.version }}"
+          git tag "wasm-v${INPUTS_VERSION}"
+          git push origin "wasm-v${INPUTS_VERSION}"
+        env:
+          INPUTS_VERSION: ${{ inputs.version }}
 
       - name: Create GitHub Release
         if: ${{ !inputs.dry-run }}
@@ -130,7 +134,9 @@ jobs:
         if: ${{ inputs.dry-run }}
         run: |
           echo "## Dry Run Summary" >> $GITHUB_STEP_SUMMARY
-          echo "Would release wasm-v${{ inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "Would release wasm-v${INPUTS_VERSION}" >> $GITHUB_STEP_SUMMARY
           echo "### Package: @llamaindex/liteparse-wasm" >> $GITHUB_STEP_SUMMARY
           WASM_SIZE=$(stat --format=%s packages/wasm/pkg/liteparse_wasm_bg.wasm)
           echo "WASM binary size: $(numfmt --to=iec $WASM_SIZE)" >> $GITHUB_STEP_SUMMARY
+        env:
+          INPUTS_VERSION: ${{ inputs.version }}
