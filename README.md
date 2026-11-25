@@ -16,9 +16,7 @@
 
 English | [简体中文](README.zh-CN.md)
 
-<img src="https://github.com/user-attachments/assets/07ba6a82-6bb1-4dea-b0ef-cad7df7d1622" alt="out" width="600">
-
-> Looking for LiteParse V1? Follow this link to [the old code](https://github.com/run-llama/liteparse/tree/logan/liteparse-v1)
+<img width="640" height="450" alt="liteparse-demo" src="https://github.com/user-attachments/assets/67830896-4705-4051-9bdd-aa2d88fbb63f" />
 
 LiteParse is a standalone OSS PDF parsing tool focused exclusively on **fast and light** parsing. It provides high-quality spatial text parsing with bounding boxes, without proprietary LLM features or cloud dependencies. Everything runs locally on your machine.
 
