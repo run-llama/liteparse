@@ -6,6 +6,39 @@ use std::process::Command;
 const PDFIUM_RELEASE_TAG: &str = "chromium/8172";
 const PDFIUM_RELEASE_URL: &str = "https://github.com/run-llama/pdfium-binaries/releases/download";
 
+/// The release `PDFIUM_SHA256` describes. Keep it equal to `PDFIUM_RELEASE_TAG`:
+/// when moving to a new release, update both, plus every hash below. The
+/// sha256 of each asset is on the release page, or from
+/// `gh api repos/run-llama/pdfium-binaries/releases/tags/<tag, / as %2F>
+/// --jq '.assets[] | "\(.name) \(.digest)"'`.
+const PDFIUM_SHA256_TAG: &str = "chromium/8172";
+
+/// sha256 of each `<asset>.tgz` in the `PDFIUM_SHA256_TAG` release. A download
+/// that does not match is rejected. packages/python/scripts/download-pdfium.sh
+/// reads this table too, so keep one `("<asset>", "<sha256>"),` per line.
+#[rustfmt::skip]
+const PDFIUM_SHA256: &[(&str, &str)] = &[
+    ("pdfium-mac-arm64", "7d4b806918e178bdb535563f58753f7cd946b2336cd9a5e65c3889768fa4b44d"),
+    ("pdfium-mac-x64", "27b848eaa96bb561fc5bce049bc7a4367715abbe1d1d7a422294e54b1aa4b311"),
+    ("pdfium-linux-x64", "8562f2b56bff77b1a9f559807fb4133a3897d5228973b3593cf56fc537c3cb8d"),
+    ("pdfium-linux-musl-x64", "78880dffefdde91e770fa6c83bad8020a064212a933e821fe6824ca9dc694a21"),
+    ("pdfium-linux-arm64", "b14f40a2671ecaf6ef2c2119fa8dc0f6273b32d6144ba191ed22065dce00e367"),
+    ("pdfium-linux-arm", "f532e2a1176b66c08704c6320425260b25a440fa208cbdbfe32a44fd4d19ba79"),
+    ("pdfium-win-x64", "e09408aadee8acf729b4c8c852985f05e1ee40652620d251f7ac1eba2e70cd02"),
+    ("pdfium-win-arm64", "2f6475b3f5e3293d5472b3ec4e8c85cf72d92c5c8cf8c509e1438ffcf0bc00ac"),
+    ("pdfium-win-x86", "4921903223eef6587bfac5b91cbe506e91546e88acc7cf33c944f8112f4c10c5"),
+    ("pdfium-wasi-wasm", "4c279f7b1068ff69ae44ead83e91385a92b16062c23a4459986791e126c70ccc"),
+];
+
+/// Download attempts before the build fails, and the wait before the first
+/// retry (doubled after each failed attempt: 2 s, 4 s, 8 s).
+const DOWNLOAD_ATTEMPTS: u32 = 4;
+const DOWNLOAD_FIRST_BACKOFF_SECS: u64 = 2;
+
+/// Upper bound on the archive size read into memory (the largest asset,
+/// wasi-wasm, is about 10 MB).
+const DOWNLOAD_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
 fn main() {
     let (lib_dir, include_dir) = resolve_pdfium_dirs();
 
@@ -163,17 +196,14 @@ fn pdfium_asset_stem() -> &'static str {
 }
 
 fn download_pdfium(dest: &Path) {
-    let asset = format!("{}.tgz", pdfium_asset_stem());
+    let stem = pdfium_asset_stem();
+    let asset = format!("{stem}.tgz");
     let tag_encoded = PDFIUM_RELEASE_TAG.replace('/', "%2F");
     let url = format!("{PDFIUM_RELEASE_URL}/{tag_encoded}/{asset}");
+    let expected_sha256 = expected_sha256(stem);
 
-    eprintln!("pdfium-sys: GET {url}");
-
-    let response = ureq::get(&url).call().unwrap_or_else(|e| {
-        panic!("failed to download pdfium from {url}: {e}");
-    });
-
-    let reader = response.into_body().into_reader();
+    let bytes = download_with_retries(&url, expected_sha256);
+    let reader = std::io::Cursor::new(bytes);
     let gz = flate2::read::GzDecoder::new(reader);
     let mut archive = tar::Archive::new(gz);
 
@@ -197,6 +227,74 @@ fn download_pdfium(dest: &Path) {
     fs::rename(&tmp, dest).expect("failed to move pdfium to cache dir");
 
     eprintln!("pdfium-sys: cached pdfium at {}", dest.display());
+}
+
+fn expected_sha256(stem: &str) -> &'static str {
+    if PDFIUM_SHA256_TAG != PDFIUM_RELEASE_TAG {
+        panic!(
+            "pdfium-sys: PDFIUM_SHA256 lists hashes for {PDFIUM_SHA256_TAG} but \
+             PDFIUM_RELEASE_TAG is {PDFIUM_RELEASE_TAG}; update PDFIUM_SHA256_TAG and \
+             every hash in PDFIUM_SHA256 in crates/pdfium-sys/build.rs"
+        );
+    }
+    PDFIUM_SHA256
+        .iter()
+        .find(|(name, _)| *name == stem)
+        .map(|(_, sha256)| *sha256)
+        .unwrap_or_else(|| {
+            panic!("pdfium-sys: no sha256 for {stem} in PDFIUM_SHA256 (crates/pdfium-sys/build.rs)")
+        })
+}
+
+/// GET `url` and check the body against `expected_sha256`. Network errors,
+/// error statuses, short reads and hash mismatches are retried with
+/// exponential backoff, up to `DOWNLOAD_ATTEMPTS` attempts in all; then the
+/// build fails with every attempt's error.
+fn download_with_retries(url: &str, expected_sha256: &str) -> Vec<u8> {
+    let mut errors = Vec::new();
+    let mut backoff = std::time::Duration::from_secs(DOWNLOAD_FIRST_BACKOFF_SECS);
+    for attempt in 1..=DOWNLOAD_ATTEMPTS {
+        eprintln!("pdfium-sys: GET {url} (attempt {attempt}/{DOWNLOAD_ATTEMPTS})");
+        match download_once(url, expected_sha256) {
+            Ok(bytes) => return bytes,
+            Err(e) => {
+                eprintln!("pdfium-sys: attempt {attempt} failed: {e}");
+                errors.push(format!("attempt {attempt}: {e}"));
+            }
+        }
+        if attempt < DOWNLOAD_ATTEMPTS {
+            std::thread::sleep(backoff);
+            backoff *= 2;
+        }
+    }
+    panic!(
+        "failed to download pdfium from {url} after {DOWNLOAD_ATTEMPTS} attempts:\n  {}\n\
+         Set PDFIUM_LIB_PATH and PDFIUM_INCLUDE_PATH to build against a local pdfium instead.",
+        errors.join("\n  ")
+    );
+}
+
+fn download_once(url: &str, expected_sha256: &str) -> Result<Vec<u8>, String> {
+    use sha2::{Digest, Sha256};
+
+    let response = ureq::get(url).call().map_err(|e| e.to_string())?;
+    let bytes = response
+        .into_body()
+        .with_config()
+        .limit(DOWNLOAD_MAX_BYTES)
+        .read_to_vec()
+        .map_err(|e| format!("reading the response body: {e}"))?;
+    let actual: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if actual != expected_sha256 {
+        return Err(format!(
+            "sha256 mismatch: expected {expected_sha256}, got {actual} ({} bytes)",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
 }
 
 /// On macOS, pdfium-binaries ships dylibs with install name `./libpdfium.dylib`.

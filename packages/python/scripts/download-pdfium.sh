@@ -38,8 +38,25 @@ URL="https://github.com/run-llama/pdfium-binaries/releases/download/${URL_TAG}/$
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+# Same pinned sha256 as crates/pdfium-sys/build.rs (one ("<asset>", "<sha256>"), per line).
+SHA_TAG=$(grep -E 'const PDFIUM_SHA256_TAG' "$BUILD_RS" | sed -E 's/.*"([^"]+)".*/\1/')
+[ "$SHA_TAG" = "$TAG" ] || { echo "PDFIUM_SHA256_TAG ($SHA_TAG) != PDFIUM_RELEASE_TAG ($TAG) in $BUILD_RS" >&2; exit 1; }
+EXPECTED_SHA256=$(grep -E "^ *\(\"${ASSET}\", \"[0-9a-f]{64}\"\)," "$BUILD_RS" | sed -E 's/.*"([0-9a-f]{64})".*/\1/')
+[ -n "$EXPECTED_SHA256" ] || { echo "No sha256 for $ASSET in PDFIUM_SHA256 in $BUILD_RS" >&2; exit 1; }
+
 echo "Downloading $URL"
-curl -fsSL "$URL" -o "$TMP/${ASSET}.tgz"
+# Retry transient failures (DNS, resets, 5xx) with backoff: 4 attempts in all.
+curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 "$URL" -o "$TMP/${ASSET}.tgz"
+
+if command -v sha256sum >/dev/null 2>&1; then
+  ACTUAL_SHA256=$(sha256sum "$TMP/${ASSET}.tgz" | cut -d' ' -f1)
+else
+  ACTUAL_SHA256=$(shasum -a 256 "$TMP/${ASSET}.tgz" | cut -d' ' -f1)
+fi
+if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
+  echo "sha256 mismatch for ${ASSET}.tgz: expected $EXPECTED_SHA256, got $ACTUAL_SHA256" >&2
+  exit 1
+fi
 tar -xzf "$TMP/${ASSET}.tgz" -C "$TMP"
 
 # pdfium-binaries layout: lib/<DYLIB> on unix, bin/pdfium.dll on windows
