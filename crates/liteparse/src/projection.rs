@@ -5218,7 +5218,37 @@ pub(crate) fn xy_cut(
     }
     let bbox = xy_root_bbox(items, &all, page_width, page_height);
     let median_h = xy_median_line_height(items, &all);
-    xy_cut_rec(items, all, bbox, 0, false, median_h, figures)
+    let rtl_page = {
+        let (mut rtl, mut ltr) = (0usize, 0usize);
+        for &i in &all {
+            for c in items[i].item.text.chars().filter(|c| c.is_alphabetic()) {
+                if crate::bidi::is_rtl_char(c) {
+                    rtl += 1;
+                } else {
+                    ltr += 1;
+                }
+            }
+        }
+        rtl > 2 * ltr
+    };
+    let mut region = xy_cut_rec(items, all, bbox, 0, false, median_h, figures);
+    if rtl_page {
+        rtl_column_order(&mut region);
+    }
+    region
+}
+
+/// An Arabic / Hebrew page reads its columns right to left: the right column of a vertical cut
+/// comes first (a two-column poem read its left column first).
+fn rtl_column_order(region: &mut Region) {
+    if let RegionKind::Split { axis, children } = &mut region.kind {
+        if *axis == CutAxis::Vertical {
+            children.reverse();
+        }
+        for c in children.iter_mut() {
+            rtl_column_order(c);
+        }
+    }
 }
 
 /// Pre-order walk of leaves. Each leaf yields its `region_path` (index trail
