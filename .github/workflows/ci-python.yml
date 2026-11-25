@@ -35,7 +35,10 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
 
-          - os: macos-26-intel
+          # Cross-compiled on Apple silicon: macos-latest builds this target in about half
+          # the time of the Intel image (and with less variance). The x86_64 binary is
+          # still tested on Intel (macos-26-intel) in the test job below.
+          - os: macos-latest
             target: x86_64-apple-darwin
 
           - os: ubuntu-latest
@@ -91,7 +94,9 @@ jobs:
             ~/.cache/pdfium-rs
             ~/Library/Caches/pdfium-rs
             target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-python-${{ hashFiles('**/Cargo.lock') }}
+          # matrix.os, not runner.os: x86_64-apple-darwin now builds on Apple silicon, and its
+          # target/ (build scripts compiled for the host) must not be shared with an Intel runner.
+          key: ${{ matrix.os }}-${{ matrix.target }}-cargo-python-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Stage pdfium for wheel inclusion
         if: ${{ !matrix.musl }}
