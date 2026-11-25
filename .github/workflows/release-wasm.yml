@@ -49,6 +49,8 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
+          # Release builds run cold: a cache another workflow wrote could poison what ships (zizmor cache-poisoning).
+          package-manager-cache: false
 
       - uses: dtolnay/rust-toolchain@1961bfc0c4a8bf07e0a0c98e1e2459c642ea70a0 # 1.95.0
         with:
@@ -98,6 +100,8 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+          # Release builds run cold: a cache another workflow wrote could poison what ships (zizmor cache-poisoning).
+          package-manager-cache: false
 
       # npm trusted publishing (OIDC) requires npm >= 11.5.1
       - name: Update npm
