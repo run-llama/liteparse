@@ -149,11 +149,6 @@ pub fn extract_pages_and_images(
     let mut image_error_count = 0u32;
     let mut flattened_form_widgets = false;
     let mut flattened_page_numbers: Vec<u32> = Vec::new();
-    // One FFI call keeps the per-page annotation walk off the hot path for
-    // every document without an AcroForm catalog, which is nearly all of them.
-    // Read at load, not now: an earlier `extract` call on this document may have
-    // flattened a page, which drops `/AcroForm` for the whole document.
-    let document_has_form = document.form_type_at_load() != 0;
     let form_environment = output_options
         .extract_form_fields
         .then(|| document.form_environment())
@@ -180,7 +175,6 @@ pub fn extract_pages_and_images(
             glyph_resolver,
             &output_options,
             form_environment.as_ref(),
-            document_has_form,
             &mut image_cache,
         );
 
@@ -238,7 +232,6 @@ fn extract_single_page(
     glyph_resolver: Option<&dyn crate::GlyphResolver>,
     output_options: &ExtractionOutputOptions,
     form_environment: Option<&FormEnvironment<'_, '_>>,
-    document_has_form: bool,
     image_cache: &mut ImageCache,
 ) -> Result<PageExtraction, LiteParseError> {
     let mut images = Vec::new();
@@ -375,11 +368,11 @@ fn extract_single_page(
         items.extend(emitted.into_iter().map(math_item));
         Ok(items)
     };
-    let widget_text_rects = if document_has_form {
-        page.form_widget_text_rects(&view_box)
-    } else {
-        Vec::new()
-    };
+    // Widgets paint text whether or not the catalog has an /AcroForm: orphan widgets (a form
+    // page cut out of its document, or a broken writer) still render their appearance in every
+    // viewer, and can hold all of a page's body text. The probe is an annotation-count call on
+    // pages without annotations, so it runs on every page.
+    let widget_text_rects = page.form_widget_text_rects(&view_box);
     let mut text_items = if widget_text_rects.is_empty() {
         extract_text(&page)?
     } else {
@@ -1169,7 +1162,13 @@ fn extract_layout_graphics(paths: &[PathObject]) -> Vec<GraphicPrimitive> {
             out.push(GraphicPrimitive::Rect {
                 bbox: rectf_to_rect(&path.bbox),
                 fill: path.fill_color.as_ref().map(color_to_argb_hex),
-                stroke: path.stroke_color.as_ref().map(color_to_argb_hex),
+                // a fill-only path still carries the graphics state's stroke colour (black by
+                // default); recorded as a stroke, every white per-line cell background in a Word
+                // table read as a bordered box and cut one tall row into one row per line
+                stroke: path
+                    .is_stroked
+                    .then(|| path.stroke_color.as_ref().map(color_to_argb_hex))
+                    .flatten(),
             });
         }
 
@@ -1554,11 +1553,37 @@ fn rectf_to_rect(r: &RectF) -> Rect {
 }
 
 /// Unicode combining diacritical marks, which PDFs often draw as their own
-/// glyph back over the base letter.
-fn is_combining_mark(c: char) -> bool {
+/// glyph back over the base letter: Latin diacritics, and the marks of scripts
+/// that stack them above / below the base (Thai and Lao vowels and tones, Arabic
+/// harakat, Hebrew points, Indic signs).
+pub(crate) fn is_combining_mark(c: char) -> bool {
     matches!(
         c,
         '\u{0300}'..='\u{036F}'
+            | '\u{0591}'..='\u{05BD}'
+            | '\u{05BF}'
+            | '\u{05C1}'..='\u{05C2}'
+            | '\u{05C4}'..='\u{05C5}'
+            | '\u{05C7}'
+            | '\u{0610}'..='\u{061A}'
+            | '\u{064B}'..='\u{065F}'
+            | '\u{0670}'
+            | '\u{06D6}'..='\u{06DC}'
+            | '\u{06DF}'..='\u{06E4}'
+            | '\u{06E7}'..='\u{06E8}'
+            | '\u{06EA}'..='\u{06ED}'
+            | '\u{0900}'..='\u{0902}'
+            | '\u{093C}'
+            | '\u{0941}'..='\u{0948}'
+            | '\u{094D}'
+            | '\u{0951}'..='\u{0957}'
+            | '\u{0962}'..='\u{0963}'
+            | '\u{0E31}'
+            | '\u{0E34}'..='\u{0E3A}'
+            | '\u{0E47}'..='\u{0E4E}'
+            | '\u{0EB1}'
+            | '\u{0EB4}'..='\u{0EBC}'
+            | '\u{0EC8}'..='\u{0ECD}'
             | '\u{1AB0}'..='\u{1AFF}'
             | '\u{1DC0}'..='\u{1DFF}'
             | '\u{20D0}'..='\u{20FF}'
@@ -1576,6 +1601,78 @@ fn normalize_punct(c: char) -> char {
         '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{2033}' => '"',
         '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
         | '\u{2212}' => '-',
+        '\u{1D400}'..='\u{1D7FF}' => fold_math_alphanumeric(c),
+        _ => c,
+    }
+}
+
+/// Word's Calibri/Cambria subsets map the "ti" ligature glyph through a /ToUnicode entry for an
+/// unrelated character (":" "^" "9": "fes:val", "Fes9val", "skep^cal"), and no glyph name is left
+/// to recover it from. Read as "ti" when the character sits inside a lowercase word (lowercase
+/// letters on both sides, no space) and, for the punctuation, its advance is ligature-wide
+/// (~0.46 of the line box against ~0.22 for a real colon); a "9" is digit-wide either way, so
+/// the lowercase context decides it.
+fn misdecoded_ti_ligature(
+    text_page: &TextPage,
+    i: i32,
+    char_count: i32,
+    c: char,
+    cv: &CharView<'_, '_>,
+) -> bool {
+    if !matches!(c, ':' | '^' | '9') || i == 0 || i + 1 >= char_count {
+        return false;
+    }
+    let at = |k: i32| char::from_u32(text_page.char_at_unchecked(k).unicode());
+    if !at(i + 1).is_some_and(|x| x.is_lowercase()) {
+        return false;
+    }
+    let prev = at(i - 1);
+    if c == '9' {
+        return prev.is_some_and(|x| x.is_lowercase());
+    }
+    // word-initial "ti" (":me", ":cket") follows a space; the width test below decides it
+    if !prev.is_some_and(|x| x.is_lowercase() || x.is_whitespace()) {
+        return false;
+    }
+    cv.loose_char_box().is_some_and(|b| {
+        let (w, h) = ((b.right - b.left).abs(), (b.bottom - b.top).abs());
+        h > 0.0 && w / h > 0.38
+    })
+}
+
+/// Mathematical Alphanumeric Symbols (U+1D400 block: Word's Cambria Math italic "𝐿𝑜𝑤 𝐵𝐴𝑉",
+/// bold / script / fraktur / double-struck letters and digits) → the plain letter or digit,
+/// the way a reader (and NFKC) reads them. The block repeats fixed-size alphabets.
+fn fold_math_alphanumeric(c: char) -> char {
+    let u = c as u32;
+    match u {
+        // 13 Latin alphabets of 52 (A-Z, a-z); a few slots are unassigned holes
+        0x1D400..=0x1D6A3 => {
+            let k = ((u - 0x1D400) % 52) as u8;
+            if k < 26 {
+                (b'A' + k) as char
+            } else {
+                (b'a' + k - 26) as char
+            }
+        }
+        0x1D6A4 => 'i',
+        0x1D6A5 => 'j',
+        // 5 Greek alphabets of 58: 25 capitals (Θ variant at 17), ∇, 25 small, ∂, 6 variants
+        0x1D6A8..=0x1D7C9 => {
+            let k = (u - 0x1D6A8) % 58;
+            match k {
+                17 => 'Θ',
+                0..=24 => char::from_u32(0x391 + k).unwrap_or(c),
+                25 => '∇',
+                26..=50 => char::from_u32(0x3B1 + k - 26).unwrap_or(c),
+                51 => '∂',
+                _ => ['ϵ', 'ϑ', 'ϰ', 'ϕ', 'ϱ', 'ϖ'][(k - 52) as usize],
+            }
+        }
+        0x1D7CA => 'Ϝ',
+        0x1D7CB => 'ϝ',
+        // 5 digit sets of 10
+        0x1D7CE..=0x1D7FF => (b'0' + ((u - 0x1D7CE) % 10) as u8) as char,
         _ => c,
     }
 }
@@ -1600,6 +1697,39 @@ fn extract_page_text_items(
     output_options: &ExtractionOutputOptions,
     math_chars: &std::collections::HashSet<i32>,
 ) -> Result<Vec<TextItem>, LiteParseError> {
+    let args = (
+        page,
+        text_page,
+        view_box,
+        glyph_resolver,
+        output_options,
+        math_chars,
+    );
+    let (items, cal, tight) = extract_page_text_items_pass(args, None)?;
+    if !tight {
+        return Ok(items);
+    }
+    // A font set tighter than its space metric is only known once the page has shown a few
+    // of its spaces, so the words before that fused ("believeIamjust"); read the page once
+    // more with the calibration known from the start.
+    let (items, _, _) = extract_page_text_items_pass(args, Some(cal))?;
+    Ok(items)
+}
+
+type SpaceCal = std::collections::HashMap<String, Vec<f32>>;
+
+#[allow(clippy::type_complexity)]
+fn extract_page_text_items_pass(
+    (page, text_page, view_box, glyph_resolver, output_options, math_chars): (
+        &Page,
+        &TextPage,
+        &RectF,
+        Option<&dyn crate::GlyphResolver>,
+        &ExtractionOutputOptions,
+        &std::collections::HashSet<i32>,
+    ),
+    seed_cal: Option<SpaceCal>,
+) -> Result<(Vec<TextItem>, SpaceCal, bool), LiteParseError> {
     let ExtractionOutputOptions {
         emit_word_boxes,
         extract_text_metadata,
@@ -1609,7 +1739,7 @@ fn extract_page_text_items(
     } = *output_options;
     let char_count = text_page.char_count();
     if char_count <= 0 {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), SpaceCal::new(), false));
     }
 
     // Hard limit: gaps larger than this always cause a split (column breaks).
@@ -1621,8 +1751,10 @@ fn extract_page_text_items(
     // space-glyph metric, recover the genuine inter-word gap from the spaces
     // PDFium *does* emit for that font (normalized by rendered em height) and
     // feed it through the same threshold rule the metric path uses.
-    let mut font_space_cal: std::collections::HashMap<String, Vec<f32>> =
-        std::collections::HashMap::new();
+    let seeded = seed_cal.is_some();
+    let mut font_space_cal: SpaceCal = seed_cal.unwrap_or_default();
+    // a font whose printed spaces are tighter than its space metric (see the threshold below)
+    let mut tight_spacing = false;
 
     // Pre-scan: check if ALL text on this page is invisible (render mode 3)
     // — some scanned PDFs have an invisible OCR text layer as the only text,
@@ -1719,7 +1851,19 @@ fn extract_page_text_items(
                 0x1D => ('T', "h"),  // Th ligature
                 0x1E => ('f', "fi"), // ffi ligature
                 0x1F => ('f', "l"),  // fl ligature
-                _ => match char::from_u32(unicode) {
+                _ => match char::from_u32(unicode).or_else(|| {
+                    // PDFium reports a character outside the BMP (math alphanumerics
+                    // "𝐿𝑜𝑤 𝐵𝐴𝑉", emoji) as two UTF-16 halves; the low half that follows
+                    // is invalid on its own and skipped below
+                    if !(0xD800..0xDC00).contains(&unicode) || i + 1 >= char_count {
+                        return None;
+                    }
+                    let lo = text_page.char_at_unchecked(i + 1).unicode();
+                    if !(0xDC00..0xE000).contains(&lo) {
+                        return None;
+                    }
+                    char::from_u32(0x10000 + ((unicode - 0xD800) << 10) + (lo - 0xDC00))
+                }) {
                     Some(ch_mapped) => (ch_mapped, ""),
                     None => {
                         if debug {
@@ -1731,6 +1875,14 @@ fn extract_page_text_items(
             }
         };
         let c = normalize_punct(c);
+        let (c, ligature_tail) = if ligature_tail.is_empty()
+            && decoded.is_none()
+            && misdecoded_ti_ligature(text_page, i, char_count, c, &cv)
+        {
+            ('t', "i")
+        } else {
+            (c, ligature_tail)
+        };
 
         // Newlines: flush the current segment
         if c == '\n' || c == '\r' {
@@ -1858,10 +2010,16 @@ fn extract_page_text_items(
                     (Some(b), Some(last)) => (b - last).abs() > 0.4 * cur_h.min(last_h),
                     _ => false,
                 };
-            let line_changed = vp_strict.top > seg.last_char_bottom + y_tolerance
-                || (strict_below && large_backward_jump)
-                || very_large_backward_jump
-                || baseline_step;
+            // A mark sits above or below its base by design (Thai sara u, Arabic kasra under
+            // the line): only a far jump moves it to another line.
+            let line_changed = if is_combining_mark(c) {
+                very_large_backward_jump
+            } else {
+                vp_strict.top > seg.last_char_bottom + y_tolerance
+                    || (strict_below && large_backward_jump)
+                    || very_large_backward_jump
+                    || baseline_step
+            };
 
             // Dot leader detection: break at the boundary between dots and non-dots.
             // This prevents items like "Total . . . . 330,100" from merging.
@@ -1998,7 +2156,7 @@ fn extract_page_text_items(
                             let loose_gap = seg.loose_gap_to(&vp_strict, c);
                             if em_vp > 0.0 && loose_gap > 0.0 {
                                 let s = font_space_cal.entry(fk.clone()).or_default();
-                                if s.len() < 512 {
+                                if !seeded && s.len() < 512 {
                                     s.push(loose_gap / em_vp);
                                 }
                             }
@@ -2024,28 +2182,40 @@ fn extract_page_text_items(
                     .font_space_width
                     .map(|w| w * em_vp)
                     .unwrap_or(0.0);
-                let loose_gap = seg.loose_gap_to(&vp_strict, c);
+                // also from the next glyph's loose (advance) box: a "j" or "f" whose ink reaches
+                // back under the previous letter hid a word space ("am just" read 0.27pt)
+                let loose_gap = seg
+                    .loose_gap_to(&vp_strict, c)
+                    .max(seg.loose_gap_to(&vp_loose, c));
                 let both_alnum = c.is_ascii_alphanumeric()
                     && seg
                         .text
                         .chars()
                         .last()
                         .is_some_and(|p| p.is_ascii_alphanumeric());
+                // Empirically-recovered space width: the median genuine-space ratio for this
+                // font x em height, run through the same 0.7 factor as the metric path.
+                let calibrated = seg
+                    .font_name
+                    .as_ref()
+                    .and_then(|fk| font_space_cal.get(fk))
+                    .filter(|s| s.len() >= MIN_SPACE_CAL_SAMPLES)
+                    .and_then(|s| median_f32(s))
+                    .map(|ratio| 0.7 * ratio * em_vp);
                 let thresh = if space_w > 0.0 {
-                    0.7 * space_w
+                    // Tight setting squeezes word spaces below the font's space advance
+                    // (2.3pt gaps against a 4.2pt space fused "believeIamjust"); the spaces
+                    // the page does print say how wide its word spaces really are.
+                    match calibrated {
+                        Some(cal) if cal < 0.7 * space_w => {
+                            tight_spacing = true;
+                            cal
+                        }
+                        _ => 0.7 * space_w,
+                    }
                 } else {
-                    // No space-glyph metric. Prefer an empirically-recovered
-                    // space width (median genuine-space ratio for this font ×
-                    // em height) run through the same 0.7 factor as the metric
-                    // path; fall back to a fixed em fraction when we lack
+                    // No space-glyph metric: fall back to a fixed em fraction when we lack
                     // enough samples for the font.
-                    let calibrated = seg
-                        .font_name
-                        .as_ref()
-                        .and_then(|fk| font_space_cal.get(fk))
-                        .filter(|s| s.len() >= MIN_SPACE_CAL_SAMPLES)
-                        .and_then(|s| median_f32(s))
-                        .map(|ratio| 0.7 * ratio * em_vp);
                     calibrated.unwrap_or(0.35 * em_vp)
                 };
                 if both_alnum && thresh > 0.0 && loose_gap > thresh {
@@ -2115,7 +2285,7 @@ fn extract_page_text_items(
         );
     }
 
-    Ok(items)
+    Ok((items, font_space_cal, tight_spacing && !seeded))
 }
 
 /// Math spans for a page (see [`crate::tex_math`]), or None when the page
@@ -3531,6 +3701,20 @@ fn clamped_vertical_bounds(vp_loose: &RectF, vp_strict: &RectF) -> (f32, f32) {
     }
 }
 
+/// A line box far taller than the font's em (font size x matrix scale) comes from broken font
+/// metrics, not the glyph: a Word-embedded font whose 12pt body text gets 62pt loose boxes made
+/// each run cover four lines, and the overpaint dedupe then dropped most words of the paragraph.
+/// No real font reaches 3 em (Cambria Math's tall metrics are ~2.7 em), so above that the box is
+/// cut to a normal band around the baseline.
+fn em_clamped_bounds(top: f32, bottom: f32, em: Option<f32>, baseline: Option<f32>) -> (f32, f32) {
+    match (em.filter(|e| *e > 0.5), baseline) {
+        (Some(em), Some(bl)) if (bottom - top).abs() > 3.0 * em && top < bl && bl < bottom => {
+            (top.max(bl - 1.1 * em), bottom.min(bl + 0.35 * em))
+        }
+        _ => (top, bottom),
+    }
+}
+
 /// True when two items print on the same line, for the dedupe overpaint
 /// check. Overpainted layers share a baseline; adjacent lines 10pt apart
 /// must never dedupe even when a pathological loose box makes them overlap
@@ -3861,7 +4045,8 @@ impl SegmentBuilder {
         // pathological: clamped to ink, a lone period or math mark would drop
         // out of the line its neighbours' (equally tall) boxes define. Glyphs
         // joining a run are clamped in `push_char` (#486).
-        let (eff_top, eff_bottom) = (vp_loose.top, vp_loose.bottom);
+        let em = meta.scale_y.map(|sy| (meta.font_size * sy).abs());
+        let (eff_top, eff_bottom) = em_clamped_bounds(vp_loose.top, vp_loose.bottom, em, baseline);
         self.vp_left = vp_loose.left;
         self.vp_right = vp_loose.right;
         self.vp_top = eff_top;
@@ -4009,8 +4194,14 @@ impl SegmentBuilder {
             self.rtl_spans
                 .push((self.text.len(), vp_loose.left, vp_loose.right));
         }
-        // Same tall-glyph clamp as `start` (#486).
+        // Same tall-glyph clamp as `start` (#486), and the broken-metrics em clamp.
         let (eff_top, eff_bottom) = clamped_vertical_bounds(vp_loose, vp_strict);
+        let (eff_top, eff_bottom) = em_clamped_bounds(
+            eff_top,
+            eff_bottom,
+            self.font_height.map(f32::abs),
+            baseline,
+        );
         let eff_word_box = RectF {
             left: vp_loose.left,
             top: eff_top,
@@ -4022,13 +4213,20 @@ impl SegmentBuilder {
         self.vp_right = self.vp_right.max(vp_loose.right);
         self.vp_top = self.vp_top.min(eff_top);
         self.vp_bottom = self.vp_bottom.max(eff_bottom);
-        self.last_char_right = vp_strict.right;
-        self.last_char_loose_right = vp_loose.right;
-        self.last_char_left = vp_strict.left;
-        self.last_char_loose_left = vp_loose.left;
-        self.last_char_bottom = vp_strict.bottom;
-        self.last_char_baseline = baseline;
-        self.last_char_loose_height = (vp_loose.bottom - vp_loose.top).abs();
+        if is_combining_mark(c) {
+            // a mark is drawn over its base: the base's line metrics stay, and the next
+            // letter's gap is measured from the base, not from the narrow mark
+            self.last_char_right = self.last_char_right.max(vp_strict.right);
+            self.last_char_loose_right = self.last_char_loose_right.max(vp_loose.right);
+        } else {
+            self.last_char_right = vp_strict.right;
+            self.last_char_loose_right = vp_loose.right;
+            self.last_char_left = vp_strict.left;
+            self.last_char_loose_left = vp_loose.left;
+            self.last_char_bottom = vp_strict.bottom;
+            self.last_char_baseline = baseline;
+            self.last_char_loose_height = (vp_loose.bottom - vp_loose.top).abs();
+        }
         self.note_direction(c);
         self.char_count += 1;
         if self.extract_text_metadata {
@@ -4232,6 +4430,29 @@ impl SegmentBuilder {
 mod tests {
     use super::*;
     use std::f32::consts::PI;
+
+    #[test]
+    fn em_clamp_cuts_broken_metric_boxes_only() {
+        // 62pt loose box around a 12pt em line with baseline at 360: cut to a normal band
+        let (t, b) = em_clamped_bounds(300.0, 362.0, Some(12.0), Some(360.0));
+        assert!((t - 346.8).abs() < 0.01 && (b - 362.0).abs() < 0.01);
+        // a healthy 15pt box, or one with no em / baseline, is left alone
+        assert_eq!(
+            em_clamped_bounds(348.0, 363.0, Some(12.0), Some(360.0)),
+            (348.0, 363.0)
+        );
+        assert_eq!(
+            em_clamped_bounds(300.0, 362.0, None, Some(360.0)),
+            (300.0, 362.0)
+        );
+    }
+
+    #[test]
+    fn math_alphanumerics_fold_to_plain() {
+        let fold = |s: &str| s.chars().map(normalize_punct).collect::<String>();
+        assert_eq!(fold("𝐿𝑜𝑤 𝐵𝐴𝑉 = 𝑅𝑍𝑀𝑆"), "Low BAV = RZMS");
+        assert_eq!(fold("𝐱 𝔸 𝟙𝟚 𝛼𝛽 𝚺 ∂"), "x A 12 αβ Σ ∂");
+    }
 
     #[test]
     fn encode_pixels_png_infers_color_type() {
