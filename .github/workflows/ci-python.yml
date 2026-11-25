@@ -93,6 +93,29 @@ jobs:
             target
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-python-${{ hashFiles('**/Cargo.lock') }}
 
+      # tesseract-rs's build script compiles leptonica + tesseract from C/C++ source and keeps
+      # the result outside target/, so the cargo cache above never covers it and every build
+      # recompiled it (4-10 min on macOS Intel, even on a cargo cache hit). Keyed on the
+      # tesseract-rs version alone, so ordinary Cargo.lock changes still hit. Linux wheels
+      # build inside the manylinux / Alpine containers, which do not use this directory.
+      - name: Read tesseract-rs version
+        if: runner.os != 'Linux'
+        id: tesseract-rs
+        shell: bash
+        run: |
+          v=$(grep -A1 '^name = "tesseract-rs"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Cache tesseract-rs build
+        if: runner.os != 'Linux'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/Library/Application Support/tesseract-rs
+            ~/AppData/Roaming/tesseract-rs
+          key: tesseract-rs-${{ matrix.os }}-${{ matrix.target }}-${{ steps.tesseract-rs.outputs.version }}
+
       - name: Stage pdfium for wheel inclusion
         if: ${{ !matrix.musl }}
         shell: bash
