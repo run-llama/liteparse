@@ -17,8 +17,7 @@ on:
         default: false
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -324,6 +323,9 @@ jobs:
           path: dist/${{ matrix.artifact }}.tar.gz
 
   publish:
+    permissions:
+      contents: write
+      id-token: write
     needs: [test-bindings, build-cli]
     runs-on: ubuntu-latest
     name: Publish & Release

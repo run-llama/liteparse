@@ -13,8 +13,7 @@ on:
         default: false
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -348,6 +347,10 @@ jobs:
           path: dist/${{ matrix.artifact }}.tar.gz
 
   publish:
+    permissions:
+      contents: write
+      id-token: write
+    environment: release
     needs: [test-wheels, build-sdist, build-cli]
     runs-on: ubuntu-latest
     name: Publish & Release

@@ -13,8 +13,7 @@ on:
         default: false
 
 permissions:
-  contents: write
-  actions: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,6 +33,7 @@ jobs:
           echo "Version validated: ${{ inputs.version }}"
 
   publish-crates:
+    environment: release
     needs: validate
     if: ${{ !inputs.dry-run }}
     runs-on: ubuntu-latest
@@ -198,6 +198,8 @@ jobs:
           if-no-files-found: error
 
   github-release:
+    permissions:
+      contents: write
     needs: [build-binaries, publish-crates]
     if: ${{ always() && needs.build-binaries.result == 'success' && (needs.publish-crates.result == 'success' || needs.publish-crates.result == 'skipped') }}
     runs-on: ubuntu-latest

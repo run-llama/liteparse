@@ -17,8 +17,7 @@ on:
         default: false
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -83,6 +82,9 @@ jobs:
           if-no-files-found: error
 
   publish:
+    permissions:
+      contents: write
+      id-token: write
     needs: build
     runs-on: ubuntu-latest
     name: Publish to npm
