@@ -94,6 +94,9 @@ pub struct LiteParseConfig {
     pub output_format: OutputFormat,
     /// Keep very small text that would normally be filtered out.
     pub preserve_very_small_text: bool,
+    /// Fold typographic quotes and dashes to ASCII in native PDF text. Default true.
+    #[serde(default = "default_true")]
+    pub normalize_punctuation: bool,
     /// Password for encrypted/protected documents.
     pub password: Option<String>,
     /// Suppress progress output.
@@ -421,6 +424,7 @@ impl Default for LiteParseConfig {
             dpi: None,
             output_format: OutputFormat::Json,
             preserve_very_small_text: false,
+            normalize_punctuation: true,
             password: None,
             quiet: false,
             num_workers: default_num_workers(),

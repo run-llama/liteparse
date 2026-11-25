@@ -1288,6 +1288,8 @@ struct PyLiteParseConfig {
     table_model: Option<String>,
     keep_clipped_text: bool,
     #[pyo3(get)]
+    normalize_punctuation: bool,
+    #[pyo3(get)]
     extract_annotations: bool,
     #[pyo3(get)]
     extract_form_fields: bool,
@@ -1383,6 +1385,7 @@ impl PyLiteParseConfig {
             keep_headers_footers: cfg.keep_headers_footers,
             table_model: cfg.table_model.clone(),
             keep_clipped_text: cfg.keep_clipped_text,
+            normalize_punctuation: cfg.normalize_punctuation,
             extract_annotations: cfg.extract_annotations,
             extract_form_fields: cfg.extract_form_fields,
             extract_structure_tree: cfg.extract_structure_tree,
@@ -1531,6 +1534,7 @@ impl LiteParse {
         keep_headers_footers = None,
         table_model = None,
         keep_clipped_text = None,
+        normalize_punctuation = None,
         extract_annotations = None,
         extract_form_fields = None,
         extract_structure_tree = None,
@@ -1577,6 +1581,7 @@ impl LiteParse {
         keep_headers_footers: Option<bool>,
         table_model: Option<String>,
         keep_clipped_text: Option<bool>,
+        normalize_punctuation: Option<bool>,
         extract_annotations: Option<bool>,
         extract_form_fields: Option<bool>,
         extract_structure_tree: Option<bool>,
@@ -1676,6 +1681,9 @@ impl LiteParse {
         }
         if let Some(v) = keep_clipped_text {
             cfg.keep_clipped_text = v;
+        }
+        if let Some(v) = normalize_punctuation {
+            cfg.normalize_punctuation = v;
         }
         if let Some(v) = extract_annotations {
             cfg.extract_annotations = v;
