@@ -17,6 +17,8 @@ on:
       - "Cargo.lock"
       - "packages/node/**"
       - ".github/workflows/ci-node.yml"
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read

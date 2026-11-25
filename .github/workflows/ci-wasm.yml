@@ -23,6 +23,8 @@ on:
       - 'scripts/edge-compat/**'
       - '.cargo/**'
       - '.github/workflows/ci-wasm.yml'
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read

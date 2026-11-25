@@ -17,6 +17,8 @@ on:
       - "Cargo.lock"
       - "packages/python/**"
       - ".github/workflows/ci-python.yml"
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
