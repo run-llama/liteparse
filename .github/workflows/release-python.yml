@@ -381,10 +381,12 @@ jobs:
 
       - name: Publish to PyPI
         if: ${{ !inputs.dry-run }}
+        # PyPI trusted publishing (OIDC): no API token. PyPI trusts run-llama/liteparse,
+        # release-python.yml, environment `release`; the job's id-token: write mints a
+        # short-lived upload credential, and the action attaches attestations.
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           packages-dir: dist/
-          password: ${{ secrets.PYPI_TOKEN }}
           skip-existing: true
 
       - name: Create git tag
