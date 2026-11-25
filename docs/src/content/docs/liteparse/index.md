@@ -9,7 +9,7 @@ LiteParse is an open-source document parsing library that parses text with spati
 
 LiteParse is designed specifically for use cases that require fast, accurate text parsing: real-time applications, coding agents, and local workflows. It provides a simple CLI and library API for parsing PDFs, Office documents, and images, with built-in OCR support.
 
-<img src="https://github.com/user-attachments/assets/07ba6a82-6bb1-4dea-b0ef-cad7df7d1622" alt="out">
+<img src="https://github.com/user-attachments/assets/67830896-4705-4051-9bdd-aa2d88fbb63f" alt="out">
 
 ## What can LiteParse do?
 
