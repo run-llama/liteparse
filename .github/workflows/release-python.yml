@@ -348,6 +348,7 @@ jobs:
           path: dist/${{ matrix.artifact }}.tar.gz
 
   publish:
+    environment: release
     needs: [test-wheels, build-sdist, build-cli]
     runs-on: ubuntu-latest
     name: Publish & Release

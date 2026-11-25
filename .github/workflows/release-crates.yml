@@ -34,6 +34,7 @@ jobs:
           echo "Version validated: ${{ inputs.version }}"
 
   publish-crates:
+    environment: release
     needs: validate
     if: ${{ !inputs.dry-run }}
     runs-on: ubuntu-latest
