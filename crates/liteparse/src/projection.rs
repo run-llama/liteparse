@@ -4348,6 +4348,8 @@ fn xy_find_column_cut(
         let mut n = peaks.len();
         let mut covered_sum = vec![0.0f32; n];
         let mut band_count = vec![0usize; n];
+        // Bands a column's text fills (wrapped prose lines reach the next column's start)
+        let mut full_bands = vec![0usize; n];
         // Bands where everything in the column is display math or an
         // equation number (`math_bands`), or that plus formula fragments the
         // math pass left as text (`formula_bands`).
@@ -4391,8 +4393,12 @@ fn xy_find_column_cut(
                         max_x - peaks[c].0
                     };
                     if col_w > 1.0 {
-                        covered_sum[c] += ((hi_x[c] - lo_x[c]) / col_w).min(1.0);
+                        let cover = ((hi_x[c] - lo_x[c]) / col_w).min(1.0);
+                        covered_sum[c] += cover;
                         band_count[c] += 1;
+                        if cover >= 0.85 {
+                            full_bands[c] += 1;
+                        }
                         if all_math[c] {
                             math_bands[c] += 1;
                         }
@@ -4506,7 +4512,12 @@ fn xy_find_column_cut(
             *tabular = true;
             return None;
         }
-        if avg_fill.is_finite() && avg_fill < XY_COLUMN_MIN_FILL {
+        // Two columns of wrapped prose with many short lines (legal notices, forms in prose:
+        // "A.- TITULAR" between paragraphs) average a table's fill, but a table column's cells
+        // rarely run the full slot width, line after line, as wrapped text does in both.
+        let wrapped =
+            n == 2 && (0..2).all(|c| full_bands[c] >= 2 && full_bands[c] * 10 >= band_count[c]);
+        if !wrapped && avg_fill.is_finite() && avg_fill < XY_COLUMN_MIN_FILL {
             *tabular = true;
             return None;
         }
