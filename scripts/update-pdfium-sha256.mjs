@@ -29,7 +29,8 @@ async function withRetries(what, fn) {
     try {
       return await fn();
     } catch (e) {
-      if (attempt === ATTEMPTS) throw new Error(`${what}: ${e.message} (after ${ATTEMPTS} attempts)`);
+      if (attempt === ATTEMPTS)
+        throw new Error(`${what}: ${e.message} (after ${ATTEMPTS} attempts)`);
       console.error(`update-pdfium-sha256: ${what}: ${e.message}; retrying in ${delayMs / 1000}s`);
       await new Promise((resolve) => setTimeout(resolve, delayMs));
       delayMs *= 2;
@@ -57,7 +58,12 @@ const encodedTag = encodeURIComponent(tag);
 let digests = new Map();
 try {
   const release = await withRetries("release lookup", async () =>
-    (await get(`https://api.github.com/repos/${RELEASES}/releases/tags/${encodedTag}`, "application/vnd.github+json")).json(),
+    (
+      await get(
+        `https://api.github.com/repos/${RELEASES}/releases/tags/${encodedTag}`,
+        "application/vnd.github+json"
+      )
+    ).json()
   );
   for (const asset of release.assets ?? []) {
     if (typeof asset.digest === "string" && asset.digest.startsWith("sha256:")) {
@@ -76,7 +82,7 @@ for (const stem of stems) {
     const url = `https://github.com/${RELEASES}/releases/download/${encodedTag}/${asset}`;
     try {
       const bytes = await withRetries(`download ${asset}`, async () =>
-        Buffer.from(await (await get(url, "application/octet-stream")).arrayBuffer()),
+        Buffer.from(await (await get(url, "application/octet-stream")).arrayBuffer())
       );
       sha256 = createHash("sha256").update(bytes).digest("hex");
     } catch (e) {
@@ -87,9 +93,14 @@ for (const stem of stems) {
   hashes.set(stem, sha256);
 }
 
-let updated = source.replace(rowPattern, (_, indent, stem) => `${indent}("${stem}", "${hashes.get(stem)}"),`);
+let updated = source.replace(
+  rowPattern,
+  (_, indent, stem) => `${indent}("${stem}", "${hashes.get(stem)}"),`
+);
 const tagLine = /const PDFIUM_SHA256_TAG: &str = "[^"]+";/;
 if (!tagLine.test(updated)) fail("PDFIUM_SHA256_TAG not found in crates/pdfium-sys/build.rs");
 updated = updated.replace(tagLine, `const PDFIUM_SHA256_TAG: &str = "${tag}";`);
 writeFileSync(BUILD_RS, updated);
-console.log(`update-pdfium-sha256: ${stems.length} hashes for ${tag} written to crates/pdfium-sys/build.rs`);
+console.log(
+  `update-pdfium-sha256: ${stems.length} hashes for ${tag} written to crates/pdfium-sys/build.rs`
+);
