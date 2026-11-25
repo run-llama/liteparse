@@ -17,6 +17,8 @@ on:
       - "Cargo.lock"
       - "packages/node/**"
       - ".github/workflows/ci-node.yml"
+  # No paths filter here: in the merge queue this workflow always runs, so its
+  # required checks report for every queued PR.
   merge_group:
     types: [checks_requested]
 

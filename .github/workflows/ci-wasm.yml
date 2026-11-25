@@ -23,6 +23,8 @@ on:
       - 'scripts/edge-compat/**'
       - '.cargo/**'
       - '.github/workflows/ci-wasm.yml'
+  # No paths filter here: in the merge queue this workflow always runs, so its
+  # required checks report for every queued PR.
   merge_group:
     types: [checks_requested]
 
