@@ -15,6 +15,13 @@ env:
   CARGO_TERM_COLOR: always
   SKIP_INTEGRATION_TESTS: yes
 
+# A new push to a pull request cancels that PR's older run of this workflow. Pushes to
+# main and merge-queue runs get a group of their own (run_id), so they never queue
+# behind or cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   fmt:
     runs-on: ubuntu-latest
