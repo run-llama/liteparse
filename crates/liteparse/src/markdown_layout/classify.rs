@@ -871,14 +871,41 @@ fn classify_region(
     // the rest, since the loop below skips the span. Handing back lines no
     // cell took a word from cannot help when every line shares a word with
     // the cells, so such a run is read as text: every value kept, no grid.
-    let table_runs: Vec<_> = merge_table_runs(ruled_runs, borderless_runs)
+    let (table_runs, vetoed): (Vec<_>, Vec<_>) = merge_table_runs(ruled_runs, borderless_runs)
         .into_iter()
         .filter(|run| super::tables::run_text_kept(run, lines).is_none_or(|kept| kept >= 0.7))
-        .filter(|run| {
+        .partition(|run| {
             heuristic != HeuristicTables::Smart
                 || !model_vetoes_table(page, &lines[run.start..run.end])
+        });
+    // A vetoed grid of side-by-side text lists reads column by column, not across the gutter
+    // (once: the reordered lines are not reordered again).
+    thread_local! {
+        static REORDERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if let Some(reordered) = (!REORDERED.with(|r| r.get()))
+        .then(|| {
+            vetoed
+                .iter()
+                .find_map(|run| vetoed_columns_reordered(lines, run))
         })
-        .collect();
+        .flatten()
+    {
+        REORDERED.with(|r| r.set(true));
+        let blocks = classify_region(
+            &reordered,
+            interruptions,
+            page,
+            rule_segments,
+            heading_map,
+            outline,
+            toc_page,
+            debug,
+            None,
+        );
+        REORDERED.with(|r| r.set(false));
+        return blocks;
+    }
 
     // Region-wide pre-pass: which line indices carry a lettered/roman marker
     // (`a.`, `i.`) that belongs to a confirmed sequential list run. Only these
@@ -2564,6 +2591,71 @@ mod tests {
 }
 
 /// `line` cut down to the spans in `rest` (text and box rebuilt from them); `None` when empty.
+/// A heuristic table the layout model vetoed that is side-by-side text lists ("Common conditions
+/// treated" | "Treatment techniques"): each of its lines spans both lists, so the vetoed lines read
+/// across the gutter ("Arthritis & Joint Pain Bracing & Custom Splinting ..."). Split the lines at
+/// the gutters (gaps of 8pt or more in the union of the run's spans) and return the region's lines
+/// with the run's text column by column. None when a column is mostly numbers (label / value
+/// panels read row by row) or holds a single line.
+fn vetoed_columns_reordered(
+    lines: &[ProjectedLine],
+    run: &super::tables::TableRun,
+) -> Option<Vec<ProjectedLine>> {
+    let rl = lines.get(run.start..run.end)?;
+    if rl.len() < 2 {
+        return None;
+    }
+    let mut iv: Vec<(f32, f32)> = rl
+        .iter()
+        .flat_map(|l| l.spans.iter())
+        .filter(|sp| !sp.text.trim().is_empty())
+        .map(|sp| (sp.x, sp.x + sp.width))
+        .collect();
+    iv.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut cuts: Vec<f32> = Vec::new();
+    let mut reach = f32::NEG_INFINITY;
+    for &(a, b) in &iv {
+        if reach.is_finite() && a - reach >= 8.0 {
+            cuts.push((a + reach) / 2.0);
+        }
+        reach = reach.max(b);
+    }
+    if cuts.is_empty() {
+        return None;
+    }
+    let mut cols: Vec<Vec<ProjectedLine>> = vec![Vec::new(); cuts.len() + 1];
+    for line in rl {
+        let mut parts: Vec<Vec<TextItem>> = vec![Vec::new(); cuts.len() + 1];
+        for sp in &line.spans {
+            let cx = sp.x + sp.width / 2.0;
+            parts[cuts.partition_point(|&c| c < cx)].push(sp.clone());
+        }
+        for (c, part) in parts.into_iter().enumerate() {
+            if let Some(l) = residual_line(line, part) {
+                cols[c].push(l);
+            }
+        }
+    }
+    let numeric = |t: &str| {
+        let n = t.chars().filter(|c| !c.is_whitespace()).count().max(1);
+        t.chars()
+            .filter(|c| c.is_ascii_digit() || matches!(c, '.' | ',' | '%' | '$' | '-' | '€'))
+            .count()
+            * 2
+            >= n
+    };
+    if cols
+        .iter()
+        .any(|c| c.len() < 2 || c.iter().filter(|l| numeric(&l.text)).count() * 2 >= c.len())
+    {
+        return None;
+    }
+    let mut out: Vec<ProjectedLine> = lines[..run.start].to_vec();
+    out.extend(cols.into_iter().flatten());
+    out.extend_from_slice(&lines[run.end..]);
+    Some(out)
+}
+
 fn residual_line(line: &ProjectedLine, rest: Vec<TextItem>) -> Option<ProjectedLine> {
     if rest.iter().all(|sp| sp.text.trim().is_empty()) {
         return None;
