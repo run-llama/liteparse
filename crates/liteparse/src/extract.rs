@@ -1643,6 +1643,7 @@ fn extract_page_text_items(
     }
 
     let clips = crate::text_clip::TextClip::new(page, text_page, keep_clipped_text);
+    let paint = crate::text_paint::TextPaint::new(page, view_box);
     let page_rotation = page.rotation();
     let vp_xform = page.viewport_transform(view_box);
     let mut items: Vec<TextItem> = Vec::new();
@@ -1660,7 +1661,7 @@ fn extract_page_text_items(
             ch: &ch,
             rec: char_chunks.as_mut().and_then(|chunks| chunks.record(i)),
         };
-        if clips.hides(i) || math_chars.contains(&i) {
+        if clips.hides(i) || paint.hides(&cv) || math_chars.contains(&i) {
             seg.flush(&mut items);
             continue;
         }
