@@ -6,11 +6,10 @@ use std::process::Command;
 const PDFIUM_RELEASE_TAG: &str = "chromium/8172";
 const PDFIUM_RELEASE_URL: &str = "https://github.com/run-llama/pdfium-binaries/releases/download";
 
-/// The release `PDFIUM_SHA256` describes. Keep it equal to `PDFIUM_RELEASE_TAG`:
-/// when moving to a new release, update both, plus every hash below. The
-/// sha256 of each asset is on the release page, or from
-/// `gh api repos/run-llama/pdfium-binaries/releases/tags/<tag, / as %2F>
-/// --jq '.assets[] | "\(.name) \(.digest)"'`.
+/// The release `PDFIUM_SHA256` describes; it must equal `PDFIUM_RELEASE_TAG`.
+/// `node scripts/update-pdfium-sha256.mjs` rewrites it and every hash below
+/// for the current `PDFIUM_RELEASE_TAG`. Renovate runs it when it bumps the
+/// tag; after changing the tag by hand, run it yourself.
 const PDFIUM_SHA256_TAG: &str = "chromium/8172";
 
 /// sha256 of each `<asset>.tgz` in the `PDFIUM_SHA256_TAG` release. A download
@@ -233,8 +232,8 @@ fn expected_sha256(stem: &str) -> &'static str {
     if PDFIUM_SHA256_TAG != PDFIUM_RELEASE_TAG {
         panic!(
             "pdfium-sys: PDFIUM_SHA256 lists hashes for {PDFIUM_SHA256_TAG} but \
-             PDFIUM_RELEASE_TAG is {PDFIUM_RELEASE_TAG}; update PDFIUM_SHA256_TAG and \
-             every hash in PDFIUM_SHA256 in crates/pdfium-sys/build.rs"
+             PDFIUM_RELEASE_TAG is {PDFIUM_RELEASE_TAG}; run \
+             `node scripts/update-pdfium-sha256.mjs` to refresh them"
         );
     }
     PDFIUM_SHA256
