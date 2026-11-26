@@ -694,6 +694,7 @@ impl Grid {
         };
         let mut occupied = vec![false; nr * nc];
         let mut crossed = vec![false; nr * nc]; // boundary right of slot (r, c) has text across it
+        let mut crossed_h = vec![false; nr * nc]; // boundary below slot (r, c) has text across it
         for (b, _) in &pieces {
             if let Some((r, c)) = slot_of(b) {
                 occupied[r * nc + c] = true;
@@ -702,8 +703,16 @@ impl Grid {
                         crossed[r * nc + k - 1] = true;
                     }
                 }
+                for (k, (y, _)) in ys.iter().enumerate().skip(1).take(nr - 1) {
+                    if b[1] < *y && *y < b[3] {
+                        crossed_h[(k - 1) * nc + c] = true;
+                    }
+                }
             }
         }
+        let box_col: Vec<bool> = (0..nc)
+            .map(|c| (1..nr).all(|k| covers(&ys[k].1, xs[c].0, xs[c + 1].0) < 0.5))
+            .collect();
         // slots joined where the rule between them is (mostly) missing
         let mut parent: Vec<usize> = (0..nr * nc).collect();
         fn root(p: &mut [usize], mut k: usize) -> usize {
@@ -713,7 +722,7 @@ impl Grid {
             }
             k
         }
-        let mut join = |p: &mut Vec<usize>, a: usize, b: usize| {
+        let join = |p: &mut Vec<usize>, a: usize, b: usize| {
             let (ra, rb) = (root(p, a), root(p, b));
             if ra != rb {
                 p[ra.max(rb)] = ra.min(rb);
@@ -727,7 +736,16 @@ impl Grid {
                 {
                     join(&mut parent, r * nc + c, r * nc + c + 1);
                 }
-                if r + 1 < nr && covers(&ys[r + 1].1, xs[c].0, xs[c + 1].0) < 0.5 {
+                // likewise a missing horizontal segment between two slots each holding their own
+                // text, in a column with no row line at all (a column drawn as one box, the row
+                // lines stopping at its edge); elsewhere a missing segment is a spanned cell
+                if r + 1 < nr
+                    && !(box_col[c]
+                        && occupied[r * nc + c]
+                        && occupied[(r + 1) * nc + c]
+                        && !crossed_h[r * nc + c])
+                    && covers(&ys[r + 1].1, xs[c].0, xs[c + 1].0) < 0.5
+                {
                     join(&mut parent, r * nc + c, (r + 1) * nc + c);
                 }
             }
@@ -813,17 +831,23 @@ impl Grid {
                 .push(ls.iter().map(|l| l.0).collect());
         }
         for cells in band_lines.values() {
-            let k = cells[0].len();
-            if cells.len() >= 3
-                && k >= 2
-                && cells.iter().all(|ys| {
-                    ys.len() == k
-                        && ys
-                            .iter()
-                            .zip(&cells[0])
-                            .all(|(a, b)| (a - b).abs() < 0.5 * lh)
+            // most of the band's cells (a marker column of one glyph per row aside): the
+            // multi-line cell holding the most lines sets the pattern
+            let Some(lead) = cells
+                .iter()
+                .filter(|ys| ys.len() >= 2)
+                .max_by_key(|ys| ys.len())
+            else {
+                continue;
+            };
+            let k = lead.len();
+            let lockstep = cells
+                .iter()
+                .filter(|ys| {
+                    ys.len() == k && ys.iter().zip(lead).all(|(a, b)| (a - b).abs() < 0.5 * lh)
                 })
-            {
+                .count();
+            if cells.len() >= 3 && lockstep >= 3 && lockstep * 4 >= cells.len() * 3 {
                 return None;
             }
         }
@@ -975,10 +999,94 @@ impl Grid {
     }
 
     /// Rotated text inside an upright table (column headers set sideways, "Ezzitounna" /
-    /// "La Manouba" over narrow columns) is left out of the model's units; each such unit whose
-    /// centre lies in a column's span, overlapping a row's band, fills that cell if the model left
-    /// it empty, its lines in reading order (text running up stacks left to right). Returns the units placed.
+    /// "La Manouba" over narrow columns) is left out of the model's units; each such unit
+    /// fills the cell under it if the model left that cell empty ([`Grid::place_items`]), its
+    /// lines in reading order (text running up stacks left to right). Returns the units placed.
     pub fn place_rotated(&mut self, units: &[super::units::Unit], minor: &[bool]) -> Vec<usize> {
+        let items: Vec<(usize, [f64; 4], String, f64)> = units
+            .iter()
+            .enumerate()
+            // header words, not stray sideways digits and punctuation
+            .filter(|(i, u)| {
+                minor[*i] && u.q != 0 && u.text.chars().filter(|c| c.is_alphabetic()).count() >= 3
+            })
+            .map(|(i, u)| {
+                let cx = (u.pbox[0] + u.pbox[2]) / 2.0;
+                (i, u.pbox, u.text.clone(), if u.q == 3 { -cx } else { cx })
+            })
+            .collect();
+        self.place_items(&items)
+    }
+
+    /// OCR text inside a table on a page with a text layer (a column drawn as outlines or
+    /// pictures: "10 kW" beside native "5 | YES | 3977") is not among the model's units; each
+    /// item fills the empty cell under it ([`Grid::place_items`]). Returns the items placed.
+    pub fn place_ocr(&mut self, items: &[([f64; 4], String)]) -> Vec<usize> {
+        // only a column the text layer leaves (almost) empty below its header: OCR text over a
+        // table whose box takes in a chart (axis ticks, a legend) must not scatter into the gaps
+        // of columns that hold native text
+        let body: Vec<usize> = (0..self.n_rows)
+            .filter(|r| !self.head_rows.contains(r))
+            .collect();
+        let empty_col: Vec<bool> = (0..self.n_cols)
+            .map(|c| {
+                let filled = body
+                    .iter()
+                    .filter(|&&r| {
+                        self.cells.iter().any(|x| {
+                            x.r0 <= r
+                                && r <= x.r1
+                                && x.c0 <= c
+                                && c <= x.c1
+                                && !x.text.trim().is_empty()
+                        })
+                    })
+                    .count();
+                !body.is_empty() && filled * 5 <= body.len()
+            })
+            .collect();
+        if !empty_col.iter().any(|&e| e) {
+            return Vec::new();
+        }
+        let before: Vec<bool> = self
+            .cells
+            .iter()
+            .map(|c| !c.text.trim().is_empty())
+            .collect();
+        let items: Vec<(usize, [f64; 4], String, f64)> = items
+            .iter()
+            .enumerate()
+            .map(|(i, (b, t))| (i, *b, t.clone(), b[0]))
+            .collect();
+        let placed = self.place_items(&items);
+        // undo what landed outside the empty columns
+        let mut keep = Vec::new();
+        for (k, c) in self.cells.iter_mut().enumerate() {
+            let was = before.get(k).copied().unwrap_or(false);
+            if !was && !c.text.trim().is_empty() && !(c.c0..=c.c1).any(|q| empty_col[q]) {
+                c.text.clear();
+            }
+        }
+        for i in placed {
+            let b = items[i].1;
+            let cx = (b[0] + b[2]) / 2.0;
+            if self.cells.iter().any(|c| {
+                !c.text.trim().is_empty()
+                    && c.bx[0] <= cx
+                    && cx <= c.bx[2]
+                    && (c.c0..=c.c1).any(|q| empty_col[q])
+            }) {
+                keep.push(i);
+            }
+        }
+        keep
+    }
+
+    /// Place `(id, page box, text, order)` items into the cells under them: the column whose span
+    /// (from its one-column filled cells) holds the item's centre, the row whose band it overlaps
+    /// most; only cells the model left empty (text over a filled cell belongs to a column the grid
+    /// lost), several items in one cell joined by `order`. Returns the ids placed.
+    fn place_items(&mut self, items: &[(usize, [f64; 4], String, f64)]) -> Vec<usize> {
         let span = |pick: &dyn Fn(&GridCell) -> Option<usize>, n: usize, lo: usize, hi: usize| {
             let mut v = vec![(f64::INFINITY, f64::NEG_INFINITY); n];
             for c in &self.cells {
@@ -991,12 +1099,8 @@ impl Grid {
         let cols = span(&|c| (c.c0 == c.c1).then_some(c.c0), self.n_cols, 0, 2);
         let rows = span(&|c| (c.r0 == c.r1).then_some(c.r0), self.n_rows, 1, 3);
         let mut slots: Vec<((usize, usize), f64, usize)> = Vec::new();
-        for (i, u) in units.iter().enumerate() {
-            // header words, not stray sideways digits and punctuation
-            if !minor[i] || u.q == 0 || u.text.chars().filter(|c| c.is_alphabetic()).count() < 3 {
-                continue;
-            }
-            let p = u.pbox;
+        for (k, (_, p, _, order)) in items.iter().enumerate() {
+            let p = *p;
             let cx = (p[0] + p[2]) / 2.0;
             let Some(c) = cols.iter().position(|&(a, b)| a <= cx && cx <= b) else {
                 continue;
@@ -1008,8 +1112,7 @@ impl Grid {
             else {
                 continue;
             };
-            let order = if u.q == 3 { -cx } else { cx };
-            slots.push(((r, c), order, i));
+            slots.push(((r, c), *order, k));
         }
         slots.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
         // only into cells the model left empty: rotated text over a cell that holds text belongs
@@ -1020,8 +1123,9 @@ impl Grid {
             .map(|c| !c.text.trim().is_empty())
             .collect();
         let mut placed = Vec::new();
-        for ((r, c), _, i) in slots {
-            let (t, p) = (units[i].text.trim(), units[i].pbox);
+        for ((r, c), _, k) in slots {
+            let (i, p, t, _) = &items[k];
+            let (i, p, t) = (*i, *p, t.trim());
             if self
                 .cells
                 .iter()

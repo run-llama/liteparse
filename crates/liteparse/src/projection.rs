@@ -1185,6 +1185,11 @@ struct ProjDumpItem {
     px: usize,
     #[serde(skip)]
     faint: bool,
+    /// word boxes as (x0, x1, text), for the table model's units on OCR pages
+    #[serde(skip)]
+    words: Vec<(f32, f32, String)>,
+    #[serde(skip)]
+    ocr: bool,
 }
 
 thread_local! {
@@ -1230,6 +1235,10 @@ pub struct ProjSignalItem {
     pub block: usize,
     /// from an ocria-nano faint-token read (`TextItem::ocr_faint`)
     pub faint: bool,
+    /// the item's word boxes as (x0, x1, text), in the box's frame
+    pub words: Vec<(f32, f32, String)>,
+    /// read by OCR (on a page with a text layer: picture or outline text)
+    pub ocr: bool,
 }
 
 thread_local! {
@@ -3093,6 +3102,13 @@ fn project_to_grid(
                     cc: m.center_count,
                     px: m.projected_x,
                     faint: item.item.ocr_faint,
+                    words: item
+                        .item
+                        .words
+                        .iter()
+                        .map(|w| (w.x, w.x + w.width, w.text.clone()))
+                        .collect(),
+                    ocr: item.item.confidence.is_some(),
                 };
                 PROJ_DUMP.with(|d| d.borrow_mut().push(rec));
             }
@@ -5324,6 +5340,8 @@ fn dump_projection(page: &Page, items: &[ProjectedTextItem], regions: &Region) {
                     snap: r.snap.chars().next().unwrap_or(' '),
                     block: r.block,
                     faint: r.faint,
+                    words: r.words.clone(),
+                    ocr: r.ocr,
                 })
                 .collect(),
             leaves: leaf_items

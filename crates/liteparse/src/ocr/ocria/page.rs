@@ -56,6 +56,22 @@ pub fn looks_sideways(boxes: &[Quad]) -> bool {
     boxes.len() >= 15 && (long_lines(boxes) as f64) < 0.25 * boxes.len() as f64
 }
 
+/// Most boxes standing upright (taller than 1.5x their width): the lines of a page turned a
+/// quarter, as the detector finds them; a sparse page (a plot's axis labels, a short form) has
+/// too few boxes for [`looks_sideways`].
+pub fn mostly_tall(boxes: &[Quad]) -> bool {
+    let tall = boxes
+        .iter()
+        .filter(|q| {
+            let (xs, ys) = (q.iter().map(|p| p[0]), q.iter().map(|p| p[1]));
+            let w = xs.clone().fold(f32::NEG_INFINITY, f32::max) - xs.fold(f32::INFINITY, f32::min);
+            let h = ys.clone().fold(f32::NEG_INFINITY, f32::max) - ys.fold(f32::INFINITY, f32::min);
+            h > 1.5 * w
+        })
+        .count();
+    boxes.len() >= 4 && tall * 10 >= boxes.len() * 4
+}
+
 /// A box quad (screen order in the image it was read in) as a quad in the original image
 /// whose corners run in reading order: upside-down pages swap corners; pages read after a
 /// quarter turn map back with x = w0 - 1 - y', y = x'.
