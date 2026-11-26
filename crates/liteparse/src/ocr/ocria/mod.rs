@@ -58,7 +58,7 @@ pub const ROUTER_FILE: &str = "router.onnx";
 /// The detector's recommended thresholds, `{"thresh": .., "merge": ..}` (optional).
 pub const DETECTOR_META_FILE: &str = "det.meta.json";
 /// `(text, confidence)` per box, whether the page was read upside down, the page's script group.
-type PageReads = (Vec<(String, f32)>, bool, usize);
+type PageReads = (Vec<rec::Read>, bool, usize);
 
 /// A faint candidate ([`det::Faint`]) is kept only at this confidence. Rule fragments and
 /// specks read as "|", "l" or a letter pair at 0.5-0.7; the lone "1"s of issue #615 read at 0.97+.
@@ -359,22 +359,31 @@ impl OcriaEngine {
         }
         let (mut boxes, mut faint) = self.det.detect_with_faint(&img0)?;
         let mut sideways = false;
+        let mut flip_hint: Option<bool> = None;
         let turned;
         let mut img = &img0;
-        if self.opts.orient && page::looks_sideways(&boxes) {
+        let tall = page::mostly_tall(&boxes);
+        if self.opts.orient && (page::looks_sideways(&boxes) || tall) {
             // maybe a page scanned on its side: detect again a quarter turn counter-clockwise and
             // keep that when it finds far more lines (the router's flip vote finishes 270 deg)
             turned = img0.rot90(1);
             let tboxes = self.det.detect(&turned)?;
             // a numeric table also has few long boxes, and turned, each stacked column of numbers
             // reads as one long line: the turn must also read better, not only find longer boxes
-            if page::long_lines(&tboxes) > 2 * page::long_lines(&boxes) + 5
-                && self.sample_conf(&turned, &tboxes)? > self.sample_conf(&img0, &boxes)? + 0.05
-            {
-                img = &turned;
-                boxes = tboxes;
-                faint.clear();
-                sideways = true;
+            // a page of upright boxes needs no line count: the turn must read clearly better
+            let longer = page::long_lines(&tboxes) > 2 * page::long_lines(&boxes) + 5;
+            let margin = if longer { 0.05 } else { 0.1 };
+            if longer || tall {
+                let (conf_t, flip_t) = self.sample_conf(&turned, &tboxes)?;
+                if conf_t > self.sample_conf(&img0, &boxes)?.0 + margin {
+                    img = &turned;
+                    boxes = tboxes;
+                    faint.clear();
+                    sideways = true;
+                    // the sample's widest lines settle upside down (the whole page's vote can
+                    // miss on a page of short digit boxes, reading "1985" as "S86I")
+                    flip_hint = Some(flip_t);
+                }
             }
         }
         if self.opts.gutter {
@@ -383,7 +392,7 @@ impl OcriaEngine {
         let (mut reads, flip, dom) = if boxes.is_empty() {
             (Vec::new(), false, 0)
         } else {
-            self.read(img, &boxes)?
+            self.read(img, &boxes, flip_hint)?
         };
         let n_lines = boxes.len();
         if !faint.is_empty() && !flip {
@@ -391,16 +400,16 @@ impl OcriaEngine {
             let crops: Vec<Img> = faint.iter().map(|b| page::crop(img, b)).collect();
             let refs: Vec<&Img> = crops.iter().collect();
             let res = self.rec_for(dom).read(&refs)?;
-            for (quad, (text, conf)) in faint.into_iter().zip(res) {
+            for (quad, (text, conf, _)) in faint.into_iter().zip(res) {
                 let text = page::clean_latin(&text);
                 if conf >= FAINT_CONF && page::is_short_token(&text) {
                     boxes.push(quad);
-                    reads.push((text, conf));
+                    reads.push((text, conf, Vec::new()));
                 }
             }
         }
         let mut out = Vec::new();
-        for (k, (quad, (text, conf))) in boxes.iter().zip(reads).enumerate() {
+        for (k, (quad, (text, conf, spans))) in boxes.iter().zip(reads).enumerate() {
             if text.trim().is_empty() || (self.opts.junk && page::is_junk(&text, conf)) {
                 continue;
             }
@@ -421,13 +430,23 @@ impl OcriaEngine {
                 x2 = x2.max(p[0]);
                 y2 = y2.max(p[1]);
             }
+            // upright lines only: merging places a rotated result's word boxes in another frame
+            let upright = !flip
+                && !sideways
+                && pts[1][0] > pts[0][0]
+                && (pts[1][1] - pts[0][1]).abs() < 0.2 * (pts[1][0] - pts[0][0]);
+            let words = if upright {
+                word_boxes(&text, &spans, &pts)
+            } else {
+                Vec::new()
+            };
             out.push(OcrResult {
                 text,
                 // the server sends int() of each extent
                 bbox: [x1.trunc(), y1.trunc(), x2.trunc(), y2.trunc()],
                 confidence: conf,
                 polygon: Some(pts),
-                words: Vec::new(),
+                words,
                 rotation: None,
                 faint: k >= n_lines,
             });
@@ -441,7 +460,7 @@ impl OcriaEngine {
 
     /// Mean reading confidence over the widest boxes (up to 24), weighted by text length: how
     /// well the page reads in this frame.
-    fn sample_conf(&self, img: &Img, boxes: &[Quad]) -> Result<f32, OcriaError> {
+    fn sample_conf(&self, img: &Img, boxes: &[Quad]) -> Result<(f32, bool), OcriaError> {
         let mut by_w: Vec<&Quad> = boxes.iter().collect();
         let width = |q: &Quad| {
             let xs = q.iter().map(|p| p[0]);
@@ -450,28 +469,34 @@ impl OcriaEngine {
         by_w.sort_by(|a, b| width(b).total_cmp(&width(a)));
         let sample: Vec<Quad> = by_w.into_iter().take(24).copied().collect();
         if sample.is_empty() {
-            return Ok(0.0);
+            return Ok((0.0, false));
         }
-        let (reads, _, _) = self.read(img, &sample)?;
+        let (reads, flip, _) = self.read(img, &sample, None)?;
         let (mut num, mut den) = (0f32, 0f32);
-        for (t, c) in &reads {
+        for (t, c, _) in &reads {
             let n = t.trim().chars().count().max(1) as f32;
             num += c * n;
             den += n;
         }
-        Ok(if den > 0.0 { num / den } else { 0.0 })
+        Ok((if den > 0.0 { num / den } else { 0.0 }, flip))
     }
 
     /// Readings per box, whether the page was read upside down (`server.read`) and the page's
     /// script group.
-    fn read(&self, img: &Img, boxes: &[Quad]) -> Result<PageReads, OcriaError> {
+    fn read(
+        &self,
+        img: &Img,
+        boxes: &[Quad],
+        flip_hint: Option<bool>,
+    ) -> Result<PageReads, OcriaError> {
         let mut crops: Vec<Img> = boxes.iter().map(|b| page::crop(img, b)).collect();
         let (mut groups, flip, share) = self.router.route(&crops)?;
+        let flip = flip_hint.unwrap_or(flip);
         if flip {
             crops = crops.iter().map(|c| c.rot90(2)).collect();
         }
         let n = crops.len();
-        let mut out = vec![(String::new(), 0f32); n];
+        let mut out: Vec<rec::Read> = vec![(String::new(), 0f32, Vec::new()); n];
         let subset = |idx: &[usize]| -> Vec<&Img> { idx.iter().map(|&i| &crops[i]).collect() };
         for gi in 0..GROUPS.len() {
             let idx: Vec<usize> = (0..n).filter(|&i| groups[i] == gi).collect();
@@ -580,6 +605,42 @@ impl OcriaEngine {
         }
         Ok((out, flip, dom))
     }
+}
+
+/// Word boxes from the recognizer's word spans (shares of the line along its reading direction),
+/// placed on the line's quad (top-left, top-right, bottom-right, bottom-left in reading order).
+/// Empty unless there is one span per word of the final text: cleanup that merged or split words
+/// leaves the line one box.
+fn word_boxes(text: &str, spans: &[(f32, f32)], pts: &[[f32; 2]; 4]) -> Vec<crate::ocr::OcrWord> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() < 2 || words.len() != spans.len() {
+        return Vec::new();
+    }
+    let at =
+        |a: [f32; 2], b: [f32; 2], f: f32| [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+    words
+        .iter()
+        .zip(spans)
+        .map(|(w, &(f0, f1))| {
+            let q = [
+                at(pts[0], pts[1], f0),
+                at(pts[0], pts[1], f1),
+                at(pts[3], pts[2], f1),
+                at(pts[3], pts[2], f0),
+            ];
+            let xs = q.iter().map(|p| p[0]);
+            let ys = q.iter().map(|p| p[1]);
+            crate::ocr::OcrWord {
+                text: w.to_string(),
+                bbox: [
+                    xs.clone().fold(f32::INFINITY, f32::min),
+                    ys.clone().fold(f32::INFINITY, f32::min),
+                    xs.fold(f32::NEG_INFINITY, f32::max),
+                    ys.fold(f32::NEG_INFINITY, f32::max),
+                ],
+            }
+        })
+        .collect()
 }
 
 /// np.mean over Python floats.
