@@ -219,6 +219,7 @@ When you submit a PR, a number of CICD checks will run. Among these, your code w
 - Update documentation if needed
 - Add tests for new functionality
 - For parsing issues, include a test document if possible
+- Approved PRs merge through a merge queue, which re-runs CI on the PR combined with the PRs queued ahead of it, so there is no need to rebase onto `main` before merging
 
 ## Reporting Issues
 

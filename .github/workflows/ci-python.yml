@@ -11,6 +11,8 @@ on:
       - ".github/workflows/ci-python.yml"
   pull_request:
     branches: [main]
+  # No paths filter here: in the merge queue this workflow always runs, so its
+  # required checks report for every queued PR.
   merge_group:
     types: [checks_requested]
 
