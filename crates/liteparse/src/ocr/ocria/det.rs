@@ -33,15 +33,35 @@ pub struct Faint {
     pub max: usize,
 }
 
-/// A second detection pass for small print: when the median line height at the first pass's
-/// scale is under `min_h` input pixels (and the page has at least 8 lines), detect again with
-/// the long side scaled to bring lines to `target_h`, at most `max_side`.
+/// A second detection pass for small print. The page size a PDF declares says nothing about
+/// its text size (a broadsheet page saved as letter has 3 pt body text), so the trigger is
+/// the measured line height: when the `quantile` of line heights at the first pass's scale,
+/// weighted by line length, is under `min_h` input pixels (and the page has at least 8 lines), detect again with the
+/// long side scaled to bring those lines to `target_h`, at most `max_side` (and never above
+/// the image's own size). The two passes are then merged ([`merge_scales`]): the second
+/// pass's lines, plus first-pass lines it missed or broke up.
 #[derive(Clone, Copy, Debug)]
 pub struct Adaptive {
     pub min_h: f32,
     pub target_h: f32,
     pub max_side: usize,
+    /// Which line height decides: the height this share (0..1) of the page's total line
+    /// length lies under. The first pass misses much of a page's small print, so the lines
+    /// it does find there are a minority of what it measures.
+    pub quantile: f32,
 }
+
+/// The second pass is skipped unless it enlarges the detector input by at least this much.
+const ADAPTIVE_MIN_GAIN: f32 = 1.15;
+/// Boxes lower than this at the first pass's scale are not counted as text lines when
+/// measuring the page: dot leaders and rule fragments come out 4-5 px high, the 3 pt print of
+/// a broadsheet page 10 px.
+const ADAPTIVE_MIN_TEXT_H: f32 = 6.0;
+/// First-pass lines this many times the small print's height are display type, which the
+/// second pass may break up ([`merge_scales`]). Lower ones are left to the second pass: on the
+/// broadsheet page of the measurements, keeping first-pass lines of every height lost 850
+/// characters (they run across column gutters or are cut short).
+const DISPLAY_RATIO: f32 = 3.0;
 
 impl Detector {
     pub fn new(pool: SessionPool, long_side: usize, thresh: f32, merge: f32) -> Self {
@@ -68,24 +88,66 @@ impl Detector {
         let Some(a) = self.adaptive else {
             return Ok((boxes, faint));
         };
-        if boxes.len() < 8 {
+        let Some((side, small_h)) = self.adaptive_side(&a, &boxes, scale, img) else {
             return Ok((boxes, faint));
-        }
-        let mut hs: Vec<f32> = boxes
-            .iter()
-            .map(|q| norm([q[3][0] - q[0][0], q[3][1] - q[0][1]]) * scale as f32)
+        };
+        let (fine, _, faint) = self.detect_at(img, side)?;
+        let mut merged = merge_scales(&boxes, &fine, DISPLAY_RATIO * small_h);
+        sort_reading(&mut merged);
+        // a faint candidate inside a line kept from the first pass is part of that line
+        let faint = faint
+            .into_iter()
+            .filter(|f| {
+                let c = centre(f);
+                !merged.iter().any(|q| inside(q, c))
+            })
             .collect();
-        hs.sort_by(f32::total_cmp);
-        let med = hs[hs.len() / 2].max(1.0);
-        if med >= a.min_h {
-            return Ok((boxes, faint));
+        Ok((merged, faint))
+    }
+
+    /// The long side for [`Adaptive`]'s second pass and the small print's line height in image
+    /// pixels, or `None` when the page needs no second pass.
+    fn adaptive_side(
+        &self,
+        a: &Adaptive,
+        boxes: &[Quad],
+        scale: f64,
+        img: &Img,
+    ) -> Option<(usize, f32)> {
+        if boxes.len() < 8 {
+            return None;
         }
-        let side = ((self.long_side as f32 * a.target_h / med) as usize).min(a.max_side) / 32 * 32;
-        if side <= self.long_side {
-            return Ok((boxes, faint));
+        // (height, length) per line at the pass's scale, without rules, dot leaders and specks
+        let mut hs: Vec<(f32, f32)> = boxes
+            .iter()
+            .map(|q| {
+                let len = norm([q[1][0] - q[0][0], q[1][1] - q[0][1]]);
+                (quad_h(q) * scale as f32, len)
+            })
+            .filter(|&(h, _)| h >= ADAPTIVE_MIN_TEXT_H)
+            .collect();
+        hs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // the height `quantile` of the page's line length lies under: a count of boxes
+        // would let a poster's specks or a contents page's fragments outvote its text
+        let total: f32 = hs.iter().map(|x| x.1).sum();
+        let mut acc = 0f32;
+        let mut h = hs.last()?.0;
+        for &(hk, len) in &hs {
+            acc += len;
+            if acc >= a.quantile.clamp(0.0, 1.0) * total {
+                h = hk;
+                break;
+            }
         }
-        let (boxes, _, faint) = self.detect_at(img, side)?;
-        Ok((boxes, faint))
+        if h >= a.min_h {
+            return None;
+        }
+        let side = ((self.long_side as f32 * a.target_h / h) as usize).min(a.max_side) / 32 * 32;
+        // a pass never enlarges the page: at the image's own size it runs unscaled, which
+        // reads small print better than a resize that is a few percent short of it
+        let side = side.min(img.w.max(img.h));
+        (side as f32 >= self.long_side as f32 * ADAPTIVE_MIN_GAIN)
+            .then_some((side, h / scale as f32))
     }
 
     /// One detection pass with the page's long side resized to `long_side` (never enlarged);
@@ -167,12 +229,7 @@ impl Detector {
         if self.merge > 0.0 {
             boxes = merge_collinear(&boxes, self.merge);
         }
-        // (row band of 8 px, then left edge); a stable sort, as Python's
-        boxes.sort_by(|a, b| {
-            let ka = ((min_y(a) as f64 / 8.0).round_ties_even(), min_x(a));
-            let kb = ((min_y(b) as f64 / 8.0).round_ties_even(), min_x(b));
-            ka.0.total_cmp(&kb.0).then(ka.1.total_cmp(&kb.1))
-        });
+        sort_reading(&mut boxes);
         let faint = match self.faint {
             Some(f) => {
                 let to_img = |x: usize, y: usize| {
@@ -276,6 +333,116 @@ fn faint_boxes(
     cands.sort_by(|a, b| b.0.total_cmp(&a.0));
     cands.truncate(f.max);
     cands.into_iter().map(|(_, q)| q).collect()
+}
+
+/// Reading-ish order: row band of 8 px, then left edge (a stable sort, as Python's).
+fn sort_reading(boxes: &mut [Quad]) {
+    boxes.sort_by(|a, b| {
+        let ka = ((min_y(a) as f64 / 8.0).round_ties_even(), min_x(a));
+        let kb = ((min_y(b) as f64 / 8.0).round_ties_even(), min_x(b));
+        ka.0.total_cmp(&kb.0).then(ka.1.total_cmp(&kb.1))
+    });
+}
+
+/// A line quad's height: its left edge.
+fn quad_h(q: &Quad) -> f32 {
+    norm([q[3][0] - q[0][0], q[3][1] - q[0][1]])
+}
+
+fn centre(q: &Quad) -> [f32; 2] {
+    [
+        (q[0][0] + q[1][0] + q[2][0] + q[3][0]) / 4.0,
+        (q[0][1] + q[1][1] + q[2][1] + q[3][1]) / 4.0,
+    ]
+}
+
+/// (x0, y0, x1, y1) of a quad.
+fn extent(q: &Quad) -> (f32, f32, f32, f32) {
+    let xs = q.iter().map(|p| p[0]);
+    let ys = q.iter().map(|p| p[1]);
+    (
+        xs.clone().fold(f32::INFINITY, f32::min),
+        ys.clone().fold(f32::INFINITY, f32::min),
+        xs.fold(f32::NEG_INFINITY, f32::max),
+        ys.fold(f32::NEG_INFINITY, f32::max),
+    )
+}
+
+/// Whether `p` lies in the quad's extent.
+fn inside(q: &Quad, p: [f32; 2]) -> bool {
+    let (x0, y0, x1, y1) = extent(q);
+    p[0] >= x0 && p[0] <= x1 && p[1] >= y0 && p[1] <= y1
+}
+
+/// The lines of a page detected at two scales: every `fine` (enlarged pass) line, except that
+/// a `coarse` (first pass) line at least `display_h` tall replaces the fine lines inside it
+/// when those are pieces of the same line, and is kept when the fine pass has nothing under it.
+///
+/// Enlarged, small print separates into its lines, but display type can outgrow the detector
+/// and come back in pieces ("Grand" for a 79 px "Grand Opening!") or not at all. The first
+/// pass has those lines whole. Its boxes over small print are the opposite case, one blob
+/// over several stacked lines, and are dropped: the fine lines under a blob are much lower
+/// than it, the pieces of a headline as tall as it.
+fn merge_scales(coarse: &[Quad], fine: &[Quad], display_h: f32) -> Vec<Quad> {
+    // a fine line this share of the coarse line's height is the same line, not one stacked in it
+    const SAME_LINE_H: f32 = 0.6;
+    // the fine pass covers less than this share of a coarse line: it missed the line
+    const MISSED: f32 = 0.2;
+    // lower fine lines fill this share of a coarse box: it is a blob over stacked lines
+    const BLOB: f32 = 0.4;
+    // one fine line spanning this share of the coarse line's width already is that line
+    const WHOLE: f32 = 0.8;
+    let mut drop_fine = vec![false; fine.len()];
+    let mut kept = Vec::new();
+    for b in coarse.iter().filter(|b| quad_h(b) >= display_h) {
+        let (bx0, by0, bx1, by1) = extent(b);
+        let area = ((bx1 - bx0) * (by1 - by0)).max(1.0);
+        let mut covered = 0f32;
+        for f in fine {
+            let (x0, y0, x1, y1) = extent(f);
+            covered += (x1.min(bx1) - x0.max(bx0)).max(0.0) * (y1.min(by1) - y0.max(by0)).max(0.0);
+        }
+        if covered < MISSED * area {
+            kept.push(*b);
+            continue;
+        }
+        let within: Vec<usize> = (0..fine.len())
+            .filter(|&i| !drop_fine[i] && inside(b, centre(&fine[i])))
+            .collect();
+        let (pieces, lower): (Vec<usize>, Vec<usize>) = within
+            .iter()
+            .partition(|&&i| quad_h(&fine[i]) >= SAME_LINE_H * quad_h(b));
+        let lower_area: f32 = lower
+            .iter()
+            .map(|&i| {
+                let e = extent(&fine[i]);
+                (e.2 - e.0) * (e.3 - e.1)
+            })
+            .sum();
+        if pieces.is_empty() || lower_area >= BLOB * area {
+            continue;
+        }
+        let span = pieces
+            .iter()
+            .map(|&i| {
+                let e = extent(&fine[i]);
+                e.2 - e.0
+            })
+            .fold(0f32, f32::max);
+        if pieces.len() >= 2 || span < WHOLE * (bx1 - bx0) {
+            kept.push(*b);
+            for i in pieces {
+                drop_fine[i] = true;
+            }
+        }
+    }
+    kept.extend(
+        fine.iter()
+            .zip(&drop_fine)
+            .filter(|(_, d)| !**d)
+            .map(|(f, _)| *f),
+    );
+    kept
 }
 
 fn min_y(q: &Quad) -> f32 {
@@ -519,6 +686,52 @@ mod tests {
             f,
             img,
         )
+    }
+
+    fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Quad {
+        [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+    }
+
+    #[test]
+    fn merge_scales_drops_a_blob_over_stacked_lines() {
+        // first pass: one 30 px box over three 10 px lines
+        let coarse = [rect(0.0, 0.0, 200.0, 30.0)];
+        let fine = [
+            rect(0.0, 0.0, 200.0, 10.0),
+            rect(0.0, 10.0, 200.0, 20.0),
+            rect(0.0, 20.0, 180.0, 30.0),
+        ];
+        assert_eq!(merge_scales(&coarse, &fine, 30.0), fine.to_vec());
+    }
+
+    #[test]
+    fn merge_scales_keeps_a_headline_whole() {
+        // the enlarged pass found the headline in two pieces
+        let coarse = [rect(0.0, 0.0, 400.0, 80.0)];
+        let fine = [
+            rect(0.0, 5.0, 150.0, 75.0),
+            rect(170.0, 5.0, 400.0, 75.0),
+            rect(0.0, 100.0, 300.0, 112.0),
+        ];
+        assert_eq!(merge_scales(&coarse, &fine, 30.0), vec![coarse[0], fine[2]]);
+        // ... or only its first word
+        assert_eq!(merge_scales(&coarse, &fine[..1], 30.0), vec![coarse[0]]);
+    }
+
+    #[test]
+    fn merge_scales_leaves_small_lines_to_the_fine_pass() {
+        // a first-pass line under the display height, though the fine pass has it in two pieces
+        let coarse = [rect(0.0, 0.0, 400.0, 20.0)];
+        let fine = [rect(0.0, 2.0, 150.0, 18.0), rect(170.0, 2.0, 400.0, 18.0)];
+        assert_eq!(merge_scales(&coarse, &fine, 30.0), fine.to_vec());
+    }
+
+    #[test]
+    fn merge_scales_keeps_missed_lines_and_prefers_whole_fine_lines() {
+        let coarse = [rect(0.0, 0.0, 400.0, 80.0), rect(0.0, 200.0, 300.0, 240.0)];
+        // the fine pass has the first line whole and nothing under the second
+        let fine = [rect(2.0, 3.0, 398.0, 78.0)];
+        assert_eq!(merge_scales(&coarse, &fine, 30.0), vec![coarse[1], fine[0]]);
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! ocria-nano: LiteParse's own OCR models run in-process on ONNX Runtime.
 //!
 //! A port of the evaluation server (`ocr/lpocr/server.py` + `lpocr_rec.py`) with the settings
-//! the benchmarks use: line detector (long side 1600, threshold 0.5, collinear merge 0.6),
+//! the benchmarks use: line detector (long side 1600, threshold 0.5, collinear merge 0.6;
+//! a second, larger pass on pages of small print),
 //! column-gutter split, sideways-page retry, a script router feeding four recognizers (Latin,
 //! CJK, RTL, world) with the low-confidence script rescue, homoglyph folding and the junk
 //! filter. Results come back in the same shape the HTTP engine receives.
@@ -68,6 +69,21 @@ const FAINT_CONF: f32 = 0.9;
 const DET_THRESH: f32 = 0.5;
 const DET_MERGE: f32 = 0.6;
 
+/// The default second detection pass for small print (see [`det::Adaptive`]). On 132 scanned
+/// control pages at 250 dpi it runs on two, a broadsheet page saved as letter (11,358 ->
+/// 27,252 characters read) and a wiring diagram (695 -> 2,085), and leaves the others as they
+/// were; at a `quantile` of 0.4 it no longer runs on the broadsheet page. Off in the
+/// WebAssembly build, where a 3200 px detector input does not fit a small isolate.
+#[cfg(not(target_arch = "wasm32"))]
+const DET_ADAPTIVE: Option<det::Adaptive> = Some(det::Adaptive {
+    min_h: 14.0,
+    target_h: 22.0,
+    max_side: 3200,
+    quantile: 0.25,
+});
+#[cfg(target_arch = "wasm32")]
+const DET_ADAPTIVE: Option<det::Adaptive> = None;
+
 /// Pipeline switches and thresholds. The defaults are the benchmarked configuration.
 #[derive(Clone, Debug)]
 pub struct OcriaOptions {
@@ -80,7 +96,7 @@ pub struct OcriaOptions {
     pub det_thresh: Option<f32>,
     /// Collinear box merge threshold. `None`: `det.meta.json` `"merge"`, else `DET_MERGE`.
     pub det_merge: Option<f32>,
-    /// Second detection pass for small print (None = one pass at `det_long_side`).
+    /// Second detection pass for pages of small print (None = one pass at `det_long_side`).
     pub det_adaptive: Option<det::Adaptive>,
     /// Cut boxes that run across a column gutter.
     pub gutter: bool,
@@ -101,7 +117,7 @@ impl Default for OcriaOptions {
             det_long_side: 1600,
             det_thresh: None,
             det_merge: None,
-            det_adaptive: None,
+            det_adaptive: DET_ADAPTIVE,
             gutter: true,
             orient: true,
             rescue: true,
