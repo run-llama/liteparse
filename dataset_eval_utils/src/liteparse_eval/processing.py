@@ -12,6 +12,8 @@ from anthropic import Anthropic
 from liteparse import LiteParse
 from pydantic import BaseModel, Field
 
+from liteparse_eval.providers.llm.anthropic import DEFAULT_MODEL
+
 
 # Define the output schema using Pydantic-like structure
 class QAPair(BaseModel):
@@ -80,7 +82,7 @@ def encode_image(image_path: Path) -> tuple[str, str]:
 def analyze_image_with_claude(
     client: Anthropic,
     image_path: Path,
-    model: str = "claude-sonnet-4-5-20250929"
+    model: str = DEFAULT_MODEL
 ) -> PageAnnotation | None:
     """
     Analyze an image using Claude with structured outputs.
@@ -139,7 +141,7 @@ def process_file(
     client: Anthropic,
     file_path: Path,
     output_dir: Path,
-    model: str = "claude-sonnet-4-5-20250929"
+    model: str = DEFAULT_MODEL
 ) -> None:
     """
     Process a single file (PDF or image) and save results.
@@ -234,8 +236,8 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        default="claude-sonnet-4-5-20250929",
-        help="Claude model to use (default: claude-sonnet-4-5-20250929)"
+        default=DEFAULT_MODEL,
+        help=f"Claude model to use (default: {DEFAULT_MODEL})"
     )
     parser.add_argument(
         "--api-key",

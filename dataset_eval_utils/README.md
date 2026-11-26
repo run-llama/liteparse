@@ -35,7 +35,7 @@ lp-process /path/to/documents --output-dir ./ground_truth
 
 Options:
 - `--output-dir` — Directory to save output JSON files (default: `./output`)
-- `--model` — Claude model to use (default: `claude-sonnet-4-5-20250929`)
+- `--model` — Claude model to use (default: `claude-sonnet-5-5`)
 - `--api-key` — Anthropic API key (or set `ANTHROPIC_API_KEY` env var)
 
 Each output JSON file contains document metadata and QA pairs extracted from the document pages.
