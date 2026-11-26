@@ -344,7 +344,11 @@ pub fn classify_page_with_filters(
             for sp in &line.spans {
                 let mut need: std::collections::HashMap<char, usize> =
                     std::collections::HashMap::new();
-                for ch in sp.text.chars().filter(|&ch| text_char(ch)) {
+                // dot leaders ("RIDING WEAR······10.1") are not cell text: the table drops them
+                for ch in strip_leader_runs(&sp.text)
+                    .chars()
+                    .filter(|&ch| text_char(ch))
+                {
                     *need.entry(ch).or_default() += 1;
                 }
                 if need
@@ -1599,6 +1603,18 @@ fn mono_run_reads_as_prose(lines: &[String]) -> bool {
     if nonempty.is_empty() {
         return false;
     }
+    // CJK prose sets every character full-width, so it reads as monospace, and has no spaces to
+    // count words by: a run that is largely CJK text is prose, never code
+    let (cjk, visible) = nonempty.iter().flat_map(|l| l.chars()).filter(|c| !c.is_whitespace()).fold(
+        (0usize, 0usize),
+        |(k, n), c| {
+            let is_cjk = matches!(c, '\u{3040}'..='\u{30FF}' | '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{AC00}'..='\u{D7AF}' | '\u{FF00}'..='\u{FFEF}');
+            (k + is_cjk as usize, n + 1)
+        },
+    );
+    if visible > 0 && cjk * 10 >= visible * 3 {
+        return true;
+    }
     let words: usize = nonempty.iter().map(|l| l.split_whitespace().count()).sum();
     let chars: usize = nonempty
         .iter()
@@ -2689,7 +2705,7 @@ fn residual_line(line: &ProjectedLine, rest: Vec<TextItem>) -> Option<ProjectedL
 /// letters, digits and any non-ASCII glyph (combining marks), never ASCII punctuation - units
 /// drop leader dots and the like, which would leave a covered line looking uncovered.
 fn text_char(ch: char) -> bool {
-    ch.is_alphanumeric() || (!ch.is_ascii() && !ch.is_whitespace())
+    ch.is_alphanumeric() || (!ch.is_ascii() && !ch.is_whitespace() && ch != '\u{00AD}')
 }
 
 /// Which heuristic table detectors run on a page: all of them, or (`Smart`, on pages the learned
@@ -2943,4 +2959,31 @@ pub(super) fn page_boxes(page: &ParsedPage, lines: &[ProjectedLine]) -> Vec<Rect
             }
         })
         .collect()
+}
+
+/// `text` without its leader runs: three or more of the same dot / underscore / ellipsis glyph.
+fn strip_leader_runs(text: &str) -> String {
+    let is_leader = |c: char| {
+        matches!(
+            c,
+            '.' | '\u{00B7}' | '\u{2026}' | '\u{2022}' | '_' | '\u{2219}'
+        )
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let mut j = i;
+        while j < chars.len() && is_leader(c) && (chars[j] == c || chars[j] == ' ') {
+            j += 1;
+        }
+        if is_leader(c) && chars[i..j].iter().filter(|&&x| x == c).count() >= 3 {
+            i = j;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
 }

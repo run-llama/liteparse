@@ -780,10 +780,11 @@ pub fn pdf_units(page: &Page) -> (Vec<Unit>, (f64, f64)) {
         }
         // PDFium reports U+0002 both for a hyphen it found at a line end and for a font that
         // encodes a drawn '-' (often a minus) as code 0x02 with no ToUnicode map. The line-end
-        // hyphen is dropped (a wrapped cell's word break); the real code reads as '-', since
+        // hyphen is a wrapped cell's word break, kept as a SOFT HYPHEN so markdown can rejoin the
+        // word (or print the hyphen before a capital); the real code reads as '-', since
         // dropping it flips the sign of negative table values.
         let (u, ch) = match u {
-            0x02 if c.is_hyphen() => continue,
+            0x02 if c.is_hyphen() => (0x00AD, Some('\u{00AD}')),
             0x02 => (u32::from('-'), Some('-')),
             _ => (u, ch),
         };
