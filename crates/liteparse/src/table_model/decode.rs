@@ -516,6 +516,98 @@ pub struct Grid {
 }
 
 impl Grid {
+    /// Rotated text inside an upright table (column headers set sideways, "Ezzitounna" /
+    /// "La Manouba" over narrow columns) is left out of the model's units; each such unit whose
+    /// centre lies in a column's span, overlapping a row's band, fills that cell if the model left
+    /// it empty, its lines in reading order (text running up stacks left to right). Returns the units placed.
+    pub fn place_rotated(&mut self, units: &[super::units::Unit], minor: &[bool]) -> Vec<usize> {
+        let span = |pick: &dyn Fn(&GridCell) -> Option<usize>, n: usize, lo: usize, hi: usize| {
+            let mut v = vec![(f64::INFINITY, f64::NEG_INFINITY); n];
+            for c in &self.cells {
+                if let Some(k) = pick(c).filter(|&k| k < n && !c.text.trim().is_empty()) {
+                    v[k] = (v[k].0.min(c.bx[lo]), v[k].1.max(c.bx[hi]));
+                }
+            }
+            v
+        };
+        let cols = span(&|c| (c.c0 == c.c1).then_some(c.c0), self.n_cols, 0, 2);
+        let rows = span(&|c| (c.r0 == c.r1).then_some(c.r0), self.n_rows, 1, 3);
+        let mut slots: Vec<((usize, usize), f64, usize)> = Vec::new();
+        for (i, u) in units.iter().enumerate() {
+            // header words, not stray sideways digits and punctuation
+            if !minor[i] || u.q == 0 || u.text.chars().filter(|c| c.is_alphabetic()).count() < 3 {
+                continue;
+            }
+            let p = u.pbox;
+            let cx = (p[0] + p[2]) / 2.0;
+            let Some(c) = cols.iter().position(|&(a, b)| a <= cx && cx <= b) else {
+                continue;
+            };
+            let overlap = |&(a, b): &(f64, f64)| (b.min(p[3]) - a.max(p[1])).max(0.0);
+            let Some(r) = (0..rows.len())
+                .filter(|&r| overlap(&rows[r]) > 0.0)
+                .max_by(|&x, &y| overlap(&rows[x]).total_cmp(&overlap(&rows[y])))
+            else {
+                continue;
+            };
+            let order = if u.q == 3 { -cx } else { cx };
+            slots.push(((r, c), order, i));
+        }
+        slots.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        // only into cells the model left empty: rotated text over a cell that holds text belongs
+        // to a column the grid lost, and stays out of the table
+        let filled: Vec<bool> = self
+            .cells
+            .iter()
+            .map(|c| !c.text.trim().is_empty())
+            .collect();
+        let mut placed = Vec::new();
+        for ((r, c), _, i) in slots {
+            let (t, p) = (units[i].text.trim(), units[i].pbox);
+            if self
+                .cells
+                .iter()
+                .zip(&filled)
+                .any(|(x, &f)| f && x.r0 <= r && r <= x.r1 && x.c0 <= c && c <= x.c1)
+            {
+                continue;
+            }
+            let k = match self
+                .cells
+                .iter()
+                .position(|x| x.r0 <= r && r <= x.r1 && x.c0 <= c && c <= x.c1)
+            {
+                Some(k) => k,
+                None => {
+                    self.cells.push(GridCell {
+                        r0: r,
+                        c0: c,
+                        r1: r,
+                        c1: c,
+                        text: String::new(),
+                        bx: p,
+                    });
+                    self.cells.len() - 1
+                }
+            };
+            let cell = &mut self.cells[k];
+            if cell.text.trim().is_empty() {
+                cell.text = t.to_string();
+                cell.bx = p;
+            } else {
+                cell.text = format!("{} {}", cell.text.trim(), t);
+                cell.bx = [
+                    cell.bx[0].min(p[0]),
+                    cell.bx[1].min(p[1]),
+                    cell.bx[2].max(p[2]),
+                    cell.bx[3].max(p[3]),
+                ];
+            }
+            placed.push(i);
+        }
+        placed
+    }
+
     /// Merge rows a ruled table draws as one: when most row boundaries carry a horizontal rule
     /// across the table, a boundary without one is a wrapped cell's next line (a tall SWOT cell
     /// read as 35 rows, "подметание территории ... 1 раз в" / "сутки" split in two). `h_rules`
@@ -952,6 +1044,7 @@ pub fn decode_grid(units: &[DUnit], idx: &[usize], l: &Logits, opt: &DecodeOptio
     let mut n_rows = n_rows0;
     if opt.fold_wraps {
         fold_wrapped_rows(&mut placed, &mut head_rows, &mut n_rows);
+        fold_lead_wraps(&mut placed, &mut head_rows, &mut n_rows);
         fold_header_wraps(&mut placed, &mut head_rows, &mut n_rows);
     }
     Grid {
@@ -1066,6 +1159,90 @@ fn fold_wrapped_rows(cells: &mut Vec<GridCell>, head: &mut Vec<usize>, n_rows: &
                 c.bx[2].max(b[2]),
                 c.bx[3].max(b[3]),
             ];
+        }
+        remove_row(cells, head, n_rows, r);
+    }
+}
+
+/// A wrapped row label whose values sit on its last line ("Unrealized appreciation on" / "Total
+/// Return Swap" / "contracts  $ (67,658)") comes out as value-less rows above the value row. A body
+/// row with no number folds down into the row below when that row has a number, every filled cell
+/// has a filled, non-number cell directly below it that reads as its next line ([`continues`]),
+/// and each pair sits line-tight (gap under 0.6x a line's height). Bottom-up, so a label
+/// wrapped over three lines folds twice.
+fn fold_lead_wraps(cells: &mut Vec<GridCell>, head: &mut Vec<usize>, n_rows: &mut usize) {
+    // a line's height: the median filled cell (most cells hold one line); a short lowercase
+    // line's own box ("contracts") lacks the ascender height
+    let mut hs: Vec<f64> = cells
+        .iter()
+        .filter(|c| !c.text.trim().is_empty())
+        .map(|c| c.bx[3] - c.bx[1])
+        .collect();
+    if hs.is_empty() {
+        return;
+    }
+    let lh = median(&mut hs);
+    let mut r = n_rows.saturating_sub(1);
+    while r > 0 {
+        r -= 1;
+        if head.contains(&r) || head.contains(&(r + 1)) {
+            continue;
+        }
+        if cells
+            .iter()
+            .any(|c| c.r0 != c.r1 && c.r0 <= r + 1 && r <= c.r1)
+        {
+            continue; // spans touching either row
+        }
+        let row = |cells: &[GridCell], r: usize| -> Vec<usize> {
+            (0..cells.len())
+                .filter(|&k| cells[k].r0 == r && !cells[k].text.trim().is_empty())
+                .collect()
+        };
+        let (here, below) = (row(cells, r), row(cells, r + 1));
+        if here.is_empty()
+            || here.iter().any(|&k| is_number(&cells[k].text))
+            || !below.iter().any(|&k| is_number(&cells[k].text))
+        {
+            continue;
+        }
+        let mut pairs = Vec::new();
+        let ok = here.iter().all(|&k| {
+            let a = &cells[k];
+            let Some(&j) = below
+                .iter()
+                .find(|&&j| cells[j].c0 == a.c0 && cells[j].c1 == a.c1)
+            else {
+                return false;
+            };
+            let b = &cells[j];
+            let line_h = (b.bx[3] - b.bx[1]).max(lh);
+            pairs.push((k, j));
+            // a bracket opening the lower line marks a sub-item ("(ii) Income tax ...") here, not
+            // a continuation, unless the upper line left one open
+            let bracketed = b.text.trim_start().starts_with(['(', '[', '{'])
+                && a.text.matches('(').count() <= a.text.matches(')').count();
+            !is_number(&b.text)
+                && !starts_item(&b.text)
+                && !bracketed
+                && continues(&a.text, &b.text)
+                && line_h > 0.0
+                && b.bx[1] - a.bx[3] < 0.6 * line_h
+        });
+        if !ok {
+            continue;
+        }
+        for (k, j) in pairs {
+            let (t, bx) = (cells[k].text.trim().to_string(), cells[k].bx);
+            let c = &mut cells[j];
+            c.text = format!("{} {}", t, c.text.trim());
+            c.bx = [
+                c.bx[0].min(bx[0]),
+                c.bx[1].min(bx[1]),
+                c.bx[2].max(bx[2]),
+                c.bx[3].max(bx[3]),
+            ];
+            cells[k].text.clear();
         }
         remove_row(cells, head, n_rows, r);
     }

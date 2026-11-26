@@ -868,7 +868,8 @@ pub fn render_blocks(blocks: &[PositionedBlock]) -> String {
                 if rows.is_empty() {
                     continue;
                 }
-                if is_plain_grid(rows, *header_rows) {
+                // a headerless table stays headerless: GFM has no such table, HTML does
+                if *header_rows > 0 && is_plain_grid(rows, *header_rows) {
                     // Degenerate case — no merges, so pipes are expressive
                     // enough. Reuse the exact same rendering `Block::Table`
                     // gets, including the promote-first-row-when-headerless

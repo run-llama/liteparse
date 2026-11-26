@@ -653,6 +653,10 @@ fn run_page_framed(
         if grid.n_cols < 2 || grid.is_toc() || grid.is_chart() || grid.is_prose() {
             continue;
         }
+        let mut g = g;
+        if g.iter().all(|&i| units[i].q == 0) {
+            g.extend(grid.place_rotated(&units, &minor));
+        }
         let mut b = [
             f64::INFINITY,
             f64::INFINITY,
