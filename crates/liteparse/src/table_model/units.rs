@@ -376,9 +376,12 @@ fn run_units(chars: &[Ch], q: u8, w: f64, h: f64, minor: bool) -> Vec<Unit> {
             if let (Some((_, pb)), Some((_, bb))) = (prev, anchor) {
                 let hh = (bb[3] - bb[1]).max(bx[3] - bx[1]).max(1.0);
                 let rides = is_mark(c) && bx[0] >= pb[0] && bx[0] - pb[2] < 0.5 * hh;
+                // the anchor only corrects the height a mark sits at; a step back is measured from
+                // the glyph right before (in a right-to-left run "3.000" read "000 3." when the
+                // digits after the point were measured from the "3")
                 if !rides
                     && (((bx[1] + bx[3]) / 2.0 - (bb[1] + bb[3]) / 2.0).abs() > 0.6 * hh
-                        || bx[0] < bb[0] - hh)
+                        || bx[0] < pb[0] - hh)
                 {
                     runs.push(std::mem::take(&mut cur));
                 }
