@@ -7,9 +7,29 @@ use serde::Serialize;
 /// Cap on the rendered long edge in pixels. Normal pages never hit this
 /// (a US-Letter page at 150 DPI is ~1,650 px); it exists so freakishly tall
 /// pages — dense PDFs and especially `/UserUnit` spreadsheet exports — can't
-/// request multi-gigabyte bitmaps. 30,000 px keeps the historical behavior
-/// for every page under ~14,400 pt at 150 DPI.
+/// request multi-gigabyte bitmaps.
 const MAX_RENDER_LONG_EDGE_PX: f32 = 30_000.0;
+
+/// Cap on the rendered area in pixels. The long-edge cap alone lets a page that is large
+/// both ways (a 15,000 x 11,000 pt poster or plan) ask for 30,000 x 22,500 px: PDFium
+/// refuses any bitmap of 2 GiB or more (536 MP of BGRA), and the render failed. 250 MP is
+/// 1 GB of BGRA; an A0 sheet at 300 dpi (139 MP) stays under it.
+const MAX_RENDER_PIXELS: f32 = 250_000_000.0;
+
+/// The resolution to render a `width_pt` x `height_pt` page at: `dpi`, lowered until the
+/// bitmap fits [`MAX_RENDER_LONG_EDGE_PX`] and [`MAX_RENDER_PIXELS`].
+fn capped_dpi(dpi: f32, width_pt: f32, height_pt: f32) -> f32 {
+    let long_edge_pt = width_pt.max(height_pt);
+    let area_pt = width_pt * height_pt;
+    let mut eff = dpi;
+    if long_edge_pt > 0.0 {
+        eff = eff.min(MAX_RENDER_LONG_EDGE_PX * 72.0 / long_edge_pt);
+    }
+    if area_pt > 0.0 {
+        eff = eff.min(72.0 * (MAX_RENDER_PIXELS / area_pt).sqrt());
+    }
+    eff
+}
 
 /// A single rendered page as PNG bytes, plus raster-derived signals.
 #[derive(Debug, Clone)]
@@ -57,15 +77,17 @@ pub(crate) fn render_document_pages(
             }
 
             let page = document.page((page_num - 1) as i32)?;
-            // `/UserUnit` pages (spreadsheet exports hundreds of thousands
-            // of points tall) would render to gigapixel bitmaps at the
-            // requested DPI; cap the long edge like the OCR render does.
+            // The declared page size is whatever the producer wrote (`/UserUnit`
+            // spreadsheet exports hundreds of thousands of points tall, posters
+            // thousands of points both ways): the requested DPI is lowered until
+            // the bitmap fits the pixel caps.
             let page_width = page.width() * page.user_unit();
             let page_height = page.height() * page.user_unit();
-            let long_edge_pt = page_width.max(page_height);
-            let mut eff_dpi = dpi;
-            if long_edge_pt > 0.0 {
-                eff_dpi = eff_dpi.min(MAX_RENDER_LONG_EDGE_PX * 72.0 / long_edge_pt);
+            let eff_dpi = capped_dpi(dpi, page_width, page_height);
+            if eff_dpi < dpi {
+                eprintln!(
+                    "[render] page {page_num} is {page_width:.0} x {page_height:.0} pt: rendered at {eff_dpi:.0} dpi instead of {dpi:.0} to fit the pixel limit"
+                );
             }
             let bitmap = page.render_with_form(eff_dpi, form.as_ref())?;
             let width = bitmap.width() as u32;
@@ -303,6 +325,23 @@ mod tests {
     fn test_image_bounds_missing_file_errors() {
         let r = image_bounds("/nonexistent/path/does_not_exist.pdf", None);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn capped_dpi_bounds_long_edge_and_area() {
+        let px = |dpi: f32, w: f32, h: f32| {
+            let d = capped_dpi(dpi, w, h);
+            (d, w * d / 72.0, h * d / 72.0)
+        };
+        // ordinary pages keep the requested resolution
+        assert_eq!(capped_dpi(250.0, 612.0, 792.0), 250.0);
+        assert_eq!(capped_dpi(300.0, 2384.0, 3370.0), 300.0);
+        // large both ways: the long-edge cap alone left 30,000 x 22,577 px (2.7 GB)
+        let (d, w, h) = px(150.0, 14971.0, 11267.0);
+        assert!(d < 150.0 && w * h <= MAX_RENDER_PIXELS * 1.001);
+        // a very tall strip is bounded by its long edge
+        let (_, w, h) = px(150.0, 600.0, 400_000.0);
+        assert!(h <= MAX_RENDER_LONG_EDGE_PX * 1.001 && w * h < MAX_RENDER_PIXELS);
     }
 
     /// Build an RGBA buffer from rows of 24-bit RGB pixel values.
