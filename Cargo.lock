@@ -2295,6 +2295,7 @@ dependencies = [
  "bindgen",
  "flate2",
  "libloading 0.8.9",
+ "sha2 0.10.9",
  "tar",
  "ureq",
 ]
