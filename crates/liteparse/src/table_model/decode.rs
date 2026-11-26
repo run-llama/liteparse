@@ -515,6 +515,672 @@ pub struct Grid {
     pub n_cols: usize,
 }
 
+impl Grid {
+    /// The grid of a fully ruled table, taken from its ruling lines ("lattice"): rows and columns
+    /// are the bands between consecutive horizontal / vertical rules over the table, a cell
+    /// boundary whose rule is missing joins the two cells (a spanned cell), and each unit goes to
+    /// the cell holding its centre. The model reads rules only as soft features, so it can still
+    /// split a wrapped cell into rows or fuse two cells a vertical rule separates; when the rules
+    /// enclose the table, they decide. `None` when they don't: under 2x2 bands, units straddling a
+    /// rule, a mostly empty lattice (graph paper, form boxes), or a band holding several rows of
+    /// its own (see below).
+    /// Header rows are the lattice rows inside the model's header band.
+    pub fn lattice(
+        &self,
+        h_rules: &[[f32; 3]],
+        v_rules: &[[f32; 3]],
+        units: &[DUnit],
+        words: &[&[(f64, f64, String)]],
+        g: &[usize],
+    ) -> Option<Grid> {
+        if g.len() < 4 {
+            return None;
+        }
+        let mut t = [
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        for &i in g {
+            let b = units[i].bx;
+            t = [
+                t[0].min(b[0]),
+                t[1].min(b[1]),
+                t[2].max(b[2]),
+                t[3].max(b[3]),
+            ];
+        }
+        let lh = {
+            let mut hs: Vec<f64> = g.iter().map(|&i| units[i].bx[3] - units[i].bx[1]).collect();
+            median(&mut hs).max(4.0)
+        };
+        let pad = 1.5 * lh;
+        let tw = t[2] - t[0];
+        // rule positions over the table, clustered (a rule drawn as two strokes, a thick border
+        // read as two edges) with their covered intervals
+        let lines = |rules: &[[f32; 3]], lo: f64, hi: f64, a0: f64, a1: f64, min_len: f64| {
+            let mut rs: Vec<(f64, f64, f64)> = rules
+                .iter()
+                .map(|r| (r[0] as f64, r[1].min(r[2]) as f64, r[1].max(r[2]) as f64))
+                .filter(|&(p, s, e)| {
+                    p >= lo - pad
+                        && p <= hi + pad
+                        && e - s >= min_len
+                        && e > a0 - pad
+                        && s < a1 + pad
+                })
+                .collect();
+            rs.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut out: Vec<(f64, Vec<(f64, f64)>)> = Vec::new();
+            for (p, s, e) in rs {
+                match out.last_mut() {
+                    Some((q, iv)) if p - *q < 3.0 => {
+                        *q = (*q + p) / 2.0;
+                        iv.push((s, e));
+                    }
+                    _ => out.push((p, vec![(s, e)])),
+                }
+            }
+            out
+        };
+        let mut ys = lines(h_rules, t[1], t[3], t[0], t[2], (0.1 * tw).max(2.0 * lh));
+        let mut xs = lines(v_rules, t[0], t[2], t[1], t[3], (0.5 * lh).max(4.0));
+        let covers = |iv: &[(f64, f64)], a: f64, b: f64| -> f64 {
+            let mut iv: Vec<(f64, f64)> = iv
+                .iter()
+                .map(|&(s, e)| (s.max(a), e.min(b)))
+                .filter(|x| x.1 > x.0)
+                .collect();
+            iv.sort_by(|x, y| x.0.total_cmp(&y.0));
+            let (mut sum, mut end) = (0.0, a);
+            for (s, e) in iv {
+                if e > end {
+                    sum += e - s.max(end);
+                    end = e;
+                }
+            }
+            sum / (b - a).max(1e-6)
+        };
+        // a rule over under 30% of the table's height (width) is a stroke inside one cell, not a
+        // grid line (decoration in a header, a box around a figure)
+        xs.retain(|(_, iv)| covers(iv, t[1], t[3]) >= 0.3);
+        ys.retain(|(_, iv)| covers(iv, t[0], t[2]) >= 0.3);
+        // a side with no rule (open-sided tables, a header above the box) is closed at the text
+        let near =
+            |v: &[(f64, Vec<(f64, f64)>)], p: f64| v.iter().any(|(q, _)| (q - p).abs() < 0.5 * lh);
+        let inner = |v: &[(f64, Vec<(f64, f64)>)], lo: f64, hi: f64| {
+            v.iter()
+                .filter(|(q, _)| *q > lo + 0.5 * lh && *q < hi - 0.5 * lh)
+                .count()
+        };
+        let (ys_in, xs_in) = (inner(&ys, t[1], t[3]), inner(&xs, t[0], t[2]));
+        ys.retain(|(q, _)| *q >= t[1] - pad && *q <= t[3] + pad);
+        xs.retain(|(q, _)| *q >= t[0] - pad && *q <= t[2] + pad);
+        if ys.first().is_none_or(|(q, _)| *q > t[1] + 0.5 * lh) && !near(&ys, t[1]) {
+            ys.insert(0, (t[1] - 1.0, vec![(f64::NEG_INFINITY, f64::INFINITY)]));
+        }
+        if ys.last().is_none_or(|(q, _)| *q < t[3] - 0.5 * lh) && !near(&ys, t[3]) {
+            ys.push((t[3] + 1.0, vec![(f64::NEG_INFINITY, f64::INFINITY)]));
+        }
+        if xs.first().is_none_or(|(q, _)| *q > t[0] + 0.5 * lh) && !near(&xs, t[0]) {
+            xs.insert(0, (t[0] - 1.0, vec![(f64::NEG_INFINITY, f64::INFINITY)]));
+        }
+        if xs.last().is_none_or(|(q, _)| *q < t[2] - 0.5 * lh) && !near(&xs, t[2]) {
+            xs.push((t[2] + 1.0, vec![(f64::NEG_INFINITY, f64::INFINITY)]));
+        }
+        if ys_in < 1 || xs_in < 1 || ys.len() < 3 || xs.len() < 3 {
+            return None;
+        }
+        // the frame: the outermost rules must enclose the text, spanning most of the table
+        let (fx0, fx1) = (xs[0].0, xs[xs.len() - 1].0);
+        let (fy0, fy1) = (ys[0].0, ys[ys.len() - 1].0);
+        if fx0 > t[0] + 0.5 * lh
+            || fx1 < t[2] - 0.5 * lh
+            || fy0 > t[1] + 0.5 * lh
+            || fy1 < t[3] - 0.5 * lh
+        {
+            return None;
+        }
+        if covers(&ys[0].1, fx0, fx1) < 0.8 || covers(&ys[ys.len() - 1].1, fx0, fx1) < 0.8 {
+            return None;
+        }
+        let (nr, nc) = (ys.len() - 1, xs.len() - 1);
+        if nr * nc > 4 * g.len() + 16 {
+            return None;
+        }
+        // a unit crossing a vertical rule (text set flush against it fuses two cells) is cut there
+        // by its words; units by centre after that. One still straddling a rule (no word boxes, a
+        // word across the rule) means the rules don't explain the text: left to the model
+        let mut pieces: Vec<([f64; 4], String)> = Vec::new();
+        for &i in g {
+            let b = units[i].bx;
+            let cuts: Vec<f64> = xs
+                .iter()
+                .filter(|(x, iv)| {
+                    b[0] + 0.3 * lh < *x && *x < b[2] - 0.3 * lh && covers(iv, b[1], b[3]) > 0.5
+                })
+                .map(|(x, _)| *x)
+                .collect();
+            if cuts.is_empty() || words[i].len() < 2 {
+                pieces.push((b, units[i].text.clone()));
+                continue;
+            }
+            let mut groups: Vec<Vec<&(f64, f64, String)>> = vec![Vec::new(); cuts.len() + 1];
+            for w in words[i] {
+                let k = cuts.iter().filter(|&&x| (w.0 + w.1) / 2.0 > x).count();
+                groups[k].push(w);
+            }
+            for ws in groups.into_iter().filter(|ws| !ws.is_empty()) {
+                let (x0, x1) = ws.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |a, w| {
+                    (a.0.min(w.0), a.1.max(w.1))
+                });
+                let text = ws
+                    .iter()
+                    .map(|w| w.2.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                pieces.push(([x0, b[1], x1, b[3]], text));
+            }
+        }
+        // which slots hold text of their own, and which vertical boundaries text runs across: a
+        // missing vertical rule between two slots that both hold their own text is a rule the
+        // render didn't catch (coloured, faint), not a spanned cell
+        let slot_of = |b: &[f64; 4]| -> Option<(usize, usize)> {
+            let (cx, cy) = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0);
+            let r = (0..nr).find(|&r| ys[r].0 <= cy && cy <= ys[r + 1].0)?;
+            let c = (0..nc).find(|&c| xs[c].0 <= cx && cx <= xs[c + 1].0)?;
+            Some((r, c))
+        };
+        let mut occupied = vec![false; nr * nc];
+        let mut crossed = vec![false; nr * nc]; // boundary right of slot (r, c) has text across it
+        for (b, _) in &pieces {
+            if let Some((r, c)) = slot_of(b) {
+                occupied[r * nc + c] = true;
+                for (k, (x, _)) in xs.iter().enumerate().skip(1).take(nc - 1) {
+                    if b[0] < *x && *x < b[2] {
+                        crossed[r * nc + k - 1] = true;
+                    }
+                }
+            }
+        }
+        // slots joined where the rule between them is (mostly) missing
+        let mut parent: Vec<usize> = (0..nr * nc).collect();
+        fn root(p: &mut [usize], mut k: usize) -> usize {
+            while p[k] != k {
+                p[k] = p[p[k]];
+                k = p[k];
+            }
+            k
+        }
+        let mut join = |p: &mut Vec<usize>, a: usize, b: usize| {
+            let (ra, rb) = (root(p, a), root(p, b));
+            if ra != rb {
+                p[ra.max(rb)] = ra.min(rb);
+            }
+        };
+        for r in 0..nr {
+            for c in 0..nc {
+                if c + 1 < nc
+                    && !(occupied[r * nc + c] && occupied[r * nc + c + 1] && !crossed[r * nc + c])
+                    && covers(&xs[c + 1].1, ys[r].0, ys[r + 1].0) < 0.5
+                {
+                    join(&mut parent, r * nc + c, r * nc + c + 1);
+                }
+                if r + 1 < nr && covers(&ys[r + 1].1, xs[c].0, xs[c + 1].0) < 0.5 {
+                    join(&mut parent, r * nc + c, (r + 1) * nc + c);
+                }
+            }
+        }
+        // each component must be a rectangle of slots
+        let mut span: std::collections::HashMap<usize, (usize, usize, usize, usize)> =
+            std::collections::HashMap::new();
+        for r in 0..nr {
+            for c in 0..nc {
+                let k = root(&mut parent, r * nc + c);
+                let e = span.entry(k).or_insert((r, c, r, c));
+                *e = (e.0.min(r), e.1.min(c), e.2.max(r), e.3.max(c));
+            }
+        }
+        for (&k, &(r0, c0, r1, c1)) in &span {
+            for r in r0..=r1 {
+                for c in c0..=c1 {
+                    if root(&mut parent, r * nc + c) != k {
+                        return None;
+                    }
+                }
+            }
+        }
+        let mut members: std::collections::HashMap<usize, Vec<usize>> =
+            std::collections::HashMap::new();
+        let mut straddle = 0;
+        for (i, (b, _)) in pieces.iter().enumerate() {
+            let b = *b;
+            let (cx, cy) = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0);
+            let Some(r) = (0..nr).find(|&r| ys[r].0 <= cy && cy <= ys[r + 1].0) else {
+                return None;
+            };
+            let Some(c) = (0..nc).find(|&c| xs[c].0 <= cx && cx <= xs[c + 1].0) else {
+                return None;
+            };
+            let k = root(&mut parent, r * nc + c);
+            let (_, c0, _, c1) = span[&k];
+            let cut = xs[c0 + 1..=c1]
+                .iter()
+                .chain(xs[..=c0].iter().rev().take(1))
+                .chain(xs[c1 + 1..].iter().take(1));
+            if cut.into_iter().any(|(x, iv)| {
+                b[0] + 0.3 * lh < *x && *x < b[2] - 0.3 * lh && covers(iv, b[1], b[3]) > 0.5
+            }) {
+                straddle += 1;
+            }
+            members.entry(k).or_default().push(i);
+        }
+        if straddle * 10 > pieces.len() {
+            return None;
+        }
+        // rows the rules don't draw: a cell stacking two or more lines that are each a number
+        // (numbers don't wrap: those are rows), or a band whose filled cells all hold the same
+        // number of lines, line for line (a header over the first data row with no rule between)
+        let lines_of = |ms: &[usize]| -> Vec<(f64, String)> {
+            let mut ls: Vec<(f64, String)> = Vec::new();
+            let mut ps: Vec<usize> = ms.to_vec();
+            ps.sort_by(|&a, &b| pieces[a].0[1].total_cmp(&pieces[b].0[1]));
+            for i in ps {
+                let (b, t) = &pieces[i];
+                let cy = (b[1] + b[3]) / 2.0;
+                match ls.last_mut() {
+                    Some((y, s)) if (cy - *y).abs() < 0.5 * lh => {
+                        s.push(' ');
+                        s.push_str(t.trim());
+                    }
+                    _ => ls.push((cy, t.trim().to_string())),
+                }
+            }
+            ls
+        };
+        let mut band_lines: std::collections::HashMap<(usize, usize), Vec<Vec<f64>>> =
+            std::collections::HashMap::new();
+        for (k, ms) in &members {
+            let ls = lines_of(ms);
+            if ls.len() >= 2 && ls.iter().filter(|(_, t)| is_number(t)).count() >= 2 {
+                return None;
+            }
+            let (r0, _, r1, _) = span[k];
+            band_lines
+                .entry((r0, r1))
+                .or_default()
+                .push(ls.iter().map(|l| l.0).collect());
+        }
+        for cells in band_lines.values() {
+            let k = cells[0].len();
+            if cells.len() >= 3
+                && k >= 2
+                && cells.iter().all(|ys| {
+                    ys.len() == k
+                        && ys
+                            .iter()
+                            .zip(&cells[0])
+                            .all(|(a, b)| (a - b).abs() < 0.5 * lh)
+                })
+            {
+                return None;
+            }
+        }
+        // keep rows / columns holding text
+        let used_r: Vec<bool> = (0..nr)
+            .map(|r| {
+                span.iter()
+                    .any(|(k, s)| s.0 <= r && r <= s.2 && members.contains_key(k))
+            })
+            .collect();
+        let used_c: Vec<bool> = (0..nc)
+            .map(|c| {
+                span.iter()
+                    .any(|(k, s)| s.1 <= c && c <= s.3 && members.contains_key(k))
+            })
+            .collect();
+        let rmap: Vec<usize> = used_r
+            .iter()
+            .scan(0, |n, &u| {
+                let v = *n;
+                *n += u as usize;
+                Some(v)
+            })
+            .collect();
+        let cmap: Vec<usize> = used_c
+            .iter()
+            .scan(0, |n, &u| {
+                let v = *n;
+                *n += u as usize;
+                Some(v)
+            })
+            .collect();
+        let (n_rows, n_cols) = (
+            used_r.iter().filter(|&&u| u).count(),
+            used_c.iter().filter(|&&u| u).count(),
+        );
+        // rules that explain fewer columns than the text shows aren't the table's grid
+        if n_rows < 2 || n_cols < 2 || n_cols + 1 < self.n_cols {
+            return None;
+        }
+        if members.len() * 10 < 3 * span.len().min(n_rows * n_cols) {
+            return None;
+        }
+        let first_used =
+            |a: usize, b: usize, used: &[bool], map: &[usize]| -> Option<(usize, usize)> {
+                let us: Vec<usize> = (a..=b).filter(|&k| used[k]).collect();
+                Some((map[*us.first()?], map[*us.last()?]))
+            };
+        // header band: the model's header rows
+        let head_band = self
+            .cells
+            .iter()
+            .filter(|c| self.head_rows.contains(&c.r0) && !c.text.trim().is_empty())
+            .fold(None, |acc: Option<(f64, f64)>, c| {
+                Some(acc.map_or((c.bx[1], c.bx[3]), |a| (a.0.min(c.bx[1]), a.1.max(c.bx[3]))))
+            });
+        let mut cells = Vec::new();
+        let mut head = Vec::new();
+        let mut keys: Vec<&usize> = span.keys().collect();
+        keys.sort_by_key(|k| span[k]);
+        for k in keys {
+            let (r0, c0, r1, c1) = span[k];
+            let Some((nr0, nr1)) = first_used(r0, r1, &used_r, &rmap) else {
+                continue;
+            };
+            let Some((nc0, nc1)) = first_used(c0, c1, &used_c, &cmap) else {
+                continue;
+            };
+            let (text, bx) = match members.get(k) {
+                Some(ms) => {
+                    let boxes: Vec<[f64; 4]> = ms.iter().map(|&i| pieces[i].0).collect();
+                    // lines top to bottom, pieces left to right within a line (a raised "(*)" is
+                    // part of its line); a CJK line wrapped inside the cell joins without a space
+                    let mut order: Vec<usize> = (0..ms.len()).collect();
+                    order.sort_by(|&a, &b| {
+                        let (pa, pb) = (boxes[a], boxes[b]);
+                        let same = pa[1].max(pb[1])
+                            < pa[3].min(pb[3]) - 0.3 * (pa[3] - pa[1]).min(pb[3] - pb[1]);
+                        if same {
+                            pa[0].total_cmp(&pb[0])
+                        } else {
+                            pa[1].total_cmp(&pb[1])
+                        }
+                    });
+                    let cjk = |c: char| matches!(c, '\u{3040}'..='\u{30FF}' | '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{AC00}'..='\u{D7AF}' | '\u{FF00}'..='\u{FFEF}');
+                    let mut text = String::new();
+                    for j in order {
+                        let t = pieces[ms[j]].1.trim();
+                        if !text.is_empty()
+                            && !(text.chars().last().is_some_and(cjk)
+                                && t.chars().next().is_some_and(cjk))
+                        {
+                            text.push(' ');
+                        }
+                        text.push_str(t);
+                    }
+                    let bx = boxes.iter().fold(
+                        [
+                            f64::INFINITY,
+                            f64::INFINITY,
+                            f64::NEG_INFINITY,
+                            f64::NEG_INFINITY,
+                        ],
+                        |a, b| {
+                            [
+                                a[0].min(b[0]),
+                                a[1].min(b[1]),
+                                a[2].max(b[2]),
+                                a[3].max(b[3]),
+                            ]
+                        },
+                    );
+                    (text, bx)
+                }
+                None => (
+                    String::new(),
+                    [xs[c0].0, ys[r0].0, xs[c1 + 1].0, ys[r1 + 1].0],
+                ),
+            };
+            if let Some((h0, h1)) = head_band {
+                let cy = (ys[r0].0 + ys[r1 + 1].0) / 2.0;
+                if h0 <= cy && cy <= h1 && !head.contains(&nr0) {
+                    head.push(nr0);
+                }
+            }
+            cells.push(GridCell {
+                r0: nr0,
+                c0: nc0,
+                r1: nr1,
+                c1: nc1,
+                text,
+                bx,
+            });
+        }
+        // header rows run from the top
+        head.sort_unstable();
+        let head_rows: Vec<usize> = head
+            .iter()
+            .enumerate()
+            .take_while(|(k, r)| *k == **r)
+            .map(|(_, r)| *r)
+            .collect();
+        Some(Grid {
+            cells,
+            head_rows,
+            n_rows,
+            n_cols,
+        })
+    }
+
+    /// Rotated text inside an upright table (column headers set sideways, "Ezzitounna" /
+    /// "La Manouba" over narrow columns) is left out of the model's units; each such unit whose
+    /// centre lies in a column's span, overlapping a row's band, fills that cell if the model left
+    /// it empty, its lines in reading order (text running up stacks left to right). Returns the units placed.
+    pub fn place_rotated(&mut self, units: &[super::units::Unit], minor: &[bool]) -> Vec<usize> {
+        let span = |pick: &dyn Fn(&GridCell) -> Option<usize>, n: usize, lo: usize, hi: usize| {
+            let mut v = vec![(f64::INFINITY, f64::NEG_INFINITY); n];
+            for c in &self.cells {
+                if let Some(k) = pick(c).filter(|&k| k < n && !c.text.trim().is_empty()) {
+                    v[k] = (v[k].0.min(c.bx[lo]), v[k].1.max(c.bx[hi]));
+                }
+            }
+            v
+        };
+        let cols = span(&|c| (c.c0 == c.c1).then_some(c.c0), self.n_cols, 0, 2);
+        let rows = span(&|c| (c.r0 == c.r1).then_some(c.r0), self.n_rows, 1, 3);
+        let mut slots: Vec<((usize, usize), f64, usize)> = Vec::new();
+        for (i, u) in units.iter().enumerate() {
+            // header words, not stray sideways digits and punctuation
+            if !minor[i] || u.q == 0 || u.text.chars().filter(|c| c.is_alphabetic()).count() < 3 {
+                continue;
+            }
+            let p = u.pbox;
+            let cx = (p[0] + p[2]) / 2.0;
+            let Some(c) = cols.iter().position(|&(a, b)| a <= cx && cx <= b) else {
+                continue;
+            };
+            let overlap = |&(a, b): &(f64, f64)| (b.min(p[3]) - a.max(p[1])).max(0.0);
+            let Some(r) = (0..rows.len())
+                .filter(|&r| overlap(&rows[r]) > 0.0)
+                .max_by(|&x, &y| overlap(&rows[x]).total_cmp(&overlap(&rows[y])))
+            else {
+                continue;
+            };
+            let order = if u.q == 3 { -cx } else { cx };
+            slots.push(((r, c), order, i));
+        }
+        slots.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        // only into cells the model left empty: rotated text over a cell that holds text belongs
+        // to a column the grid lost, and stays out of the table
+        let filled: Vec<bool> = self
+            .cells
+            .iter()
+            .map(|c| !c.text.trim().is_empty())
+            .collect();
+        let mut placed = Vec::new();
+        for ((r, c), _, i) in slots {
+            let (t, p) = (units[i].text.trim(), units[i].pbox);
+            if self
+                .cells
+                .iter()
+                .zip(&filled)
+                .any(|(x, &f)| f && x.r0 <= r && r <= x.r1 && x.c0 <= c && c <= x.c1)
+            {
+                continue;
+            }
+            let k = match self
+                .cells
+                .iter()
+                .position(|x| x.r0 <= r && r <= x.r1 && x.c0 <= c && c <= x.c1)
+            {
+                Some(k) => k,
+                None => {
+                    self.cells.push(GridCell {
+                        r0: r,
+                        c0: c,
+                        r1: r,
+                        c1: c,
+                        text: String::new(),
+                        bx: p,
+                    });
+                    self.cells.len() - 1
+                }
+            };
+            let cell = &mut self.cells[k];
+            if cell.text.trim().is_empty() {
+                cell.text = t.to_string();
+                cell.bx = p;
+            } else {
+                cell.text = format!("{} {}", cell.text.trim(), t);
+                cell.bx = [
+                    cell.bx[0].min(p[0]),
+                    cell.bx[1].min(p[1]),
+                    cell.bx[2].max(p[2]),
+                    cell.bx[3].max(p[3]),
+                ];
+            }
+            placed.push(i);
+        }
+        placed
+    }
+
+    /// Merge rows a ruled table draws as one: when most row boundaries carry a horizontal rule
+    /// across the table, a boundary without one is a wrapped cell's next line (a tall SWOT cell
+    /// read as 35 rows, "подметание территории ... 1 раз в" / "сутки" split in two). `h_rules`
+    /// are `[y, x0, x1]` in the frame of the cell boxes.
+    pub fn merge_unruled_rows(&mut self, h_rules: &[[f32; 3]]) {
+        if self.n_rows < 3 || h_rules.is_empty() {
+            return;
+        }
+        let x0 = self
+            .cells
+            .iter()
+            .map(|c| c.bx[0])
+            .fold(f64::INFINITY, f64::min);
+        let x1 = self
+            .cells
+            .iter()
+            .map(|c| c.bx[2])
+            .fold(f64::NEG_INFINITY, f64::max);
+        let width = (x1 - x0).max(1.0);
+        // each row's ink band, from its one-row cells
+        let mut band = vec![(f64::INFINITY, f64::NEG_INFINITY); self.n_rows];
+        for c in self
+            .cells
+            .iter()
+            .filter(|c| c.r0 == c.r1 && !c.text.is_empty())
+        {
+            band[c.r0].0 = band[c.r0].0.min(c.bx[1]);
+            band[c.r0].1 = band[c.r0].1.max(c.bx[3]);
+        }
+        if band.iter().any(|b| !b.0.is_finite()) {
+            return;
+        }
+        let ruled: Vec<bool> = (0..self.n_rows - 1)
+            .map(|r| {
+                let (lo, hi) = (band[r].1 - 2.0, band[r + 1].0 + 2.0);
+                h_rules.iter().any(|&[y, a, b]| {
+                    let y = y as f64;
+                    let cover = (x1.min(b as f64) - x0.max(a as f64)).max(0.0);
+                    y >= lo && y <= hi && cover >= 0.5 * width
+                })
+            })
+            .collect();
+        let n_ruled = ruled.iter().filter(|&&r| r).count();
+        if n_ruled < 2 || n_ruled * 5 < ruled.len() * 3 || n_ruled == ruled.len() {
+            return;
+        }
+        // a rule-less boundary folds only a continuation line: the row below starts with an empty
+        // first column, fills at most half the columns, or fills columns the row above left
+        // empty; two complete records (a table ruled every other row) stay apart, as do header rows
+        let filled = |r: usize| -> Vec<usize> {
+            let mut cols: Vec<usize> = self
+                .cells
+                .iter()
+                .filter(|c| c.r0 <= r && r <= c.r1 && !c.text.is_empty())
+                .flat_map(|c| c.c0..=c.c1)
+                .collect();
+            cols.sort_unstable();
+            cols.dedup();
+            cols
+        };
+        let fold: Vec<bool> = (0..self.n_rows - 1)
+            .map(|r| {
+                if ruled[r] || self.head_rows.contains(&r) || self.head_rows.contains(&(r + 1)) {
+                    return false;
+                }
+                let (a, b) = (filled(r), filled(r + 1));
+                let overlap = b.iter().filter(|q| a.contains(q)).count();
+                !b.contains(&0) || b.len() * 2 <= self.n_cols || overlap <= 1
+            })
+            .collect();
+        if !fold.iter().any(|&f| f) {
+            return;
+        }
+        let mut map = vec![0usize; self.n_rows];
+        for r in 1..self.n_rows {
+            map[r] = map[r - 1] + !fold[r - 1] as usize;
+        }
+        let mut merged: Vec<GridCell> = Vec::new();
+        let mut cells = std::mem::take(&mut self.cells);
+        cells.sort_by(|a, b| (a.c0, a.bx[1]).partial_cmp(&(b.c0, b.bx[1])).unwrap());
+        for mut c in cells {
+            c.r0 = map[c.r0];
+            c.r1 = map[c.r1];
+            if let Some(m) = merged
+                .iter_mut()
+                .find(|m| m.c0 == c.c0 && m.r0 <= c.r1 && c.r0 <= m.r1)
+            {
+                if !c.text.is_empty() {
+                    if !m.text.is_empty() {
+                        m.text.push(' ');
+                    }
+                    m.text.push_str(&c.text);
+                }
+                m.r0 = m.r0.min(c.r0);
+                m.r1 = m.r1.max(c.r1);
+                m.c1 = m.c1.max(c.c1);
+                m.bx = [
+                    m.bx[0].min(c.bx[0]),
+                    m.bx[1].min(c.bx[1]),
+                    m.bx[2].max(c.bx[2]),
+                    m.bx[3].max(c.bx[3]),
+                ];
+            } else {
+                merged.push(c);
+            }
+        }
+        merged.sort_by_key(|c| (c.r0, c.c0));
+        self.cells = merged;
+        let mut head: Vec<usize> = self.head_rows.iter().map(|&r| map[r]).collect();
+        head.dedup();
+        self.head_rows = head;
+        self.n_rows = map[self.n_rows - 1] + 1;
+    }
+}
+
 /// Fold near-empty columns into their nearest neighbour (tn_core._squeeze, column rule).
 fn squeeze_cols(cells: &mut Vec<GridCell>, head: &[usize], n_cols: &mut usize, hh: f64) {
     let mut changed = true;
@@ -836,6 +1502,7 @@ pub fn decode_grid(units: &[DUnit], idx: &[usize], l: &Logits, opt: &DecodeOptio
     let mut n_rows = n_rows0;
     if opt.fold_wraps {
         fold_wrapped_rows(&mut placed, &mut head_rows, &mut n_rows);
+        fold_lead_wraps(&mut placed, &mut head_rows, &mut n_rows);
         fold_header_wraps(&mut placed, &mut head_rows, &mut n_rows);
     }
     Grid {
@@ -950,6 +1617,90 @@ fn fold_wrapped_rows(cells: &mut Vec<GridCell>, head: &mut Vec<usize>, n_rows: &
                 c.bx[2].max(b[2]),
                 c.bx[3].max(b[3]),
             ];
+        }
+        remove_row(cells, head, n_rows, r);
+    }
+}
+
+/// A wrapped row label whose values sit on its last line ("Unrealized appreciation on" / "Total
+/// Return Swap" / "contracts  $ (67,658)") comes out as value-less rows above the value row. A body
+/// row with no number folds down into the row below when that row has a number, every filled cell
+/// has a filled, non-number cell directly below it that reads as its next line ([`continues`]),
+/// and each pair sits line-tight (gap under 0.6x a line's height). Bottom-up, so a label
+/// wrapped over three lines folds twice.
+fn fold_lead_wraps(cells: &mut Vec<GridCell>, head: &mut Vec<usize>, n_rows: &mut usize) {
+    // a line's height: the median filled cell (most cells hold one line); a short lowercase
+    // line's own box ("contracts") lacks the ascender height
+    let mut hs: Vec<f64> = cells
+        .iter()
+        .filter(|c| !c.text.trim().is_empty())
+        .map(|c| c.bx[3] - c.bx[1])
+        .collect();
+    if hs.is_empty() {
+        return;
+    }
+    let lh = median(&mut hs);
+    let mut r = n_rows.saturating_sub(1);
+    while r > 0 {
+        r -= 1;
+        if head.contains(&r) || head.contains(&(r + 1)) {
+            continue;
+        }
+        if cells
+            .iter()
+            .any(|c| c.r0 != c.r1 && c.r0 <= r + 1 && r <= c.r1)
+        {
+            continue; // spans touching either row
+        }
+        let row = |cells: &[GridCell], r: usize| -> Vec<usize> {
+            (0..cells.len())
+                .filter(|&k| cells[k].r0 == r && !cells[k].text.trim().is_empty())
+                .collect()
+        };
+        let (here, below) = (row(cells, r), row(cells, r + 1));
+        if here.is_empty()
+            || here.iter().any(|&k| is_number(&cells[k].text))
+            || !below.iter().any(|&k| is_number(&cells[k].text))
+        {
+            continue;
+        }
+        let mut pairs = Vec::new();
+        let ok = here.iter().all(|&k| {
+            let a = &cells[k];
+            let Some(&j) = below
+                .iter()
+                .find(|&&j| cells[j].c0 == a.c0 && cells[j].c1 == a.c1)
+            else {
+                return false;
+            };
+            let b = &cells[j];
+            let line_h = (b.bx[3] - b.bx[1]).max(lh);
+            pairs.push((k, j));
+            // a bracket opening the lower line marks a sub-item ("(ii) Income tax ...") here, not
+            // a continuation, unless the upper line left one open
+            let bracketed = b.text.trim_start().starts_with(['(', '[', '{'])
+                && a.text.matches('(').count() <= a.text.matches(')').count();
+            !is_number(&b.text)
+                && !starts_item(&b.text)
+                && !bracketed
+                && continues(&a.text, &b.text)
+                && line_h > 0.0
+                && b.bx[1] - a.bx[3] < 0.6 * line_h
+        });
+        if !ok {
+            continue;
+        }
+        for (k, j) in pairs {
+            let (t, bx) = (cells[k].text.trim().to_string(), cells[k].bx);
+            let c = &mut cells[j];
+            c.text = format!("{} {}", t, c.text.trim());
+            c.bx = [
+                c.bx[0].min(bx[0]),
+                c.bx[1].min(bx[1]),
+                c.bx[2].max(bx[2]),
+                c.bx[3].max(bx[3]),
+            ];
+            cells[k].text.clear();
         }
         remove_row(cells, head, n_rows, r);
     }
@@ -1146,6 +1897,59 @@ impl Grid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Four ruled rows, the second's label wrapping onto a fifth line with no rule above it:
+    /// the wrap folds into its row; a table with no interior rules is left alone.
+    #[test]
+    fn merge_unruled_rows_folds_wrapped_lines() {
+        let cell = |r: usize, c: usize, t: &str, y: f64| GridCell {
+            r0: r,
+            c0: c,
+            r1: r,
+            c1: c,
+            text: t.into(),
+            bx: [
+                10.0 + 100.0 * c as f64,
+                y,
+                90.0 + 100.0 * c as f64,
+                y + 10.0,
+            ],
+        };
+        let rows = [
+            ("a", "1", 0.0),
+            ("b first", "2", 20.0),
+            ("b second", "", 32.0),
+            ("c", "3", 50.0),
+            ("d", "4", 70.0),
+        ];
+        let mk = || Grid {
+            cells: rows
+                .iter()
+                .enumerate()
+                .flat_map(|(r, &(l, v, y))| [cell(r, 0, l, y), cell(r, 1, v, y)])
+                .collect(),
+            head_rows: vec![0],
+            n_rows: 5,
+            n_cols: 2,
+        };
+        let rules: Vec<[f32; 3]> = [15.0, 45.0, 65.0]
+            .iter()
+            .map(|&y| [y, 10.0, 190.0])
+            .collect();
+        let mut g = mk();
+        g.merge_unruled_rows(&rules);
+        assert_eq!(g.n_rows, 4);
+        let b: Vec<&str> = g
+            .cells
+            .iter()
+            .filter(|c| c.r0 == 1)
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(b, ["b first b second", "2"]);
+        let mut g = mk();
+        g.merge_unruled_rows(&[]);
+        assert_eq!(g.n_rows, 5);
+    }
 
     /// The exhaustive average linkage `avg_link` replaced (rescans every live pair per merge):
     /// the reference its merges, order and sums must match exactly.

@@ -642,12 +642,30 @@ fn run_page_framed(
         if g.len() < 2 {
             continue;
         }
-        let grid = decode::decode_grid(&du, &g, &logits, opt);
+        let mut grid = decode::decode_grid(&du, &g, &logits, opt);
+        // rules are in page points, cell boxes in the reading frame: the same on upright text
+        let mut ruled = false;
+        if let Some(r) = rules.filter(|_| g.iter().all(|&i| units[i].q == 0)) {
+            let words: Vec<&[(f64, f64, String)]> =
+                units.iter().map(|u| u.words.as_slice()).collect();
+            match grid.lattice(&r.h, &r.v, &du, &words, &g) {
+                Some(l) => {
+                    grid = l;
+                    ruled = true;
+                }
+                None => grid.merge_unruled_rows(&r.h),
+            }
+        }
         // one column is a list or a stack of lines, not a table (seen on OCR pages: a
         // signature block's lines grouped into a 1-wide grid); tables of contents, charts and
         // multi-column prose read as grids are no tables either
-        if grid.n_cols < 2 || grid.is_toc() || grid.is_chart() || grid.is_prose() {
+        // (a grid drawn in ruling lines is no table of contents)
+        if grid.n_cols < 2 || (!ruled && grid.is_toc()) || grid.is_chart() || grid.is_prose() {
             continue;
+        }
+        let mut g = g;
+        if g.iter().all(|&i| units[i].q == 0) {
+            g.extend(grid.place_rotated(&units, &minor));
         }
         let mut b = [
             f64::INFINITY,

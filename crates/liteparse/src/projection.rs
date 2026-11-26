@@ -3349,6 +3349,18 @@ const MONO_NAME_HINTS: &[&str] = &[
     "Fira Code",
 ];
 
+/// Bold faces whose names never say so: URW's TeX Times / Palatino cuts end in `-Medi` /
+/// `-MediItal` (`NimbusRomNo9L-Medi`, not `-Medium`), Computer Modern / cm-super bold extended are
+/// `CMBX10`, `CMSSBX10`, `SFBX1000`.
+fn tex_bold_name(name: &str) -> bool {
+    let base = name.rsplit_once('+').map_or(name, |(_, b)| b);
+    base.ends_with("-Medi")
+        || base.ends_with("-MediItal")
+        || ["CMBX", "CMSSBX", "SFBX"]
+            .iter()
+            .any(|p| base.starts_with(p))
+}
+
 fn name_contains_any(name: &str, hints: &[&str]) -> bool {
     hints.iter().any(|h| name.contains(h))
 }
@@ -3521,11 +3533,12 @@ pub(crate) fn is_italic_item(item: &TextItem) -> bool {
     font_is_italic(item.font_name.as_deref(), item.font_flags)
 }
 
-/// Bold from a font's flags (ForceBold), weight (600+) or name.
-pub(crate) fn font_is_bold(name: Option<&str>, weight: Option<i32>, flags: Option<i32>) -> bool {
+/// Bold from a font's flags (ForceBold) or name. Not from its weight: PDFium derives that from the
+/// descriptor's StemV alone, which marks regular faces bold ("Times-Roman" at 740, a "Calibri"
+/// subset at 640, "F3" at 4220).
+pub(crate) fn font_is_bold(name: Option<&str>, _weight: Option<i32>, flags: Option<i32>) -> bool {
     flags.is_some_and(|f| f & PDF_FONT_FLAG_FORCE_BOLD != 0)
-        || weight.is_some_and(|w| w >= 600)
-        || name.is_some_and(|n| name_contains_any(n, BOLD_NAME_HINTS))
+        || name.is_some_and(|n| name_contains_any(n, BOLD_NAME_HINTS) || tex_bold_name(n))
 }
 
 /// Italic from a font's flags or name.
@@ -4348,6 +4361,8 @@ fn xy_find_column_cut(
         let mut n = peaks.len();
         let mut covered_sum = vec![0.0f32; n];
         let mut band_count = vec![0usize; n];
+        // Bands a column's text fills (wrapped prose lines reach the next column's start)
+        let mut full_bands = vec![0usize; n];
         // Bands where everything in the column is display math or an
         // equation number (`math_bands`), or that plus formula fragments the
         // math pass left as text (`formula_bands`).
@@ -4391,8 +4406,12 @@ fn xy_find_column_cut(
                         max_x - peaks[c].0
                     };
                     if col_w > 1.0 {
-                        covered_sum[c] += ((hi_x[c] - lo_x[c]) / col_w).min(1.0);
+                        let cover = ((hi_x[c] - lo_x[c]) / col_w).min(1.0);
+                        covered_sum[c] += cover;
                         band_count[c] += 1;
+                        if cover >= 0.85 {
+                            full_bands[c] += 1;
+                        }
                         if all_math[c] {
                             math_bands[c] += 1;
                         }
@@ -4506,7 +4525,12 @@ fn xy_find_column_cut(
             *tabular = true;
             return None;
         }
-        if avg_fill.is_finite() && avg_fill < XY_COLUMN_MIN_FILL {
+        // Two columns of wrapped prose with many short lines (legal notices, forms in prose:
+        // "A.- TITULAR" between paragraphs) average a table's fill, but a table column's cells
+        // rarely run the full slot width, line after line, as wrapped text does in both.
+        let wrapped =
+            n == 2 && (0..2).all(|c| full_bands[c] >= 2 && full_bands[c] * 10 >= band_count[c]);
+        if !wrapped && avg_fill.is_finite() && avg_fill < XY_COLUMN_MIN_FILL {
             *tabular = true;
             return None;
         }
@@ -5218,7 +5242,37 @@ pub(crate) fn xy_cut(
     }
     let bbox = xy_root_bbox(items, &all, page_width, page_height);
     let median_h = xy_median_line_height(items, &all);
-    xy_cut_rec(items, all, bbox, 0, false, median_h, figures)
+    let rtl_page = {
+        let (mut rtl, mut ltr) = (0usize, 0usize);
+        for &i in &all {
+            for c in items[i].item.text.chars().filter(|c| c.is_alphabetic()) {
+                if crate::bidi::is_rtl_char(c) {
+                    rtl += 1;
+                } else {
+                    ltr += 1;
+                }
+            }
+        }
+        rtl > 2 * ltr
+    };
+    let mut region = xy_cut_rec(items, all, bbox, 0, false, median_h, figures);
+    if rtl_page {
+        rtl_column_order(&mut region);
+    }
+    region
+}
+
+/// An Arabic / Hebrew page reads its columns right to left: the right column of a vertical cut
+/// comes first (a two-column poem read its left column first).
+fn rtl_column_order(region: &mut Region) {
+    if let RegionKind::Split { axis, children } = &mut region.kind {
+        if *axis == CutAxis::Vertical {
+            children.reverse();
+        }
+        for c in children.iter_mut() {
+            rtl_column_order(c);
+        }
+    }
 }
 
 /// Pre-order walk of leaves. Each leaf yields its `region_path` (index trail

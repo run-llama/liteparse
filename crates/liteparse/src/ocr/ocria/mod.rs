@@ -366,7 +366,11 @@ impl OcriaEngine {
             // keep that when it finds far more lines (the router's flip vote finishes 270 deg)
             turned = img0.rot90(1);
             let tboxes = self.det.detect(&turned)?;
-            if page::long_lines(&tboxes) > 2 * page::long_lines(&boxes) + 5 {
+            // a numeric table also has few long boxes, and turned, each stacked column of numbers
+            // reads as one long line: the turn must also read better, not only find longer boxes
+            if page::long_lines(&tboxes) > 2 * page::long_lines(&boxes) + 5
+                && self.sample_conf(&turned, &tboxes)? > self.sample_conf(&img0, &boxes)? + 0.05
+            {
                 img = &turned;
                 boxes = tboxes;
                 faint.clear();
@@ -433,6 +437,29 @@ impl OcriaEngine {
 
     fn rec_for(&self, group: usize) -> &Recognizer {
         &self.recs[group]
+    }
+
+    /// Mean reading confidence over the widest boxes (up to 24), weighted by text length: how
+    /// well the page reads in this frame.
+    fn sample_conf(&self, img: &Img, boxes: &[Quad]) -> Result<f32, OcriaError> {
+        let mut by_w: Vec<&Quad> = boxes.iter().collect();
+        let width = |q: &Quad| {
+            let xs = q.iter().map(|p| p[0]);
+            xs.clone().fold(f32::NEG_INFINITY, f32::max) - xs.fold(f32::INFINITY, f32::min)
+        };
+        by_w.sort_by(|a, b| width(b).total_cmp(&width(a)));
+        let sample: Vec<Quad> = by_w.into_iter().take(24).copied().collect();
+        if sample.is_empty() {
+            return Ok(0.0);
+        }
+        let (reads, _, _) = self.read(img, &sample)?;
+        let (mut num, mut den) = (0f32, 0f32);
+        for (t, c) in &reads {
+            let n = t.trim().chars().count().max(1) as f32;
+            num += c * n;
+            den += n;
+        }
+        Ok(if den > 0.0 { num / den } else { 0.0 })
     }
 
     /// Readings per box, whether the page was read upside down (`server.read`) and the page's
