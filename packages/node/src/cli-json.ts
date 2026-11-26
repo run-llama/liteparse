@@ -2,6 +2,8 @@ import type {
   DocumentAnnotation,
   FormField,
   ExtractedImage,
+  LayoutBlock,
+  LayoutCell,
   PageComplexityStats,
   ParseResult,
   TextItem,
@@ -206,6 +208,56 @@ function imageToCliJson(image: ExtractedImage) {
   };
 }
 
+function layoutCellToCliJson(cell: LayoutCell) {
+  return {
+    text: cell.text,
+    ...(cell.bbox !== undefined
+      ? {
+          bbox: {
+            x: cell.bbox.x,
+            y: cell.bbox.y,
+            width: cell.bbox.width,
+            height: cell.bbox.height,
+          },
+        }
+      : {}),
+    text_item_indices: cell.textItemIndices,
+  };
+}
+
+function layoutBlockToCliJson(block: LayoutBlock) {
+  return {
+    kind: block.kind,
+    ...(block.text !== undefined ? { text: block.text } : {}),
+    ...(block.level !== undefined ? { level: block.level } : {}),
+    ...(block.bold ? { bold: true } : {}),
+    ...(block.italic ? { italic: true } : {}),
+    ...(block.ordered !== undefined ? { ordered: block.ordered } : {}),
+    ...(block.marker !== undefined ? { marker: block.marker } : {}),
+    ...(block.lines !== undefined ? { lines: block.lines } : {}),
+    ...(block.lang !== undefined ? { lang: block.lang } : {}),
+    ...(block.header !== undefined
+      ? { header: block.header.map(layoutCellToCliJson) }
+      : {}),
+    ...(block.rows !== undefined
+      ? { rows: block.rows.map((row) => row.map(layoutCellToCliJson)) }
+      : {}),
+    ...(block.id !== undefined ? { id: block.id } : {}),
+    ...(block.format !== undefined ? { format: block.format } : {}),
+    ...(block.bbox !== undefined
+      ? {
+          bbox: {
+            x: block.bbox.x,
+            y: block.bbox.y,
+            width: block.bbox.width,
+            height: block.bbox.height,
+          },
+        }
+      : {}),
+    text_item_indices: block.textItemIndices,
+  };
+}
+
 /** Project the camelCase Node API result into the Rust CLI JSON schema. */
 export function parseResultToCliJson(
   result: ParseResult,
@@ -249,6 +301,9 @@ export function parseResultToCliJson(
               roots: page.structureTree.roots.map(structureTreeElementToCliJson),
             },
           }
+        : {}),
+      ...(page.blocks !== undefined
+        ? { blocks: page.blocks.map(layoutBlockToCliJson) }
         : {}),
     })),
     ...(result.images.length
