@@ -11,12 +11,6 @@ on:
       - ".github/workflows/ci-python.yml"
   pull_request:
     branches: [main]
-    paths:
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "packages/python/**"
-      - ".github/workflows/ci-python.yml"
   merge_group:
     types: [checks_requested]
 
@@ -34,7 +28,48 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Decides whether this PR touches the paths these jobs test. pull_request has no
+  # paths filter, so the "required" job below always reports: a PR outside these
+  # paths skips the heavy jobs instead of waiting for checks that never start.
+  # Merge queue and push runs always run everything.
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ steps.diff.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          # The PR merge commit and its first parent (the base) are enough for
+          # a file list; no blobs outside .github are fetched.
+          fetch-depth: 2
+          filter: blob:none
+          sparse-checkout: .github
+          persist-credentials: false
+      - id: diff
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PATHS_REGEX: '^(crates/|Cargo\.toml$|Cargo\.lock$|packages/python/|\.github/workflows/ci-python\.yml$)'
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only --no-renames HEAD^1 HEAD)
+          echo "Changed files:"
+          echo "$changed"
+          if echo "$changed" | grep -Eq "$PATHS_REGEX"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -206,6 +241,8 @@ jobs:
           if-no-files-found: error
 
   sdist:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -352,3 +389,25 @@ jobs:
               lit parse demo/docs/apple-10k-2024.pdf --no-ocr --max-pages 1 -q | head -5
               echo "CLI test passed"
             '
+
+  # The one check branch protection requires for this workflow. Skipped jobs
+  # (a PR outside the paths above) count as passing; failed or cancelled ones
+  # fail it.
+  required:
+    name: ci-python required
+    if: always()
+    needs: [changes, build, sdist, test]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Check the needed jobs
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Needed job results: $RESULTS"
+          for result in $RESULTS; do
+            case "$result" in
+              success|skipped) ;;
+              *) exit 1 ;;
+            esac
+          done
