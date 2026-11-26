@@ -49,6 +49,11 @@ pub struct Adaptive {
     /// length lies under. The first pass misses much of a page's small print, so the lines
     /// it does find there are a minority of what it measures.
     pub quantile: f32,
+    /// Least share of the page the small lines (under `min_h`) must cover. Missed small print
+    /// sits in dense blocks the first pass already finds parts of (a newspaper's columns, a
+    /// form's fine print); a chart's axis labels or a few footnote lines are short and
+    /// scattered, read fine at the first pass, and gain nothing from the second.
+    pub min_cover: f32,
 }
 
 /// The second pass is skipped unless it enlarges the detector input by at least this much.
@@ -140,6 +145,21 @@ impl Detector {
             }
         }
         if h >= a.min_h {
+            return None;
+        }
+        let cover: f32 = boxes
+            .iter()
+            .filter(|q| {
+                let hq = quad_h(q) * scale as f32;
+                (ADAPTIVE_MIN_TEXT_H..a.min_h).contains(&hq)
+            })
+            .map(|q| {
+                let (x0, y0, x1, y1) = extent(q);
+                (x1 - x0) * (y1 - y0)
+            })
+            .sum::<f32>()
+            / (img.w * img.h).max(1) as f32;
+        if cover < a.min_cover {
             return None;
         }
         let side = ((self.long_side as f32 * a.target_h / h) as usize).min(a.max_side) / 32 * 32;
