@@ -65,7 +65,7 @@ napi-rs installation is unnecessary.
 
 Native builds also need a C/C++ compiler and linker. On Windows, install the
 Visual Studio **Desktop development with C++** workload. The default Tesseract
-feature also requires [CMake](https://docs.rs/crate/tesseract-rs/0.2.0#system-requirements).
+feature also requires [CMake](https://docs.rs/crate/tesseract-rs/0.4.2#system-requirements).
 CI installs `libtesseract-dev` and
 `libleptonica-dev` on Ubuntu, and `tesseract` and `leptonica` through Homebrew
 on macOS. The Node build also calls a Bash script; make sure Bash is available
