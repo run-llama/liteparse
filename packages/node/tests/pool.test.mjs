@@ -3,9 +3,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deflateSync } from "node:zlib";
-import { fileURLToPath } from "node:url";
-import { writeFileSync, mkdtempSync, existsSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { readFileSync, writeFileSync, mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -16,60 +15,27 @@ const SAMPLE_PDF = fileURLToPath(
 );
 const CFG = { quiet: true, ocrEnabled: false, outputFormat: "text" };
 
+const HANG_HOOK = pathToFileURL(
+  fileURLToPath(new URL("./support/hang-worker-replies.mjs", import.meta.url)),
+).href;
+
 /**
- * One page with a dense grid of tiny text objects. Parse time is superlinear
- * in the object count (PDFium's text-page assembly), which makes a small file
- * arbitrarily slow to parse — the same shape as the rogue documents that
- * stall prod pipelines, used here to exercise the timeout path.
+ * Builds a pool whose initial workers never answer a parse (see
+ * support/hang-worker-replies.mjs), so every parse they get runs into the
+ * deadline. The pool forks its workers in the constructor and they inherit
+ * process.env at that moment; NODE_OPTIONS is restored straight after, so
+ * workers spawned later, such as the replacement for a killed worker, are
+ * ordinary.
  */
-function gridPdf(nObjects) {
-  const cols = Math.max(1, Math.floor(Math.sqrt(nObjects)));
-  const parts = [];
-  for (let i = 0; i < nObjects; i++) {
-    const x = (20 + (i % cols) * 2.5).toFixed(1);
-    const y = (770 - Math.floor(i / cols) * 2.5).toFixed(1);
-    parts.push(`BT /F1 2 Tf ${x} ${y} Td (x) Tj ET`);
+function poolWithHangingWorkers(options) {
+  const saved = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = `${saved ?? ""} --import=${HANG_HOOK}`.trim();
+  try {
+    return new LiteParse(options);
+  } finally {
+    if (saved === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = saved;
   }
-  const stream = deflateSync(Buffer.from(parts.join("\n")));
-  const width = Math.floor(40 + cols * 2.5);
-  const height = Math.floor(40 + (nObjects / cols) * 2.5);
-  const objects = [
-    Buffer.from("<< /Type /Catalog /Pages 2 0 R >>"),
-    Buffer.from("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
-    Buffer.from(
-      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${width} ${height}] ` +
-        "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
-    ),
-    Buffer.from("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
-    Buffer.concat([
-      Buffer.from(`<< /Length ${stream.length} /Filter /FlateDecode >>\nstream\n`),
-      stream,
-      Buffer.from("\nendstream"),
-    ]),
-  ];
-  const chunks = [Buffer.from("%PDF-1.4\n")];
-  const offsets = [];
-  let position = chunks[0].length;
-  objects.forEach((body, index) => {
-    offsets.push(position);
-    const chunk = Buffer.concat([
-      Buffer.from(`${index + 1} 0 obj\n`),
-      body,
-      Buffer.from("\nendobj\n"),
-    ]);
-    chunks.push(chunk);
-    position += chunk.length;
-  });
-  const xref = [`xref`, `0 ${objects.length + 1}`, `0000000000 65535 f `]
-    .concat(offsets.map((off) => `${String(off).padStart(10, "0")} 00000 n `))
-    .join("\n");
-  chunks.push(
-    Buffer.from(
-      `${xref}\ntrailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\n` +
-        `startxref\n${position}\n%%EOF\n`,
-    ),
-  );
-  return Buffer.concat(chunks);
 }
 
 test("pool matches in-process results", { skip: !existsSync(SAMPLE_PDF) }, async () => {
@@ -78,7 +44,6 @@ test("pool matches in-process results", { skip: !existsSync(SAMPLE_PDF) }, async
   const pooled = new LiteParse({ ...CFG, poolSize: 2 });
   try {
     const fromPath = await pooled.parse(SAMPLE_PDF);
-    const { readFileSync } = await import("node:fs");
     const fromBytes = await pooled.parse(readFileSync(SAMPLE_PDF));
     assert.equal(fromPath.text, expected.text);
     assert.equal(fromBytes.text, expected.text);
@@ -93,11 +58,10 @@ test("parseTimeoutMs requires poolSize", () => {
 });
 
 test("timeout kills worker and pool recovers", { skip: !existsSync(SAMPLE_PDF) }, async () => {
-  const slowDoc = gridPdf(64000); // parses in seconds, not before the deadline
-  const pooled = new LiteParse({ ...CFG, poolSize: 1, parseTimeoutMs: 500 });
+  const pooled = poolWithHangingWorkers({ ...CFG, poolSize: 1, parseTimeoutMs: 500 });
   try {
     await pooled.warmUp();
-    await assert.rejects(pooled.parse(slowDoc), (e) => {
+    await assert.rejects(pooled.parse(readFileSync(SAMPLE_PDF)), (e) => {
       assert.ok(e instanceof ParseTimeoutError);
       assert.equal(e.timeoutMs, 500);
       assert.match(e.source, /bytes/);
@@ -114,8 +78,8 @@ test("timeout kills worker and pool recovers", { skip: !existsSync(SAMPLE_PDF) }
 test("timeout names the file", async () => {
   const dir = mkdtempSync(join(tmpdir(), "liteparse-pool-"));
   const slowPath = join(dir, "rogue.pdf");
-  writeFileSync(slowPath, gridPdf(64000));
-  const pooled = new LiteParse({ ...CFG, poolSize: 1, parseTimeoutMs: 500 });
+  writeFileSync(slowPath, "%PDF-1.4\n%%EOF\n");
+  const pooled = poolWithHangingWorkers({ ...CFG, poolSize: 1, parseTimeoutMs: 500 });
   try {
     await assert.rejects(pooled.parse(slowPath), (e) => {
       assert.ok(e instanceof ParseTimeoutError);

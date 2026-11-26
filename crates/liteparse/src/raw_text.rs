@@ -107,6 +107,16 @@ pub struct RawTextItem {
     /// Tight box of the item's real glyphs, as a rectangle to rotate about its
     /// centre by `angle_radians`; see the module docs. Viewport space.
     pub grounding_bounds: Option<RectF>,
+    /// Complete rectangular graphics-state clip of the source text object, in
+    /// viewport coordinates. Absent for unclipped or unsupported clip stacks.
+    /// Ownership evidence only; text and glyph boxes retain their original extent.
+    pub clip_bounds: Option<RectF>,
+    /// Whether every non-whitespace source glyph has nonempty ink intersecting
+    /// the known rectangular clip. Partial glyph ink is sufficient; a fully
+    /// clipped or unknown ink box makes this false. Unknown clip stacks are
+    /// also false, as are modes without a known painted fill. Known unclipped
+    /// filled words report true; absent means no real glyph proof is available.
+    pub clip_text_complete: Option<bool>,
     /// Advance gap across a lone generated space, in page points; see the module
     /// docs. Zero or negative when the neighbours overlap.
     pub baseline_gap: Option<f64>,
@@ -209,7 +219,7 @@ fn extract(
         if run.is_empty() {
             return;
         }
-        if let Some(item) = build_item(
+        if let Some(mut item) = build_item(
             page,
             text_page,
             view_box,
@@ -218,6 +228,55 @@ fn extract(
             &mut outline_cache,
             keep_glyph_widths,
         ) {
+            let source_clip = run
+                .first()
+                .and_then(|glyph| glyph.text_object)
+                .and_then(|object| clips.object_bounds(object as usize));
+            item.clip_bounds = source_clip
+                .filter(|bounds| bounds.right > bounds.left && bounds.top > bounds.bottom)
+                .map(|bounds| page.bounds_to_viewport(view_box, &bounds));
+            let real: Vec<_> = run
+                .iter()
+                .filter(|glyph| {
+                    !glyph.generated
+                        && !char::from_u32(glyph.unicode).is_some_and(char::is_whitespace)
+                })
+                .collect();
+            item.clip_text_complete = (!real.is_empty()).then(|| {
+                real.into_iter().all(|glyph| {
+                    let ink = glyph.strict;
+                    [ink.left, ink.right, ink.top, ink.bottom]
+                        .iter()
+                        .all(|v| v.is_finite())
+                        && ink.right > ink.left
+                        && ink.bottom > ink.top
+                        && item.clip_bounds.is_none_or(|clip| {
+                            ink.left < clip.right
+                                && ink.right > clip.left
+                                && ink.top < clip.bottom
+                                && ink.bottom > clip.top
+                        })
+                })
+            });
+            if source_clip.is_some() && item.clip_bounds.is_none() {
+                item.clip_text_complete = Some(false);
+            }
+            if run
+                .first()
+                .and_then(|glyph| glyph.text_object)
+                .is_some_and(|object| !clips.object_clip_known(object as usize))
+            {
+                item.clip_text_complete = Some(false);
+            }
+            if run.first().is_some_and(|glyph| {
+                !glyph.generated
+                    && !matches!(
+                        text_page.char_at_unchecked(glyph.index).text_render_mode(),
+                        Some(0 | 2 | 4 | 6)
+                    )
+            }) {
+                item.clip_text_complete = Some(false);
+            }
             items.push(item);
         }
         run.clear();
@@ -497,6 +556,8 @@ fn build_item(
         width: bounds.right - bounds.left,
         height: bounds.bottom - bounds.top,
         grounding_bounds,
+        clip_bounds: None,
+        clip_text_complete: None,
         baseline_gap,
         mcid: first_char.marked_content_id(),
         font_name,
@@ -1095,6 +1156,8 @@ mod tests {
             width,
             height,
             grounding_bounds: None,
+            clip_bounds: None,
+            clip_text_complete: None,
             baseline_gap: None,
             mcid: Some(3),
             font_name: String::new(),

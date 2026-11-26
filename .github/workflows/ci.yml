@@ -15,6 +15,13 @@ env:
   CARGO_TERM_COLOR: always
   SKIP_INTEGRATION_TESTS: yes
 
+# A new push to a pull request cancels that PR's older run of this workflow. Pushes to
+# main and merge-queue runs get a group of their own (run_id), so they never queue
+# behind or cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   fmt:
     runs-on: ubuntu-latest
@@ -39,6 +46,21 @@ jobs:
             ~/.cache/pdfium-rs
             target
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+      # tesseract-rs's build script compiles leptonica + tesseract from C/C++ source outside
+      # target/, so the cargo cache never covered it. Shared with build-and-test (ubuntu-latest)
+      # and e2e-output.yml: same image, same build.
+      - name: Read tesseract-rs version
+        id: tesseract-rs
+        shell: bash
+        run: |
+          v=$(grep -A1 '^name = "tesseract-rs"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: Cache tesseract-rs build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.tesseract-rs
+          key: tesseract-rs-ubuntu-latest-host-${{ steps.tesseract-rs.outputs.version }}
       - run: rustup toolchain install stable --profile minimal --component clippy
       - run: cargo clippy --all-targets
 
@@ -71,6 +93,27 @@ jobs:
             target
           key: ${{ matrix.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
 
+      # tesseract-rs's build script compiles leptonica + tesseract from C/C++ source and keeps
+      # the result outside target/, so the cargo cache above never covers it and every job
+      # recompiled it (3-9 min on macos-26-intel, even on a cargo cache hit). Keyed on the
+      # tesseract-rs version alone, so ordinary Cargo.lock changes still hit.
+      - name: Read tesseract-rs version
+        id: tesseract-rs
+        shell: bash
+        run: |
+          v=$(grep -A1 '^name = "tesseract-rs"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Cache tesseract-rs build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/Library/Application Support/tesseract-rs
+            ~/.tesseract-rs
+            ~/AppData/Roaming/tesseract-rs
+          key: tesseract-rs-${{ matrix.os }}-host-${{ steps.tesseract-rs.outputs.version }}
+
       - name: Force Ninja generator (Windows)
         if: runner.os == 'Windows'
         run: echo "CMAKE_GENERATOR=Ninja" >> $GITHUB_ENV
@@ -88,12 +131,16 @@ jobs:
       - name: OCR smoke test (runtime tessdata download)
         shell: bash
         run: |
-          # Wipe any tessdata that tesseract-rs/build.rs downloaded during
+          # Move away the tessdata that tesseract-rs/build.rs downloaded during
           # `cargo build`, so the parse exercises the runtime first-use
           # download path (the code path that npm/pip prebuilt users hit).
-          rm -rf "$HOME/Library/Application Support/tesseract-rs" \
-                 "$HOME/.tesseract-rs" \
-                 "${APPDATA:-}/tesseract-rs" 2>/dev/null || true
+          # The directory also holds the cached leptonica/tesseract build, so it
+          # is moved aside (not deleted) and put back below for the cache save.
+          dirs=("$HOME/Library/Application Support/tesseract-rs" "$HOME/.tesseract-rs")
+          if [ -n "${APPDATA:-}" ]; then dirs+=("$APPDATA/tesseract-rs"); fi
+          for d in "${dirs[@]}"; do
+            if [ -d "$d" ]; then mv "$d" "$d.ci-saved"; fi
+          done
 
           LIT=./target/debug/lit
           [ -f "$LIT.exe" ] && LIT="$LIT.exe"
@@ -105,6 +152,10 @@ jobs:
           size=$(wc -c < ocr-out.txt)
           echo "OCR output size: $size bytes"
           test "$size" -gt 200
+
+          for d in "${dirs[@]}"; do
+            if [ -d "$d.ci-saved" ]; then rm -rf "$d"; mv "$d.ci-saved" "$d"; fi
+          done
 
   # Test that docker builds
   build-docker-image:

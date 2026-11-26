@@ -515,7 +515,7 @@ pub fn extract_blocks(
 /// nothing is silently dropped.
 pub fn render_page_markdown(page: &ParsedPage, blocks: Option<&[PositionedBlock]>) -> String {
     match blocks {
-        Some(blocks) => render_blocks(blocks),
+        Some(blocks) => resolve_soft_hyphens(&render_blocks(blocks)),
         None => {
             let mut out = String::from("```text\n");
             out.push_str(&page.text);
@@ -526,6 +526,39 @@ pub fn render_page_markdown(page: &ParsedPage, blocks: Option<&[PositionedBlock]
             out
         }
     }
+}
+
+/// SOFT HYPHENs (U+00AD) the PDF carries as text: one that ended a line, joined back to a
+/// lowercase continuation, is a broken word (`психологи\u{AD} ческая` → `психологическая`); one
+/// before any other break printed as a hyphen; and one inside a word is an invisible hint.
+fn resolve_soft_hyphens(md: &str) -> String {
+    if !md.contains('\u{00AD}') {
+        return md.to_string();
+    }
+    let chars: Vec<char> = md.chars().collect();
+    let mut out = String::with_capacity(md.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '\u{00AD}' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < chars.len() && matches!(chars[j], ' ' | '\t') {
+            j += 1;
+        }
+        let after_letter = i > 0 && chars[i - 1].is_alphabetic();
+        if j > i + 1 && after_letter && chars.get(j).is_some_and(|c| c.is_lowercase()) {
+            i = j;
+        } else if j > i + 1 || chars.get(j) == Some(&'\n') {
+            out.push('-');
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 /// The public, flat view of a page's blocks (`ParsedPage::blocks`), with

@@ -11,12 +11,6 @@ on:
       - ".github/workflows/ci-node.yml"
   pull_request:
     branches: [main]
-    paths:
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "packages/node/**"
-      - ".github/workflows/ci-node.yml"
   # No paths filter here: in the merge queue this workflow always runs, so its
   # required checks report for every queued PR.
   merge_group:
@@ -28,8 +22,56 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+# A new push to a pull request cancels that PR's older run of this workflow. Pushes to
+# main and merge-queue runs get a group of their own (run_id), so they never queue
+# behind or cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # Decides whether this PR touches the paths these jobs test. pull_request has no
+  # paths filter, so the "required" job below always reports: a PR outside these
+  # paths skips the heavy jobs instead of waiting for checks that never start.
+  # Merge queue and push runs always run everything.
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ steps.diff.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          # The PR merge commit and its first parent (the base) are enough for
+          # a file list; no blobs outside .github are fetched.
+          fetch-depth: 2
+          filter: blob:none
+          sparse-checkout: .github
+          persist-credentials: false
+      - id: diff
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PATHS_REGEX: '^(crates/|Cargo\.toml$|Cargo\.lock$|packages/node/|\.github/workflows/ci-node\.yml$)'
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only --no-renames HEAD^1 HEAD)
+          echo "Changed files:"
+          echo "$changed"
+          if echo "$changed" | grep -Eq "$PATHS_REGEX"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -39,7 +81,10 @@ jobs:
             node-arch: darwin-arm64
             pdfium-dylib: libpdfium.dylib
 
-          - os: macos-26-intel
+          # Cross-compiled on Apple silicon: macos-latest builds this target in about half
+          # the time of the Intel image (and with less variance). The x86_64 binary is
+          # still tested on Intel (macos-26-intel) in the test job below.
+          - os: macos-latest
             target: x86_64-apple-darwin
             node-arch: darwin-x64
             pdfium-dylib: libpdfium.dylib
@@ -100,6 +145,30 @@ jobs:
             target
           key: ${{ matrix.os }}-${{ matrix.target }}-cargo-node-${{ hashFiles('**/Cargo.lock') }}
 
+      # tesseract-rs's build script compiles leptonica + tesseract from C/C++ source and keeps
+      # the result outside target/, so the cargo cache above never covers it and every build
+      # recompiled it (2-9 min per job, even on a cargo cache hit). Keyed on the tesseract-rs
+      # version alone, so ordinary Cargo.lock changes still hit. The musl build runs in a
+      # container and does not use this directory.
+      - name: Read tesseract-rs version
+        if: ${{ !matrix.use-container }}
+        id: tesseract-rs
+        shell: bash
+        run: |
+          v=$(grep -A1 '^name = "tesseract-rs"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Cache tesseract-rs build
+        if: ${{ !matrix.use-container }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/Library/Application Support/tesseract-rs
+            ~/.tesseract-rs
+            ~/AppData/Roaming/tesseract-rs
+          key: tesseract-rs-${{ matrix.os }}-${{ matrix.target }}-${{ steps.tesseract-rs.outputs.version }}
+
       - name: Force Ninja generator (Windows)
         if: runner.os == 'Windows'
         run: echo "CMAKE_GENERATOR=Ninja" >> $GITHUB_ENV
@@ -115,18 +184,44 @@ jobs:
         shell: bash
         run: npx napi build --cargo-cwd ../../crates/liteparse-napi --platform --release --js false --dts native.d.ts --target ${{ matrix.target }} .
 
+      # tesseract-rs compiles leptonica + tesseract from C/C++ source into the container's
+      # /root/.tesseract-rs, outside target/. Mount it from the host and cache it, keyed on
+      # the tesseract-rs version, so the musl build stops recompiling it every run.
+      - name: Read tesseract-rs version (musl)
+        if: ${{ matrix.use-container }}
+        id: tesseract-rs-musl
+        shell: bash
+        run: |
+          v=$(grep -A1 '^name = "tesseract-rs"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Cache tesseract-rs build (musl)
+        if: ${{ matrix.use-container }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.tesseract-rs-musl
+          key: tesseract-rs-${{ matrix.os }}-${{ matrix.target }}-${{ steps.tesseract-rs-musl.outputs.version }}
+
       - name: Build native module (musl container)
         if: ${{ matrix.use-container }}
         run: |
           chmod +x scripts/build-musl-node.sh
+          mkdir -p "$HOME/.tesseract-rs-musl"
           docker run --rm \
             -v "$GITHUB_WORKSPACE":/work \
             -v "$HOME/.cargo/registry":/root/.cargo/registry \
             -v "$HOME/.cargo/git":/root/.cargo/git \
             -v "$HOME/.cache/pdfium-rs":/root/.cache/pdfium-rs \
+            -v "$HOME/.tesseract-rs-musl":/root/.tesseract-rs \
             -w /work/packages/node \
             node:20-alpine \
             /work/scripts/build-musl-node.sh
+          # The container runs as root. Hand its output back to the runner user, or the
+          # actions/cache post step can't read ~/.cargo/registry and the save fails
+          # ("tar: Cannot open: Permission denied"): this job never saved a cache.
+          sudo chown -R "$(id -u):$(id -g)" "$HOME/.cargo/registry" "$HOME/.cargo/git" \
+            "$HOME/.cache/pdfium-rs" "$HOME/.tesseract-rs-musl" "$GITHUB_WORKSPACE"
 
       - name: Copy pdfium dylib (Unix)
         if: runner.os != 'Windows'
@@ -231,3 +326,25 @@ jobs:
             -w /work/packages/node \
             node:20-alpine \
             /work/scripts/smoke-test-musl-node.sh
+
+  # The one check branch protection requires for this workflow. Skipped jobs
+  # (a PR outside the paths above) count as passing; failed or cancelled ones
+  # fail it.
+  required:
+    name: ci-node required
+    if: always()
+    needs: [changes, build, test]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Check the needed jobs
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Needed job results: $RESULTS"
+          for result in $RESULTS; do
+            case "$result" in
+              success|skipped) ;;
+              *) exit 1 ;;
+            esac
+          done

@@ -13,6 +13,13 @@ permissions:
   contents: read
   pull-requests: write
 
+# A new push to a pull request cancels that PR's older run of this workflow. Pushes to
+# main and merge-queue runs get a group of their own (run_id), so they never queue
+# behind or cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   compare-outputs:
     runs-on: ubuntu-latest
@@ -37,6 +44,22 @@ jobs:
             ~/.cache/pdfium-rs
             target
           key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('**/Cargo.lock') }}
+
+      # tesseract-rs's build script compiles leptonica + tesseract from C/C++ source outside
+      # target/, so the cargo cache never covered it. Shared with ci.yml (same image, same build).
+      - name: Read tesseract-rs version
+        id: tesseract-rs
+        shell: bash
+        run: |
+          v=$(grep -A1 '^name = "tesseract-rs"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Cache tesseract-rs build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.tesseract-rs
+          key: tesseract-rs-ubuntu-latest-host-${{ steps.tesseract-rs.outputs.version }}
 
       - name: Build
         run: cargo build --release
@@ -121,6 +144,22 @@ jobs:
             ~/.cache/pdfium-rs
             target
           key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('**/Cargo.lock') }}
+
+      # tesseract-rs's build script compiles leptonica + tesseract from C/C++ source outside
+      # target/, so the cargo cache never covered it. Shared with ci.yml (same image, same build).
+      - name: Read tesseract-rs version
+        id: tesseract-rs
+        shell: bash
+        run: |
+          v=$(grep -A1 '^name = "tesseract-rs"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Cache tesseract-rs build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.tesseract-rs
+          key: tesseract-rs-ubuntu-latest-host-${{ steps.tesseract-rs.outputs.version }}
 
       - name: Build
         run: cargo build --release

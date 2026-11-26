@@ -19,3 +19,4 @@ bindgen = { version = "0.71", optional = true }
 flate2 = "1"
 tar = "0.4"
 ureq = "3"
+sha2 = "0.10"
