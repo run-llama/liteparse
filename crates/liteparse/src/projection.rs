@@ -3521,10 +3521,11 @@ pub(crate) fn is_italic_item(item: &TextItem) -> bool {
     font_is_italic(item.font_name.as_deref(), item.font_flags)
 }
 
-/// Bold from a font's flags (ForceBold), weight (600+) or name.
-pub(crate) fn font_is_bold(name: Option<&str>, weight: Option<i32>, flags: Option<i32>) -> bool {
+/// Bold from a font's flags (ForceBold) or name. Not from its weight: PDFium derives that from the
+/// descriptor's StemV alone, which marks regular faces bold ("Times-Roman" at 740, a "Calibri"
+/// subset at 640, "F3" at 4220).
+pub(crate) fn font_is_bold(name: Option<&str>, _weight: Option<i32>, flags: Option<i32>) -> bool {
     flags.is_some_and(|f| f & PDF_FONT_FLAG_FORCE_BOLD != 0)
-        || weight.is_some_and(|w| w >= 600)
         || name.is_some_and(|n| name_contains_any(n, BOLD_NAME_HINTS))
 }
 

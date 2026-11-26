@@ -1640,6 +1640,205 @@ fn misdecoded_ti_ligature(
     })
 }
 
+/// PDFium-generated spaces that only mark letter-spacing: with character spacing (Tc) every
+/// glyph sits apart from the next, and PDFium inserts a space wherever the gap passes its own
+/// threshold ("P h o n e", "TRI NI TY"). On a line whose glyphs without a space between them sit
+/// at least 0.1 em (of the loose box height) apart (tracked text; ordinary text abuts at ~0), a generated space whose gap
+/// is no wider than that tracking plus 0.12 em is dropped. Gaps come from the loose (advance)
+/// boxes, so they measure spacing, not glyph shape.
+/// Returns those spaces, and the tracking (per em) of every character on a tracked line, which
+/// the missing-space recovery subtracts from the gaps it measures.
+fn tracking_generated_spaces(
+    text_page: &TextPage,
+    char_count: i32,
+) -> (
+    std::collections::HashSet<i32>,
+    std::collections::HashMap<i32, f32>,
+) {
+    let mut out = (
+        std::collections::HashSet::new(),
+        std::collections::HashMap::new(),
+    );
+    let mut start = 0;
+    while start < char_count {
+        let mut end = start;
+        let mut generated = 0;
+        while end < char_count {
+            let ch = text_page.char_at_unchecked(end);
+            let u = ch.unicode();
+            if u == 0x0A || u == 0x0D {
+                break;
+            }
+            generated += (u == 0x20 && ch.is_generated()) as usize;
+            end += 1;
+        }
+        if generated >= 3 {
+            tracking_line(text_page, start, end, &mut out);
+        }
+        start = end + 1;
+    }
+    out
+}
+
+fn tracking_line(
+    text_page: &TextPage,
+    start: i32,
+    end: i32,
+    out: &mut (
+        std::collections::HashSet<i32>,
+        std::collections::HashMap<i32, f32>,
+    ),
+) {
+    // glyphs in order, with the generated space (if any) between each and the next
+    let mut glyphs: Vec<(RectF, Option<i32>)> = Vec::new();
+    let mut pending: Option<i32> = None;
+    let mut spaced = false; // a real (drawn) space since the last glyph
+    let mut pairs: Vec<(f32, Option<i32>, f32)> = Vec::new(); // (gap, generated space, em)
+    for k in start..end {
+        let ch = text_page.char_at_unchecked(k);
+        if char::from_u32(ch.unicode()).is_some_and(char::is_whitespace) {
+            if ch.is_generated() {
+                pending = Some(k);
+            } else {
+                spaced = true;
+            }
+            continue;
+        }
+        let Some(b) = ch.loose_char_box() else {
+            continue;
+        };
+        let h = (b.top - b.bottom).abs();
+        if let Some((p, _)) = glyphs.last() {
+            let ph = (p.top - p.bottom).abs();
+            let same_row =
+                ((p.top + p.bottom) / 2.0 - (b.top + b.bottom) / 2.0).abs() < 0.3 * ph.max(h);
+            if same_row && b.left >= p.left && !spaced && h > 0.0 {
+                pairs.push((b.left - p.right, pending, ph.max(h)));
+            } else if !same_row || b.left < p.left {
+                pairs.push((f32::NAN, None, 0.0)); // breaks the line's run: not usable
+            }
+        }
+        glyphs.push((b, None));
+        pending = None;
+        spaced = false;
+    }
+    let mut tight: Vec<f32> = pairs
+        .iter()
+        .filter(|(g, sp, em)| sp.is_none() && g.is_finite() && *em > 0.0)
+        .map(|(g, _, em)| g / em)
+        .collect();
+    // every glyph followed by a generated space ("E - m a i l"): the spacing itself is the
+    // tracking, read from the spaced pairs when they are most of the line
+    let spaced_pairs: Vec<f32> = pairs
+        .iter()
+        .filter(|(g, sp, em)| sp.is_some() && g.is_finite() && *em > 0.0)
+        .map(|(g, _, em)| g / em)
+        .collect();
+    if tight.len() < 3 && pairs.len() >= 6 && spaced_pairs.len() * 10 >= pairs.len() * 6 {
+        tight = spaced_pairs;
+    }
+    if tight.len() < 3 {
+        return;
+    }
+    tight.sort_by(f32::total_cmp);
+    let tracking = tight[tight.len() / 2];
+    if tracking < 0.1 {
+        return;
+    }
+    for &(g, sp, em) in &pairs {
+        if let Some(k) = sp
+            && g.is_finite()
+            && g / em <= tracking + 0.12
+        {
+            out.0.insert(k);
+        }
+    }
+    out.1.extend((start..end).map(|k| (k, tracking)));
+}
+
+/// The same subsets' "ft" ligature reads as ">" ("Wirtscha>skriminalität"): a ligature-wide
+/// ">" with lowercase letters on both sides.
+fn misdecoded_ft_ligature(
+    text_page: &TextPage,
+    i: i32,
+    char_count: i32,
+    c: char,
+    cv: &CharView<'_, '_>,
+) -> bool {
+    if c != '>' || i == 0 || i + 1 >= char_count {
+        return false;
+    }
+    let lower = |k: i32| {
+        char::from_u32(text_page.char_at_unchecked(k).unicode()).is_some_and(|x| x.is_lowercase())
+    };
+    lower(i - 1)
+        && lower(i + 1)
+        && cv.loose_char_box().is_some_and(|b| {
+            let (w, h) = ((b.right - b.left).abs(), (b.bottom - b.top).abs());
+            h > 0.0 && w / h > 0.38
+        })
+}
+
+/// The glyph Wingdings (the original, not 2 or 3) draws at `c`'s code, for the codes documents
+/// use as bullets, arrows and checkboxes. Its fonts carry no ToUnicode map, so PDFium reports the
+/// code itself (`§` for the square bullet) or its symbol-font private-use alias (U+F0A7).
+fn wingdings_char(c: char) -> Option<char> {
+    let code = match c as u32 {
+        u @ 0xF020..=0xF0FF => u - 0xF000,
+        u @ 0x20..=0xFF => u,
+        _ => return None,
+    };
+    Some(match code {
+        0x20 => ' ',
+        0x6C => '\u{25CF}', // ●
+        0x6E => '\u{25A0}', // ■
+        0x6F => '\u{25A1}', // □
+        0x71 => '\u{2751}', // ❑
+        0x75 => '\u{25C6}', // ◆
+        0x76 => '\u{2756}', // ❖
+        0x77 => '\u{2B25}', // ⬥
+        0x9F => '\u{2022}', // •
+        0xA1 => '\u{25CB}', // ○
+        0xA7 => '\u{25AA}', // ▪
+        0xA8 => '\u{25FB}', // ◻
+        0xD8 => '\u{27A2}', // ➢
+        0xE8 => '\u{2794}', // ➔
+        0xF0 => '\u{21E8}', // ⇨
+        0xFB => '\u{2717}', // ✗
+        0xFC => '\u{2713}', // ✓
+        0xFD => '\u{2612}', // ☒
+        0xFE => '\u{2611}', // ☑
+        _ => return None,
+    })
+}
+
+/// `Wingdings`, `ABCDEE+Wingdings-Regular`, `Wingdings,Bold`; not `Wingdings2` / `Wingdings3`.
+fn is_wingdings_font(name: &str) -> bool {
+    let base = name.rsplit_once('+').map_or(name, |(_, b)| b);
+    base.strip_prefix("Wingdings").is_some_and(|rest| {
+        !rest.starts_with(['2', '3']) && !rest.starts_with(" 2") && !rest.starts_with(" 3")
+    })
+}
+
+/// Greek fonts often map μ to the MICRO SIGN (U+00B5) that sits in Latin-1; inside Greek words
+/// ("ΔΗΜΟΣ", "μέτρα" read "µέτρα") it is the letter. A micro sign with a Greek letter next to it
+/// is read as μ; elsewhere ("5 µm") it stays.
+fn greek_mu(text_page: &TextPage, i: i32, char_count: i32, c: char) -> char {
+    if c != '\u{00B5}' {
+        return c;
+    }
+    let greek = |k: i32| {
+        (0..char_count).contains(&k)
+            && char::from_u32(text_page.char_at_unchecked(k).unicode())
+                .is_some_and(|x| matches!(x, '\u{0370}'..='\u{03FF}' | '\u{1F00}'..='\u{1FFF}'))
+    };
+    if greek(i - 1) || greek(i + 1) {
+        '\u{03BC}'
+    } else {
+        c
+    }
+}
+
 /// Mathematical Alphanumeric Symbols (U+1D400 block: Word's Cambria Math italic "𝐿𝑜𝑤 𝐵𝐴𝑉",
 /// bold / script / fraktur / double-struck letters and digits) → the plain letter or digit,
 /// the way a reader (and NFKC) reads them. The block repeats fixed-size alphabets.
@@ -1786,12 +1985,16 @@ fn extract_page_text_items_pass(
         glyph_resolver,
     );
 
+    let (tracking_spaces, tracking) = tracking_generated_spaces(text_page, char_count);
     for i in 0..char_count {
         let ch = text_page.char_at_unchecked(i);
         let cv = CharView {
             ch: &ch,
             rec: char_chunks.as_mut().and_then(|chunks| chunks.record(i)),
         };
+        if tracking_spaces.contains(&i) {
+            continue;
+        }
         if clips.hides(i) || math_chars.contains(&i) {
             seg.flush(&mut items);
             continue;
@@ -1880,8 +2083,26 @@ fn extract_page_text_items_pass(
             && misdecoded_ti_ligature(text_page, i, char_count, c, &cv)
         {
             ('t', "i")
+        } else if ligature_tail.is_empty()
+            && decoded.is_none()
+            && misdecoded_ft_ligature(text_page, i, char_count, c, &cv)
+        {
+            ('f', "t")
         } else {
             (c, ligature_tail)
+        };
+        let c = greek_mu(text_page, i, char_count, c);
+        let c = match wingdings_char(c) {
+            Some(mapped)
+                if obj_meta
+                    .meta_for(&ch, cv.text_object())
+                    .font_name
+                    .as_deref()
+                    .is_some_and(is_wingdings_font) =>
+            {
+                mapped
+            }
+            _ => c,
         };
 
         // Newlines: flush the current segment
@@ -2186,7 +2407,8 @@ fn extract_page_text_items_pass(
                 // back under the previous letter hid a word space ("am just" read 0.27pt)
                 let loose_gap = seg
                     .loose_gap_to(&vp_strict, c)
-                    .max(seg.loose_gap_to(&vp_loose, c));
+                    .max(seg.loose_gap_to(&vp_loose, c))
+                    - tracking.get(&i).map_or(0.0, |t| t * em_vp);
                 let both_alnum = c.is_ascii_alphanumeric()
                     && seg
                         .text
