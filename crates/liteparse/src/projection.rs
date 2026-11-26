@@ -3349,6 +3349,18 @@ const MONO_NAME_HINTS: &[&str] = &[
     "Fira Code",
 ];
 
+/// Bold faces whose names never say so: URW's TeX Times / Palatino cuts end in `-Medi` /
+/// `-MediItal` (`NimbusRomNo9L-Medi`, not `-Medium`), Computer Modern / cm-super bold extended are
+/// `CMBX10`, `CMSSBX10`, `SFBX1000`.
+fn tex_bold_name(name: &str) -> bool {
+    let base = name.rsplit_once('+').map_or(name, |(_, b)| b);
+    base.ends_with("-Medi")
+        || base.ends_with("-MediItal")
+        || ["CMBX", "CMSSBX", "SFBX"]
+            .iter()
+            .any(|p| base.starts_with(p))
+}
+
 fn name_contains_any(name: &str, hints: &[&str]) -> bool {
     hints.iter().any(|h| name.contains(h))
 }
@@ -3526,7 +3538,7 @@ pub(crate) fn is_italic_item(item: &TextItem) -> bool {
 /// subset at 640, "F3" at 4220).
 pub(crate) fn font_is_bold(name: Option<&str>, _weight: Option<i32>, flags: Option<i32>) -> bool {
     flags.is_some_and(|f| f & PDF_FONT_FLAG_FORCE_BOLD != 0)
-        || name.is_some_and(|n| name_contains_any(n, BOLD_NAME_HINTS))
+        || name.is_some_and(|n| name_contains_any(n, BOLD_NAME_HINTS) || tex_bold_name(n))
 }
 
 /// Italic from a font's flags or name.
