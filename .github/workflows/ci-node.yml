@@ -37,7 +37,10 @@ jobs:
             node-arch: darwin-arm64
             pdfium-dylib: libpdfium.dylib
 
-          - os: macos-26-intel
+          # Cross-compiled on Apple silicon: macos-latest builds this target in about half
+          # the time of the Intel image (and with less variance). The x86_64 binary is
+          # still tested on Intel (macos-26-intel) in the test job below.
+          - os: macos-latest
             target: x86_64-apple-darwin
             node-arch: darwin-x64
             pdfium-dylib: libpdfium.dylib
