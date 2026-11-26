@@ -122,6 +122,25 @@ jobs:
               apk add tesseract-ocr-dev leptonica-dev openssl-dev pkgconf || true
             fi
 
+      # tesseract-rs compiles leptonica + tesseract from C/C++ source into the container's
+      # /root/.tesseract-rs, outside target/. Mount it from the host and cache it, keyed on
+      # the tesseract-rs version, so the musl build stops recompiling it every run.
+      - name: Read tesseract-rs version (musl)
+        if: ${{ matrix.musl }}
+        id: tesseract-rs-musl
+        shell: bash
+        run: |
+          v=$(grep -A1 '^name = "tesseract-rs"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Cache tesseract-rs build (musl)
+        if: ${{ matrix.musl }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.tesseract-rs-musl
+          key: tesseract-rs-${{ matrix.os }}-${{ matrix.target }}-${{ steps.tesseract-rs-musl.outputs.version }}
+
       - name: Build wheels (musl container)
         if: ${{ matrix.musl }}
         # Same pattern as the node musl build: run inside a vanilla
@@ -130,17 +149,24 @@ jobs:
         # tesseract's C++ build and broken host-openssl for build-deps.
         run: |
           chmod +x scripts/build-musl-py.sh
+          mkdir -p "$HOME/.tesseract-rs-musl"
           docker run --rm \
             -v "$GITHUB_WORKSPACE":/work \
             -v "$HOME/.cargo/registry":/root/.cargo/registry \
             -v "$HOME/.cargo/git":/root/.cargo/git \
             -v "$HOME/.cache/pdfium-rs":/root/.cache/pdfium-rs \
+            -v "$HOME/.tesseract-rs-musl":/root/.tesseract-rs \
             -w /work \
             python:3.12-alpine \
             /work/scripts/build-musl-py.sh
           # The container runs as root; fix perms so subsequent steps can
           # read/upload the produced wheel.
           sudo chmod -R a+rw packages/python/dist/ || true
+          # Same for the cached directories: without this the actions/cache post step
+          # can't read ~/.cargo/registry and the save fails ("tar: Cannot open:
+          # Permission denied"), so this job never saved a cache.
+          sudo chown -R "$(id -u):$(id -g)" "$HOME/.cargo/registry" "$HOME/.cargo/git" \
+            "$HOME/.cache/pdfium-rs" "$HOME/.tesseract-rs-musl" "$GITHUB_WORKSPACE"
 
       - name: Upload wheels
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
