@@ -101,6 +101,30 @@ jobs:
             target
           key: ${{ matrix.os }}-${{ matrix.target }}-cargo-node-${{ hashFiles('**/Cargo.lock') }}
 
+      # tesseract-rs's build script compiles leptonica + tesseract from C/C++ source and keeps
+      # the result outside target/, so the cargo cache above never covers it and every build
+      # recompiled it (2-9 min per job, even on a cargo cache hit). Keyed on the tesseract-rs
+      # version alone, so ordinary Cargo.lock changes still hit. The musl build runs in a
+      # container and does not use this directory.
+      - name: Read tesseract-rs version
+        if: ${{ !matrix.use-container }}
+        id: tesseract-rs
+        shell: bash
+        run: |
+          v=$(grep -A1 '^name = "tesseract-rs"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Cache tesseract-rs build
+        if: ${{ !matrix.use-container }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/Library/Application Support/tesseract-rs
+            ~/.tesseract-rs
+            ~/AppData/Roaming/tesseract-rs
+          key: tesseract-rs-${{ matrix.os }}-${{ matrix.target }}-${{ steps.tesseract-rs.outputs.version }}
+
       - name: Force Ninja generator (Windows)
         if: runner.os == 'Windows'
         run: echo "CMAKE_GENERATOR=Ninja" >> $GITHUB_ENV
