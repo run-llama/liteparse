@@ -3422,6 +3422,22 @@ fn mark_script_items(line: &mut [ProjectedTextItem]) {
     }
     bottoms.sort_by(f32::total_cmp);
     let base = bottoms[bottoms.len() / 2];
+    // A glyph box ends a descender below the baseline, and fonts disagree about descenders: a
+    // fallback font with none (a Word subset drawing one "č" in Times text) ends on the
+    // baseline, a descender's height above the body's boxes, and read as raised. Where the
+    // fonts give their metrics, a raise or drop must also show between the baselines.
+    let baseline = |it: &TextItem| -> Option<f32> {
+        let (gy, gh) = geom(it);
+        let (a, d) = (it.font_ascent?, it.font_descent?);
+        (a - d > 0.0 && gh > 0.0).then(|| gy + gh + d * gh / (a - d))
+    };
+    let mut body_baselines: Vec<f32> = line
+        .iter()
+        .filter(|p| native(p) && geom(&p.item).1 >= body_h * 0.9)
+        .filter_map(|p| baseline(&p.item))
+        .collect();
+    body_baselines.sort_by(f32::total_cmp);
+    let body_baseline = body_baselines.get(body_baselines.len() / 2).copied();
     for p in line.iter_mut().filter(|p| native(p)) {
         let it = &mut p.item;
         let n = it.text.trim().chars().count();
@@ -3430,9 +3446,16 @@ fn mark_script_items(line: &mut [ProjectedTextItem]) {
             continue;
         }
         let bottom = gy + gh;
-        if bottom <= base - body_h * 0.2 {
+        let shift = match (baseline(it), body_baseline) {
+            (Some(b), Some(bb)) => Some(b - bb),
+            _ => None,
+        };
+        if bottom <= base - body_h * 0.2 && shift.is_none_or(|s| s <= -body_h * 0.2) {
             it.sup = true;
-        } else if bottom >= base + body_h * 0.1 && gy >= base - body_h * 0.6 {
+        } else if bottom >= base + body_h * 0.1
+            && gy >= base - body_h * 0.6
+            && shift.is_none_or(|s| s >= body_h * 0.1)
+        {
             it.sub = true;
         }
     }
@@ -6104,6 +6127,32 @@ mod tests {
         );
         assert_eq!(lines[1].text, "100");
         assert_eq!(lines[1].region_path, NUMERIC_FOOTER_PATH);
+    }
+
+    #[test]
+    fn fallback_glyph_without_descender_is_not_a_superscript() {
+        // ParseBench text_simple__boldwords: "č" drawn from a Word fallback subset (ascent
+        // 0.435, no descender) in Times text (0.75 / -0.25). Its box ends on the baseline, a
+        // descender above the Times boxes, but both sit on one baseline. A real footnote
+        // marker, raised a third of an em, is still a superscript.
+        let with_metrics = |mut p: ProjectedTextItem, a: f32, d: f32| {
+            p.item.font_ascent = Some(a);
+            p.item.font_descent = Some(d);
+            p
+        };
+        let mut line = vec![
+            with_metrics(item_at("Objednávka", 70.0, 72.6, 60.0, 12.0), 0.75, -0.25),
+            with_metrics(item_at("č", 131.0, 73.6, 5.0, 8.1), 0.435, -0.005),
+            with_metrics(
+                item_at(". 20120647 zo dňa", 136.0, 72.6, 90.0, 12.0),
+                0.75,
+                -0.25,
+            ),
+            with_metrics(item_at("1", 227.0, 69.6, 4.0, 7.0), 0.75, -0.25),
+        ];
+        mark_script_items(&mut line);
+        assert!(!line[1].item.sup, "the fallback č sits on the baseline");
+        assert!(line[3].item.sup, "the raised marker is a superscript");
     }
 
     #[test]
