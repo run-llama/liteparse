@@ -213,6 +213,12 @@ export function parseResultToCliJson(
 ) {
   const extractTextMetadata = options.extractTextMetadata ?? false;
   return {
+    outline: result.outline.map((entry) => ({
+      level: entry.level,
+      title: entry.title,
+      page_index: entry.pageIndex,
+      y_pdf: entry.yPdf ?? null,
+    })),
     pages: result.pages.map((page) => ({
       page: page.pageNum,
       width: page.width,

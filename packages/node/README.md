@@ -59,6 +59,25 @@ header/footer removal and image deduplication are batch-local and the output
 can differ from `parse()`. Prefer `parse()` unless the size of the
 materialized result is the problem.
 
+## PDF bookmarks
+
+PDF bookmarks are available as a document-level outline on every parse result:
+
+```typescript
+import { LiteParse } from '@llamaindex/liteparse';
+
+const result = await new LiteParse({ ocrEnabled: false }).parse('document.pdf');
+for (const entry of result.outline) {
+  console.log('  '.repeat(entry.level - 1), entry.title, 'page', entry.pageIndex + 1);
+}
+```
+
+Entries follow bookmark order. `level` starts at 1, `pageIndex` starts at 0,
+and `yPdf` is an optional PDF-space Y coordinate measured from the bottom of
+the page. The list is empty when there are no resolved bookmark destinations.
+It describes the whole document, even when selecting pages or parsing in
+batches; unresolved destinations are omitted.
+
 ## Markdown Output
 
 LiteParse can render documents directly to Markdown including headings, tables, lists,
