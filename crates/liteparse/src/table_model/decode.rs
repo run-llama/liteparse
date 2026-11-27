@@ -216,6 +216,32 @@ fn span_link(p: &[f64], n: usize) -> Vec<Vec<usize>> {
     groups
 }
 
+/// The pieces of one table cell in reading order: lines top to bottom, pieces left to right
+/// within a line. A piece is on the line of that line's topmost piece when the two overlap
+/// vertically by over 30% of the shorter one. (Grouped into lines before ordering: "same line,
+/// then x, else y" as a comparator is not a total order, and the sort panics on it.)
+fn cell_order(boxes: &[[f64; 4]]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..boxes.len()).collect();
+    order.sort_by(|&a, &b| boxes[a][1].total_cmp(&boxes[b][1]));
+    let mut line = vec![0usize; order.len()];
+    let (mut lead, mut cur) = (0, 0);
+    for j in 1..order.len() {
+        let (pa, pb) = (boxes[order[lead]], boxes[order[j]]);
+        let same = pa[1].max(pb[1]) < pa[3].min(pb[3]) - 0.3 * (pa[3] - pa[1]).min(pb[3] - pb[1]);
+        if !same {
+            lead = j;
+            cur += 1;
+        }
+        line[order[j]] = cur;
+    }
+    order.sort_by(|&a, &b| {
+        line[a]
+            .cmp(&line[b])
+            .then(boxes[a][0].total_cmp(&boxes[b][0]))
+    });
+    order
+}
+
 /// Box indices in reading order: lines (vertical overlap over half the shorter box), top to
 /// bottom, left to right within a line.
 pub fn reading_order(boxes: &[[f64; 4]]) -> Vec<usize> {
@@ -921,17 +947,7 @@ impl Grid {
                     let boxes: Vec<[f64; 4]> = ms.iter().map(|&i| pieces[i].0).collect();
                     // lines top to bottom, pieces left to right within a line (a raised "(*)" is
                     // part of its line); a CJK line wrapped inside the cell joins without a space
-                    let mut order: Vec<usize> = (0..ms.len()).collect();
-                    order.sort_by(|&a, &b| {
-                        let (pa, pb) = (boxes[a], boxes[b]);
-                        let same = pa[1].max(pb[1])
-                            < pa[3].min(pb[3]) - 0.3 * (pa[3] - pa[1]).min(pb[3] - pb[1]);
-                        if same {
-                            pa[0].total_cmp(&pb[0])
-                        } else {
-                            pa[1].total_cmp(&pb[1])
-                        }
-                    });
+                    let order = cell_order(&boxes);
                     let cjk = |c: char| matches!(c, '\u{3040}'..='\u{30FF}' | '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{AC00}'..='\u{D7AF}' | '\u{FF00}'..='\u{FFEF}');
                     let mut text = String::new();
                     for j in order {
@@ -2001,6 +2017,40 @@ impl Grid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two lines, the first with a raised mark: by line, then left to right.
+    #[test]
+    fn cell_order_reads_lines_left_to_right() {
+        let boxes = [
+            [0.0, 12.0, 30.0, 22.0],
+            [40.0, 0.0, 70.0, 10.0],
+            [72.0, -2.0, 80.0, 6.0],
+            [0.0, 0.0, 30.0, 10.0],
+        ];
+        assert_eq!(cell_order(&boxes), vec![3, 1, 2, 0]);
+    }
+
+    /// Scattered pieces overlapping in chains: "same line" is not transitive over them, and
+    /// ordering by it directly panicked in the sort (these 64 boxes did).
+    #[test]
+    fn cell_order_survives_chained_overlaps() {
+        let mut s = 1u64;
+        let mut next = |m: u64| {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((s >> 33) % m) as f64
+        };
+        let boxes: Vec<[f64; 4]> = (0..64)
+            .map(|_| {
+                let (x, y) = (next(100), next(60));
+                [x, y, x + 5.0, y + 10.0]
+            })
+            .collect();
+        let mut order = cell_order(&boxes);
+        order.sort_unstable();
+        assert_eq!(order, (0..64).collect::<Vec<_>>());
+    }
 
     /// Four ruled rows, the second's label wrapping onto a fifth line with no rule above it:
     /// the wrap folds into its row; a table with no interior rules is left alone.
