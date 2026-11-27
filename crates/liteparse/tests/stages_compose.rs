@@ -356,13 +356,15 @@ async fn compose_with(parser: &LiteParse, input: PdfInput, rotate_back: bool) ->
 
     // ── markdown: document signals once, then per page
     if markdown || config.extract_blocks {
-        let signals = stages::document_signals(&parsed, config.keep_headers_footers);
+        let signals =
+            stages::document_signals_with_outline(&parsed, &outline, config.keep_headers_footers);
         // `header_footer` is a set, so its JSON order is not stable across
         // serializations; compare the parts rather than the bytes.
         let back: stages::DocumentSignals =
             serde_json::from_str(&serde_json::to_string(&signals).unwrap()).unwrap();
         assert_eq!(back.body_size, signals.body_size);
         assert_eq!(back.heading_map, signals.heading_map);
+        assert_eq!(back.explicit_heading_depth, signals.explicit_heading_depth);
         assert_eq!(back.header_footer, signals.header_footer);
         let signals = back;
         let options = parser.block_options(&outline);

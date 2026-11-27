@@ -25,7 +25,9 @@ pub use blocks::{
 };
 pub use classify::classify_page_with_filters;
 pub(crate) use classify::line_page_boxes;
-pub use headings::{build_heading_map, compute_body_size};
+pub use headings::{
+    build_heading_map, compute_body_size, explicit_heading_depth, inferred_heading_level,
+};
 pub use inline::{apply_link, escape_inline};
 pub use repetition::{compute_header_footer_set, detect_single_page_chrome, model_furniture_lines};
 pub use tables::detect_table_rects;

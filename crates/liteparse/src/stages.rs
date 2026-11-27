@@ -24,7 +24,7 @@
 //! | OCR | [`render_for_ocr`] → [`recognize`] → [`merge_ocr`] | pdfium / any / pure |
 //! | content filters | [`apply_content_filters`] | pure |
 //! | projection | [`project`] | pure |
-//! | markdown | [`document_signals`] → [`extract_blocks`] → [`render_page_markdown`] | pure |
+//! | markdown | [`document_signals_with_outline`] → [`extract_blocks`] → [`render_page_markdown`] | pure |
 //! | deskew rotate-back | [`rotate_back_ocr_deskew`] | pure |
 //! | screenshots | [`screenshots`] | pdfium |
 //!
@@ -410,18 +410,37 @@ pub struct DocumentSignals {
     pub body_size: f32,
     /// `(font_size, heading_level)` pairs, largest size first, levels 1..=6.
     pub heading_map: Vec<(f32, u8)>,
+    /// Deepest level a struct-tree heading tag or an outline entry gives a
+    /// line; 0 when neither levels any. Headings found only by style nest
+    /// below it.
+    #[serde(default)]
+    pub explicit_heading_depth: u8,
     /// Normalized texts of running headers/footers to suppress. Empty when
     /// `keep_headers_footers` was set or the document is too short to tell.
     pub header_footer: HashSet<String>,
 }
 
-/// Compute [`DocumentSignals`] over every page of the document.
+/// Compute [`DocumentSignals`] over every page of the document, for a
+/// document without an outline. See [`document_signals_with_outline`].
 pub fn document_signals(pages: &[ParsedPage], keep_headers_footers: bool) -> DocumentSignals {
+    document_signals_with_outline(pages, &[], keep_headers_footers)
+}
+
+/// Compute [`DocumentSignals`] over every page of the document. `outline` is
+/// the whole document's outline, as later passed in [`BlockOptions`]: its
+/// entries level headings, so headings found only by style must rank below
+/// them on every page.
+pub fn document_signals_with_outline(
+    pages: &[ParsedPage],
+    outline: &[OutlineTarget],
+    keep_headers_footers: bool,
+) -> DocumentSignals {
     if pages.is_empty() {
         return DocumentSignals::default();
     }
     let body_size = markdown_layout::compute_body_size(pages);
     let heading_map = markdown_layout::build_heading_map(pages, body_size);
+    let explicit_heading_depth = markdown_layout::explicit_heading_depth(pages, outline);
     let header_footer = if keep_headers_footers {
         HashSet::new()
     } else {
@@ -430,6 +449,7 @@ pub fn document_signals(pages: &[ParsedPage], keep_headers_footers: bool) -> Doc
     DocumentSignals {
         body_size,
         heading_map,
+        explicit_heading_depth,
         header_footer,
     }
 }
@@ -487,9 +507,14 @@ pub fn extract_blocks(
         c.extend(markdown_layout::model_furniture_lines(page));
         c
     };
+    let inferred_level = markdown_layout::inferred_heading_level(
+        &signals.heading_map,
+        signals.explicit_heading_depth,
+    );
     let mut blocks = markdown_layout::classify_page_with_filters(
         page,
         &signals.heading_map,
+        inferred_level,
         &signals.header_footer,
         &page_outline,
         options.image_mode,
