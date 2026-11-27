@@ -250,7 +250,7 @@ lit is-complex document.pdf --compact | jq '[.[] | select(.needs_ocr) | .page_nu
 ## `lit models`
 
 Download, list or remove optional model packages. The one package is `ocria-nano`, which installs OCRia-nano-1,
-LiteParse's own OCR and table models (see the [OCRia-nano-1 guide](/liteparse/guides/ocria-nano/)).
+LiteParse's own OCR and table models (see the [OCRia-nano-1 guide](/liteparse/guides/ocr/#ocria-nano-1-liteparses-own-models)).
 
 ```bash
 lit models pull ocria-nano            # download + verify (models and ONNX Runtime)

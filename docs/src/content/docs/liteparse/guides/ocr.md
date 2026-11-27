@@ -72,7 +72,7 @@ lit parse document.pdf --no-ocr
 
 ## OCRia-nano-1 (LiteParse's own models)
 
-[OCRia-nano-1](/liteparse/guides/ocria-nano/) is LiteParse's own OCR, table and layout model package (8.1M parameters,
+OCRia-nano-1 is LiteParse's own OCR, table and layout model package (8.1M parameters,
 CPU only). On ParseBench-2 it raises LiteParse from 48.7 (Tesseract) to 59.2, while parsing over twice as many pages
 per second. The weights are opt-in and come under their own modified OpenRAIL license.
 
@@ -82,8 +82,7 @@ lit parse scan.pdf                          # OCRia-nano-1 is now the OCR backen
 lit parse scan.pdf --ocr-backend tesseract  # Tesseract for one run
 ```
 
-See the [OCRia-nano-1 guide](/liteparse/guides/ocria-nano/) for Python, Node.js and browser usage, offline installs and
-benchmarks.
+See the [model quickstart](https://huggingface.co/llamaindex/OCRia-nano-1#quickstart) for Python, Node.js, and browser examples.
 
 ## HTTP OCR servers
 

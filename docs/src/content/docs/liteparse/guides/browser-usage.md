@@ -53,7 +53,7 @@ console.log(result.pages[0]);
 
 ## OCR with OCRia-nano-1
 
-The WASM build runs [OCRia-nano-1](/liteparse/guides/ocria-nano/), the same OCR and table models as the native CLI, inside WebAssembly (no server, no
+The WASM build runs OCRia-nano-1, the same OCR and table models as the native CLI, inside WebAssembly (no server, no
 ONNX Runtime). The models are downloaded on first use: load them once and share the handle across parsers.
 
 ```ts

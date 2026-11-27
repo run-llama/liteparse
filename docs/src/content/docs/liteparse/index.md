@@ -28,7 +28,7 @@ LiteParse is designed specifically for use cases that require fast, accurate tex
 OCRia-nano-1 is our 8.1M parameter model pipeline for better parsing with LiteParse, built to be the fastest and most accurate 
 parser that runs locally on your CPU. Its open weights are on Hugging Face under a modified OpenRAIL license. 
 
-- [Learn how to use it](/liteparse/guides/ocria-nano/)
+- [Learn how to use it](/liteparse/guides/ocr/#ocria-nano-1-liteparses-own-models)
 - [Read the launch blog](https://www.llamaindex.ai/blog/introducing-ocria-nano-1)
 - [Read the technical report](https://www.llamaindex.ai/ocria/ocria-nano-1-report.pdf)
 - [Find it on Hugging Face](https://huggingface.co/llamaindex/OCRia-nano-1)
