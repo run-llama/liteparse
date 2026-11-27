@@ -947,15 +947,21 @@ pub(super) fn run_text_kept(run: &TableRun, lines: &[ProjectedLine]) -> Option<f
     Some(kept as f32 / span as f32)
 }
 
-/// Lines inside a run's span that none of its cells or interstitials took a
-/// word from. The classifier skips the span, so these would be dropped. A
+/// Lines inside a run's span that none of its cells or interstitials took
+/// from. The classifier skips the span, so these would be dropped.
+///
+/// A line that knows its source items is judged by them: it is left out when
+/// no cell holds one of its items. Otherwise it falls back to words, where a
 /// line that shares even one word with the table stays with it, so nothing
-/// the table already shows is repeated.
+/// the table already shows is repeated. Words alone cannot tell a skipped row
+/// from its neighbours when every row repeats the same values ("Active",
+/// "Yes", "-40 to 125").
 pub(super) fn lines_left_out(run: &TableRun, lines: &[ProjectedLine]) -> Vec<usize> {
     let Block::Table { header, rows } = &run.block else {
         return Vec::new();
     };
     let mut words: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut items: HashSet<usize> = HashSet::new();
     for cell in header
         .iter()
         .flatten()
@@ -965,11 +971,22 @@ pub(super) fn lines_left_out(run: &TableRun, lines: &[ProjectedLine]) -> Vec<usi
         for w in cell.text.split_whitespace() {
             *words.entry(w).or_default() += 1;
         }
+        items.extend(&cell.text_item_indices);
     }
     (run.start..run.end.min(lines.len()))
         .filter(|&i| {
+            let line = &lines[i];
+            if line.text.trim().is_empty() {
+                return false;
+            }
+            if !items.is_empty() && !line.span_item_indices.is_empty() {
+                let kept = line.span_item_indices.iter().any(|it| items.contains(it));
+                if !kept {
+                    return true;
+                }
+            }
             let mut taken = false;
-            for w in lines[i].text.split_whitespace() {
+            for w in line.text.split_whitespace() {
                 if let Some(n) = words.get_mut(w)
                     && *n > 0
                 {
@@ -977,7 +994,7 @@ pub(super) fn lines_left_out(run: &TableRun, lines: &[ProjectedLine]) -> Vec<usi
                     taken = true;
                 }
             }
-            !taken && !lines[i].text.trim().is_empty()
+            !taken
         })
         .collect()
 }
@@ -8532,6 +8549,44 @@ mod tests {
             },
         };
         assert_eq!(lines_left_out(&run, &lines), vec![2]);
+    }
+
+    #[test]
+    fn lines_left_out_tells_a_skipped_row_from_its_lookalikes() {
+        use super::super::test_helpers::line;
+        // Three rows repeating the same values; the grid skipped the middle
+        // one. Every word of it is also in the table, so only its items show
+        // that no cell took it.
+        let mut lines = vec![
+            line("Active Yes", 10.0, 10.0, 12.0, 10.0),
+            line("Active Yes", 4.0, 25.0, 12.0, 10.0),
+            line("Active Yes", 10.0, 40.0, 12.0, 10.0),
+        ];
+        for (i, l) in lines.iter_mut().enumerate() {
+            l.span_item_indices = vec![i * 2, i * 2 + 1];
+        }
+        let cell = |text: &str, item: usize| Cell {
+            text: text.into(),
+            bbox: None,
+            text_item_indices: vec![item],
+        };
+        let run = TableRun {
+            interstitials: Vec::new(),
+            start: 0,
+            end: 3,
+            body_start: 0,
+            bbox: None,
+            item_indices: Vec::new(),
+            block: Block::Table {
+                header: None,
+                rows: vec![
+                    vec![cell("Active", 0), cell("Yes", 1)],
+                    vec!["".into(), "".into()],
+                    vec![cell("Active", 4), cell("Yes", 5)],
+                ],
+            },
+        };
+        assert_eq!(lines_left_out(&run, &lines), vec![1]);
     }
 
     fn grid_2x2() -> Vec<GraphicPrimitive> {
