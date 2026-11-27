@@ -1,22 +1,20 @@
-# pptx-read
+# PowerPoint decoder (`office::pptx`)
 
-Native `.pptx` decoder. It lays out and renders every slide itself and writes the worker's
-`extract` file protocol (the same `index.json` + `pages.jsonl` + raster files that
-`liteparse-read` produces for PDFs), plus a screenshot-only PDF. It replaces the
-LibreOffice → PDF → pdfium path for `.pptx`. Design and contract:
-[`llamaparse/pptx-native/SPEC.md`](../../../llamaparse/pptx-native/SPEC.md).
+Native `.pptx` decoder. It lays out and renders every slide itself (shapes, text,
+tables, charts, SmartArt, pictures, metafiles, embedded fonts) and describes every page
+in the extract format liteparse reads: an index object plus one record per page holding
+text runs with their boxes, vector paths, picture positions and, on request, a rendered
+screenshot. Binary `.ppt` input is converted to a `.pptx` package in memory by
+`office::ppt` first. Its package reader, XML tree, fonts, scene, rasterizer and outputs
+are shared with [`office::docx`](../docx/README.md).
 
 ## Usage
 
-```
-pptx-read -c config.json input.pptx index.json pages.jsonl
-```
-
-`config.json` is a superset of the worker's `PdfiumConfig`
-(`llamaparse/worker/src/utils/pdfiumConfig.ts`); the pptx-only blocks are `presentation`,
-`render`, `pdf` and `limits` (`src/config.rs`). Exit codes match `liteparse-read`: 0 when
-the index was written (document errors such as `PDF_IS_PROTECTED` or
-`OFFICE_FILE_IS_BROKEN` are reported inside it), 2 for a bad command line, 1 otherwise.
+`office::pptx::extract::read(config_json, bytes)` decodes a presentation and returns the
+index and the page records. The request (`config.rs`) selects pages and outputs (`text`,
+`path`, `image`, `screenshot`) plus the pptx-only `presentation`, `render`, `pdf` and
+`limits` blocks. Document errors such as `PDF_IS_PROTECTED` or `OFFICE_FILE_IS_BROKEN`
+are reported inside the index. liteparse calls it through `office::adapter`.
 A panic while building one slide becomes a page error plus a `SLIDE_RENDER_FAILED`
 warning; the rest of the document is still written.
 
@@ -24,14 +22,14 @@ Slides are built on `workers` threads (config), else `PPTX_READ_WORKERS`, else 4
 by the cores the process may use and by the page count; `1` runs the sequential loop.
 Each thread has its own parsed trees and font-system copy; the zip, the decoded-picture
 store and the layer cache are shared, and records are written in page order, so the
-output is byte-identical for any count (`src/extract/parallel.rs`). Memory stays near the
+output is byte-identical for any count (`extract/parallel.rs`). Memory stays near the
 sequential peak on heavy decks: pages are claimed only while their estimated trees and
 first-decoded pictures fit in 192 MB, and pictures over 4 MP (or files over 16 MB) are
 decoded one at a time.
 
 ## How it works
 
-One slide → one `Scene` (display list, `src/scene.rs`) → both the raster and every JSON
+One slide → one `Scene` (display list, `scene.rs`) → both the raster and every JSON
 output, so reported text, images and paths always match the pixels.
 
 | Stage                                                                  | Files                                              |
@@ -60,7 +58,7 @@ against PowerPoint renders:
   match PowerPoint at 1.2). Extra or reduced spacing goes above the line.
 - Missing fonts use metric-compatible substitutes (Calibri → Carlito, Arial → Liberation
   Sans, ...). Where no clone exists, the substitute was picked by measured widths and by
-  scoring renders against PowerPoint thumbnails (`SUBSTITUTIONS` in `src/fonts.rs`); a
+  scoring renders against PowerPoint thumbnails (`SUBSTITUTIONS` in `fonts.rs`); a
   `Family*0.7` entry draws the substitute's glyphs at 0.7 × the size (Thai Office fonts).
   With no substitute, the run's PANOSE weight/serif style and a weight word in the family
   name ("SemiBold") pick the fallback.
@@ -91,12 +89,12 @@ against PowerPoint renders:
 - Characters a run's font lacks fall back to a face for their script first (Noto Naskh
   Arabic for Arabic, as compact as the Office fonts' own Arabic), then to a general list.
 - Pattern fills (`a:pattFill`) draw their 8×8 preset tile at screen-pixel scale (6 pt),
-  anchored to the slide, as PowerPoint does (`src/patterns.rs`).
+  anchored to the slide, as PowerPoint does (`patterns.rs`).
 - Path gradients (`a:path`) are focal: each contour's centre moves from the `fillToRect`
   focus to the tile centre while it grows to the tile's half diagonal (circle) or half
   sizes (rect, shape), so off-box foci give PowerPoint's skewed glow. A crossed inset pair
   collapses onto its first inset; exactly two stops at 0 %/100 % are spread by `s²`
-  (`src/pathgrad.rs`).
+  (`pathgrad.rs`).
 - `a:grpFill` paints with the nearest enclosing group's `grpSpPr` fill (a `grpFill` group
   passes its parent's on; a group without a fill gives none), placed over the group's box,
   so a gradient spans the whole group rather than each shape.
@@ -107,7 +105,7 @@ against PowerPoint renders:
   sometimes blank (box & whisker). Missing formatting comes from the chart style part.
 - Built-in table styles missing from `tableStyles.xml` come from
   `assets/presetTableStyles.xml`: all 74 styles PowerPoint ships, keyed by GUID.
-- WordArt warps (`a:prstTxWarp`, `src/warp.rs`) bend glyph outlines along the preset's
+- WordArt warps (`a:prstTxWarp`, `warp.rs`) bend glyph outlines along the preset's
   guide paths (`assets/presetTextWarpDefinitions.xml`). Two-path presets stretch each line
   to a band of the box and map it between the top and bottom guides; one-path arches keep
   the font size and stand the text on the arc (`textCircle` hangs it inside). `textPlain`
@@ -122,7 +120,7 @@ against PowerPoint renders:
   a picture fades from its geometry. Glow (`a:glow`, shapes, pictures and text runs)
   is full color on the outline and eases out to 0.9 × `rad`; a picture's glow follows its
   transparent pixels. Both use the box-filtered silhouette as a distance
-  (`src/effects.rs`, `src/render/softedge.rs`).
+  (`effects.rs`, `render/softedge.rs`).
 - Hidden shapes are not drawn, but their text is emitted as invisible text items
   (`presentation.shapes[].hidden`), as the LibreOffice PDF exposed it.
 - Text drawn inside EMF/WMF pictures is emitted as text items over the picture without
@@ -180,7 +178,7 @@ size line height. A part that does not decode is skipped with a
 
 ## Tests
 
-`cargo test -p pptx-read`. `metafile/tests.rs` has an ignored harness
+`cargo test -p liteparse --lib office::pptx`. `metafile/tests.rs` has an ignored harness
 (`METAFILE_DIR`, `METAFILE_OUT`) that renders a directory of metafiles to PNG.
 `eot/tests.rs` has one (`eot_corpus`, `EOT_CORPUS=<dir of .pptx>`, optional `EOT_DUMP`)
 that decodes every embedded font and reports success per variant.

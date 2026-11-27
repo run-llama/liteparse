@@ -1,9 +1,9 @@
 //! Native `.docx` decoder. Parses WordprocessingML, lays the document out into
 //! pages the way Microsoft Word does (styles, line breaking, pagination,
-//! tables, headers and footers), and writes the worker's extract file protocol
-//! (`index.json` + `pages.jsonl` + rasters) plus a screenshot-only PDF. Pages
-//! are drawn and reported through the `.pptx` decoder's scene, renderer and
-//! outputs. Plan: `llamaparse/docx-native/PLAN.md`.
+//! tables, headers and footers), and describes each page in the extract format
+//! (an index object plus one page record per page), plus an optional
+//! screenshot-only PDF. Pages are drawn and reported through the `.pptx`
+//! decoder's scene, renderer and outputs. See `README.md`.
 
 mod comments;
 pub mod deadline;

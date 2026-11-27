@@ -392,7 +392,7 @@ fn decode_xml_text(bytes: Vec<u8>) -> String {
     }
 }
 
-/// Same rule as the worker's `isMojibakeCorruptedBinaryFile`: at least 5% of the
+/// A file mangled by a text-mode transfer: at least 5% of the
 /// bytes are UTF-8 replacement characters and the whole file is valid UTF-8, which
 /// a real zip (deflate streams) never is.
 fn is_mojibake(bytes: &[u8]) -> bool {

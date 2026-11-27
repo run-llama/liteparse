@@ -1,8 +1,8 @@
 //! Legacy binary PowerPoint (.ppt, [MS-PPT]) to PPTX conversion.
 //!
 //! [`convert`] reads the `PowerPoint Document` stream through its persist directory and
-//! writes an in-memory .pptx that `pptx-read` renders unchanged, the way `doc-read`'s
-//! `docx_export` feeds `docx-read`. This milestone carries slide size, slide order and
+//! writes an in-memory .pptx that `office::pptx` renders unchanged, the way `office::doc`'s
+//! `docx_export` feeds `office::docx`. This milestone carries slide size, slide order and
 //! text at its shape anchors. Unsupported structures become diagnostics; only an
 //! unreadable container, a missing document, or encryption is an error.
 

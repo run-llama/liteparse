@@ -1,5 +1,4 @@
-//! Document-level failures, mapped onto the worker's existing error codes so the
-//! index file reads the same as a `liteparse-read` failure.
+//! Document-level failures and the error codes the index reports for them.
 
 use std::fmt;
 
@@ -20,8 +19,7 @@ pub enum DocError {
 pub type DocResult<T> = Result<T, DocError>;
 
 impl DocError {
-    /// The code written to `index.json` `error`. These strings are the ones the
-    /// worker already maps to user-facing failures.
+    /// The code written to the index's `error`.
     pub fn code(&self) -> &'static str {
         match self {
             DocError::Protected => "PDF_IS_PROTECTED",

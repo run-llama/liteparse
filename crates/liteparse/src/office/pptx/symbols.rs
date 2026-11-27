@@ -1,7 +1,7 @@
 //! Unicode equivalents for the Microsoft symbol fonts: Symbol, Wingdings,
 //! Wingdings 2, Wingdings 3 and Webdings.
 //!
-//! These fonts are proprietary and never installed where pptx-read runs, so
+//! These fonts are proprietary and never installed where office::pptx runs, so
 //! text set in them is remapped to Unicode and drawn with open fonts (mostly
 //! Noto Sans Symbols 2, which was designed to cover this repertoire). The
 //! mapped character is also what text extraction reports.

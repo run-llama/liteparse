@@ -7,7 +7,7 @@
 //! 3. the StyleTextPropAtom runs: paragraph runs (character count, indent level,
 //!    TextPFException) and then character runs (count, TextCFException).
 //!
-//! Every paragraph and run is written with explicit properties, so pptx-read needs no
+//! Every paragraph and run is written with explicit properties, so office::pptx needs no
 //! inheritance from the generated master.
 
 use crate::office::ppt::props::Scheme;

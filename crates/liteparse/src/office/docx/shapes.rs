@@ -1,6 +1,6 @@
 //! DrawingML shapes in Word documents (`wps:wsp`, groups `wpg:wgp`): their
 //! geometry, fill and outline become scene items at parse time, through
-//! `pptx-read`'s preset geometry and fill/line readers; text box contents are
+//! `office::pptx`'s preset geometry and fill/line readers; text box contents are
 //! kept as blocks and laid out with the paragraph that anchors the shape.
 
 use std::rc::Rc;

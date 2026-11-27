@@ -43,7 +43,7 @@ pub fn worker_count(configured: Option<u32>, pages: usize) -> usize {
 
 /// The config's `workers` wins, then the environment, then the default capped
 /// by the cores this process may use (`available_parallelism` follows cgroup
-/// CPU quotas). The default stays small because a worker pod can run several
+/// CPU quotas). The default stays small because a process can parse several
 /// documents at once and each thread adds one slide's working set to memory.
 /// Never more threads than pages; 0 or 1 means the sequential loop.
 pub fn resolve_workers(

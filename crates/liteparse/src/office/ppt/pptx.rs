@@ -2,7 +2,7 @@
 //! a blank layout per PPT master, and a slide per PPT slide.
 //!
 //! Shapes carry fully resolved formatting, so the masters only need their own shapes
-//! and background; pptx-read still resolves every slide through slide -> layout ->
+//! and background; office::pptx still resolves every slide through slide -> layout ->
 //! master -> theme.
 
 use crate::office::ppt::metro::{MetroShape, Target};
@@ -277,7 +277,7 @@ fn sheet_xml(
 }
 
 /// Replaces `r:embed="PIB<n>"` with a relationship to picture `n`. A picture missing
-/// from the store loses its `a:blip`, which pptx-read draws as nothing.
+/// from the store loses its `a:blip`, which office::pptx draws as nothing.
 fn pictures(deck: &Deck, xml: &str, rel_list: &mut RelList, media: &mut Media) -> String {
     const KEY: &str = "r:embed=\"PIB";
     let mut out = String::with_capacity(xml.len());

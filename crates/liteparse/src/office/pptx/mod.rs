@@ -1,6 +1,7 @@
 //! Native `.pptx` decoder. Reads a presentation, lays out and renders every slide,
-//! and writes the worker's extract file protocol (`index.json` + `pages.jsonl` +
-//! rasters) plus a screenshot-only PDF. Spec: `llamaparse/pptx-native/SPEC.md`.
+//! and describes each one in the extract format (an index object plus one page
+//! record per slide: text runs, paths, pictures, optional screenshot), plus an
+//! optional screenshot-only PDF. See `README.md`.
 
 pub mod chart;
 pub mod chart_render;

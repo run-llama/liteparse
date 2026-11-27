@@ -1,7 +1,5 @@
-//! Raster helpers shared by the extract producers (`llamaparse-read` for PDFs,
-//! `pptx-read` for presentations): screenshot sizing and the scanners that run on
-//! rendered BGR pixels. Moved here verbatim so both producers size and scan pages
-//! identically; `llamaparse-read/src/screenshot.rs` documents the output contract.
+//! Raster helpers for page screenshots: screenshot sizing and the scanners that
+//! run on rendered BGR pixels (solid fills, solid rectangles and lines).
 
 /// Long-edge cap in pixels when the request does not set `maxEdge`.
 pub const MAX_OCR_SIZE: i32 = 1600;

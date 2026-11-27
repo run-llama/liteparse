@@ -456,7 +456,7 @@ fn mtx_container_round_trip() {
     );
 }
 
-/// Corpus check: `EOT_CORPUS=<dir of .pptx> cargo test --release -p pptx-read
+/// Corpus check: `EOT_CORPUS=<dir of .pptx> cargo test --release -p office::pptx
 /// eot_corpus -- --ignored --nocapture` decodes every `ppt/fonts/*.fntdata` and
 /// reports, per variant, how many give a font with a cmap and outlined glyphs.
 /// `EOT_DUMP=<dir>` also writes every decoded font there (for external checks).

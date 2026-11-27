@@ -1,7 +1,6 @@
-//! The request contract: a superset of the worker's `PdfiumConfig`
-//! (`llamaparse/worker/src/utils/pdfiumConfig.ts`). Inherited fields keep their
-//! names and meaning; `presentation`, `render`, `pdf` and `limits` are pptx-only.
-//! See `llamaparse/pptx-native/SPEC.md` §2.
+//! The request contract: which pages to emit and which outputs to produce
+//! (`text`, `path`, `image`, `screenshot`, ...), plus the Office-only
+//! `presentation`, `render`, `pdf` and `limits` blocks.
 
 use serde::Deserialize;
 
@@ -9,7 +8,7 @@ use serde::Deserialize;
 #[serde(rename_all = "camelCase", default)]
 pub struct Config {
     pub verbose: bool,
-    /// 0-based page ranges over emitted pages (`"0-2,5"`), same grammar as the worker.
+    /// 0-based page ranges over emitted pages (`"0-2,5"`).
     pub target_pages: Option<String>,
     /// 0 means no limit.
     pub max_pages: u32,
@@ -75,7 +74,7 @@ impl Default for PathConfig {
     }
 }
 
-/// Crop box as fractions of the page, as the worker sends it.
+/// Crop box as fractions of the page.
 #[derive(Debug, Clone, Copy, Deserialize, Default)]
 #[serde(default)]
 pub struct CropBox {
@@ -164,7 +163,7 @@ pub struct RenderConfig {
     pub metafiles: MetafileMode,
     pub slide_timeout_ms: u64,
     pub document_budget_ms: u64,
-    /// docx-read only: lay out text in Microsoft fonts that are not installed
+    /// Word documents only: lay out text in Microsoft fonts that are not installed
     /// with their tabled metrics (line height, advances, kerning).
     pub word_metrics: bool,
 }
@@ -232,7 +231,7 @@ pub struct Limits {
     pub max_shapes_per_slide: u32,
     pub max_slides: u32,
     /// Peak resident memory (bytes) the decoder process may reach before it exits
-    /// with a memory-limit code; 0 leaves it uncapped. Enforced by docx-read.
+    /// with a memory-limit code; 0 leaves it uncapped. Not enforced inside liteparse.
     pub max_rss_bytes: u64,
 }
 
@@ -249,8 +248,7 @@ impl Default for Limits {
     }
 }
 
-/// Parses the worker's 0-based page range grammar: `"0,2-4"`. Unparseable pieces
-/// are ignored, as in `liteparse-read`.
+/// Parses a 0-based page range spec: `"0,2-4"`. Unparseable pieces are ignored.
 pub fn parse_target_pages(spec: &str) -> Vec<u32> {
     let mut out = Vec::new();
     for piece in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {

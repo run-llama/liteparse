@@ -1,7 +1,7 @@
 //! The extract request: opens the document, lays it out into pages, renders
-//! each page and writes the protocol files (`index.json`, `pages.jsonl`,
-//! rasters) and the optional screenshot PDF. Same contract as `pptx-read`
-//! (`rust/crates/pptx-read/src/extract.rs`), with `sourceFormat: "docx"`.
+//! each page and returns the index and page records (screenshots and the
+//! optional screenshot PDF go to the requested paths). Same contract as
+//! `office::pptx::extract`, with `sourceFormat: "docx"`.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -115,7 +115,7 @@ pub fn xml_depth(text: &str) -> usize {
 const CFB_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
 /// A binary Word file (a compound file with a `WordDocument` stream) becomes a
-/// .docx through doc-read; any other input is returned unchanged.
+/// .docx through office::doc; any other input is returned unchanged.
 fn docx_bytes(bytes: Vec<u8>) -> DocResult<Vec<u8>> {
     if !bytes.starts_with(&CFB_MAGIC) {
         return Ok(bytes);

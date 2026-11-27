@@ -1221,7 +1221,7 @@ fn wordart_draws_its_text_in_the_fill_colour() {
 #[test]
 fn a_master_text_box_slide_number_becomes_a_slidenum_field() {
     // A non-placeholder master text box with a SlideNumberMCAtom: each slide shows its
-    // own number, so the master carries an a:fld that pptx-read fills per slide.
+    // own number, so the master carries an a:fld that office::pptx fills per slide.
     let mut tb = text(4, b"Page *", true);
     tb.push(rec(0x0FD8, 0, &u32s(&[5])));
     let master = sheet(

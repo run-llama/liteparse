@@ -1,6 +1,5 @@
-//! Charts (`c:chart` graphic frames): data extraction into the worker's
-//! `OpenXMLChart` shape (`formats/openxml-chart.ts`). Rendering lives in
-//! `chart_render.rs`.
+//! Charts (`c:chart` graphic frames): data extraction into the page record's
+//! chart objects. Rendering lives in `chart_render.rs`.
 
 use std::rc::Rc;
 

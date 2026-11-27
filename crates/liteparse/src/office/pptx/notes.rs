@@ -6,9 +6,8 @@ use crate::office::pptx::document::Document;
 use crate::office::pptx::xml::XNode;
 
 /// Speaker notes as `OpenXMLSpeakerNote` content: one string per paragraph,
-/// with `* ` / `N. ` list prefixes indented 4 spaces per level, the format of
-/// the worker's `extractNotesFromDoc`. Only the notes body placeholder is read
-/// (the TypeScript version also picked up the slide-number field).
+/// with `* ` / `N. ` list prefixes indented 4 spaces per level. Only the notes
+/// body placeholder is read, so the slide-number field is left out.
 pub fn speaker_notes(doc: &Document, slide_part: &str) -> Option<Value> {
     let notes_part = doc.pkg.rel_by_kind(slide_part, "notesSlide")?.target;
     let notes = doc.xml(&notes_part)?;

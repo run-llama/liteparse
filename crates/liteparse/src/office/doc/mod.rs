@@ -4,7 +4,7 @@ pub mod autonum;
 pub mod bookmarks;
 pub mod capitalization;
 pub mod comments;
-/// Root-level streams of an OLE compound file; the PowerPoint reader (`ppt-read`) shares it.
+/// Root-level streams of an OLE compound file; the PowerPoint reader (`office::ppt`) shares it.
 pub mod compound;
 mod document;
 pub mod docx_export;

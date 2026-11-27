@@ -1,4 +1,4 @@
-//! Charts, chartEx and SmartArt in Word drawings, drawn by `pptx-read`'s
+//! Charts, chartEx and SmartArt in Word drawings, drawn by `office::pptx`'s
 //! renderers: each graphic is wrapped in a one-frame synthetic slide whose part
 //! is the Word part holding it (so its relationships resolve), and the
 //! resulting scene becomes the picture's shape items, text included.

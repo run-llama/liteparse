@@ -19,9 +19,9 @@ use crate::types::{GraphicPrimitive, Page, PdfInput, Rect, ScreenshotRect, TextI
 /// Which decoder handles an input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// `.docx` and binary `.doc` (converted to `.docx` inside `docx-read`).
+    /// `.docx` and binary `.doc` (converted to `.docx` by `office::doc`).
     Word,
-    /// `.pptx` and binary `.ppt` (converted to `.pptx` inside `pptx-read`).
+    /// `.pptx` and binary `.ppt` (converted to `.pptx` by `office::ppt`).
     Presentation,
 }
 

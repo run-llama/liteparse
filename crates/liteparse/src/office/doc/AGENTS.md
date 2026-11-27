@@ -1,7 +1,6 @@
-# Binary Word decoding
+# Binary Word reader (`office::doc`)
 
-Build, run and evaluation commands are in `README.md`. Read `../docx-read/AGENTS.md` before
-connecting the shared document model or renderer.
+Read `../docx/AGENTS.md` before changing how `.doc` content reaches the Word layout.
 
 ## Format notes
 
@@ -20,10 +19,7 @@ before changing that area:
 - Pictures
 - Rendering qualification and layout
 
-DOC rendering rules (cell replay, generated labels, retry bundles) load from
-`rust/crates/doc-render/AGENTS.md`.
-
-## Crate-wide rules
+## Module-wide rules
 
 Binary decoding preserves UTF-16 character positions across compressed and uncompressed pieces;
 source controls and field instructions remain in raw inspection output until structure and
@@ -34,25 +30,13 @@ suppressed instructions and unresolved tails; cached field projection requires f
 semantics and cannot establish revision visibility.
 
 Use root-directory ownership for OLE streams, bound allocation-chain work and expanded text, and
-report unsupported or malformed structures explicitly. Corpus success at the raw-story stage does
-not qualify a document for production rendering.
+report unsupported or malformed structures explicitly.
 
-`docx_export` is the best-effort path: it converts DOC to a DOCX package for the `docx-read`
-renderer, degrades unsupported structures to text or skips them with a diagnostic, and fails only
-on unreadable containers. The strict rules below apply to the inspection and `render_model`
-modules. Development tool: `doc-to-docx IN.doc OUT.docx` (`--paragraphs` dumps paragraph
-modifiers).
+`docx_export` is the best-effort path liteparse uses: it converts DOC to a DOCX package for
+`office::docx`, degrades unsupported structures to text or skips them with a diagnostic, and
+fails only on unreadable containers. The strict rules above apply to the inspection and
+`render_model` modules.
 
-## Fixtures and evaluation
+## Fixtures
 
-Keep synthetic fixtures in source; document samples and private corpus manifests stay outside the
-repository.
-
-Freeze evaluation sources before building and derive provenance from that snapshot; concurrent
-edits in the shared checkout can otherwise invalidate separate-change comparisons. Use separate
-Cargo target directories for baseline and candidate snapshots; copied timestamps can reuse a stale
-library even when source hashes differ.
-
-## Before pushing
-
-Run crate tests and Clippy with all targets and warnings denied before each push.
+Keep synthetic fixtures in source; document samples stay outside the repository.

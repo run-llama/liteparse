@@ -1,6 +1,5 @@
-//! JSON for one page record, in the extract protocol's shapes
-//! (`PdfiumExtractPage` in `llamaparse/worker/src/utils/pdfium.ts`), plus the
-//! pptx `presentation` block.
+//! JSON for one page record in the extract format, plus the pptx
+//! `presentation` block.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -293,7 +292,7 @@ fn grounding(
 
 // ---------------------------------------------------------------- images
 
-/// Images too small to matter, matching `llamaparse-read/src/image.rs`.
+/// Images too small to matter.
 const MIN_PIXEL_EDGE: u32 = 12;
 const MIN_PIXEL_AREA: u64 = 200;
 const MIN_PLACED_EDGE: f64 = 6.0;
@@ -705,7 +704,7 @@ pub fn write_jpeg(
     let Ok(mut encoder) = jpeg_encoder::Encoder::new_file(path, quality) else {
         return false;
     };
-    // Same encoder settings as llamaparse-read: 4:2:0 and the DPI in the JFIF header.
+    // Encoder settings: 4:2:0 and the DPI in the JFIF header.
     encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2);
     if let Ok(d) = u16::try_from(dpi) {
         encoder.set_density(jpeg_encoder::PixelDensity {

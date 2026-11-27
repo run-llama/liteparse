@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn reads_vm_hwm_in_bytes() {
     let status =
-        "Name:\tliteparse-read\nVmPeak:\t  900000 kB\nVmHWM:\t   51200 kB\nVmRSS:\t   40000 kB\n";
+        "Name:\tliteparse\nVmPeak:\t  900000 kB\nVmHWM:\t   51200 kB\nVmRSS:\t   40000 kB\n";
     assert_eq!(vm_hwm_bytes(status), Some(51200 * 1024));
 }
 

@@ -12,8 +12,7 @@
 //!   `.ppt` input is first converted to `.pptx` in memory by [`ppt`]. Its
 //!   scene, renderer and font system are shared with [`docx`].
 //!
-//! The decoders come from the LlamaParse platform repository. Their module
-//! READMEs and notes are kept beside the code.
+//! Each decoder's README and design notes sit beside its code.
 
 // The decoders were written against a stricter lint set; their `#[expect]`s
 // name lints this crate does not enable.

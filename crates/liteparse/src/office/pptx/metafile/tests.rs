@@ -27,7 +27,7 @@ fn garbage_is_not_a_metafile() {
 }
 
 /// Dev harness: renders every metafile in `$METAFILE_DIR` to `$METAFILE_OUT/<name>.png`
-/// and prints timings and failures. `cargo test -p pptx-read --release metafile_harness -- --ignored --nocapture`
+/// and prints timings and failures. `cargo test -p liteparse --lib --release metafile_harness -- --ignored --nocapture`
 #[test]
 #[ignore]
 fn metafile_harness() {

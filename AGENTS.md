@@ -110,7 +110,7 @@ OCR only runs on embedded images where text extraction failed, not the entire do
 Uses a default-first approach where users only override what they need. See `crates/liteparse/src/config.rs` for defaults.
 
 ### 6. Format Conversion via External Tools
-Word and PowerPoint (`.docx`, `.doc`, `.pptx`, `.ppt`) are decoded by the native Rust decoders in `crates/liteparse/src/office/`, which lay the document out and report pages directly; they never go through LibreOffice unless the caller sets `use_libreoffice` (`--with-libre-office`). The remaining office formats (spreadsheets, ODF, RTF, macro-enabled and template variants) are converted to PDF with LibreOffice. The decoders come from the LlamaParse platform repository; their READMEs and design notes live beside the code in `office/<name>/`.
+Word and PowerPoint (`.docx`, `.doc`, `.pptx`, `.ppt`) are decoded by the native Rust decoders in `crates/liteparse/src/office/`, which lay the document out and report pages directly; they never go through LibreOffice unless the caller sets `use_libreoffice` (`--with-libre-office`). The remaining office formats (spreadsheets, ODF, RTF, macro-enabled and template variants) are converted to PDF with LibreOffice. Their READMEs and design notes live beside the code in `office/<name>/`.
 
 ## Common Tasks
 

@@ -54,7 +54,7 @@ const SUBSTITUTIONS: &[(&str, &[&str])] = &[
     ("congenial", &["Figtree"]),
     ("book antiqua", &["TeX Gyre Pagella", "Liberation Serif"]),
     ("lucida bright", &["Noto Serif", "Liberation Serif"]),
-    // Other faces bundled with Word for Mac (docx-read tables their metrics).
+    // Other faces bundled with Word for Mac (office::docx tables their metrics).
     ("baskerville old face", &["Liberation Serif"]),
     ("footlight mt light", &["Liberation Serif"]),
     ("wide latin", &["Liberation Serif"]),

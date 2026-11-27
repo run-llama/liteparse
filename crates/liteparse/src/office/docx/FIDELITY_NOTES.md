@@ -318,7 +318,7 @@ Read the section for the area you are changing; the crate-wide rules are in
   prove exported content preservation.
 - Physical-page clipping diagnostics include source-owned headers and footers; generated reading
   keys alone cannot distinguish document text from line numbers.
-- Native worker attribution uses source-owned link/cell/paragraph metadata and page-local emitted
+- Native attribution uses source-owned link/cell/paragraph metadata and page-local emitted
   content IDs; preserve ownership during run coalescing, and gate text-table HTML substitution on
   source eligibility so images, nested tables and blank rows remain in native page output.
 - Vertical-merge HTML spans follow accepted physical row fragments while retaining declared cell

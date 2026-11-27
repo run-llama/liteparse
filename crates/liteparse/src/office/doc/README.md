@@ -1,75 +1,27 @@
-# Binary Word reader
+# Binary Word reader (`office::doc`)
 
-This helper extracts raw text stories and partial source-backed transcription from Word 97+ compound files. It reads the effective FIB revision, selects the source's table stream, and decodes the CLX piece table into body, footnote, header, comment, endnote and textbox stories. JSON retains source control characters and field instructions. A separate `transcription` object applies supported cached fields, accepted revisions, symbols and list labels, with UTF-16 source spans and explicit unresolved diagnostics. Unsupported formatting, numbering and story assembly remain gaps. The helper is not connected to production routing.
+Reads Word 97+ compound files (`.doc`). liteparse uses `docx_export`, which converts a
+`.doc` into a `.docx` package in memory for [`office::docx`](../docx/README.md) to lay
+out; unsupported structures degrade to text or are skipped with a diagnostic. The
+compound-file reader (`compound`) is shared with `office::ppt` for binary PowerPoint.
 
-```sh
-cd rust
-cargo build --release --locked -p doc-read
-./target/release/doc-read input.doc > inspection.json
-cargo test -p doc-read --locked
-cargo clippy -p doc-read --all-targets --locked -- -D warnings
-```
-
-## Content evaluation
-
-Content coverage is evaluated independently of page rendering. Use an explicit approved
-development roster; each JSONL row supplies `source_sha256` and `source_path`. Family
-holdouts must remain outside that roster and outside development batch selection.
-
-```sh
-python3 rust/crates/doc-read/tools/content_scorecard.py \
-  --roster /path/to/development.jsonl --expected-count 1085 \
-  --binary /path/to/optimized/doc-read \
-  --cache /path/to/evaluation/cache --output /path/to/evaluation \
-  --renderer-census /path/to/renderer/census.jsonl
-python3 -m unittest discover -s rust/crates/doc-read/tools -p test_content_scorecard.py
-```
-
-The harness verifies source hashes, pins the executable and roster, and caches full
-inspection JSON outside the repository. `rows.json` retains per-story accounting;
-`summary.json` and the self-contained `report.html` separate raw UTF-16 source units,
-projected output, unresolved ranges, visibility uncertainty and zero-CP generated
-labels or form values. The document status describes reported logical extraction
-uncertainty. Raw retention and complete CP partitions do not establish semantic
-accuracy, visible reading order or current field values. Schema 2 also retains explicit
-component errors and unavailable metadata in each row. These make a document partial
-even when its raw source accounting is complete; they do not prove missing visible
-text. Summary counts report unique affected documents and overlapping components.
-Compare both helper caches with the same evaluator version when measuring parser
-gains, and retain the evaluator hash separately from the parser executable hash.
-
-Suppressed field instructions, deleted revisions and hidden text are counted by
-reason. They are not missing visible words. Unclassified empty nonhidden lexical
-ranges are review candidates, and unsupported generated labels need separate
-anchor/family evidence because they consume no authored CPs. Parser metadata is
-source evidence rather than independent Word ground truth. Rendering completion,
-fidelity diagnostics, and reference comparisons remain separate measurements.
-
-`representative-batch.json` selects deterministic mixed-component cases using
-component/diagnostic pairs and optional renderer first stops. It is a development
-coverage batch, not a random accuracy sample. For offline reproduction, use
-`--cached-only --cache-meta /path/to/cache-meta.json` with the exact original roster
-and cache plus its `cache-manifest.json` payload hashes; the report explicitly labels
-the historical helper identity. Optional `--reference-manifest` entries bind a source
-hash to an evidence file, SHA-256, kind and scope. Missing or changed references are
-reported separately and cannot become an accuracy score. Use `--baseline-rows` to
-compare the same source cohort; raw story identities must match, and generated-anchor
-deltas remain separate from source CP counts. Exact added-label correctness still
-requires source-family and text-inverse proof. Missing
-inputs or invalid accounting remain per-document errors. No document text or
-private dataset paths belong in committed scripts or reports.
+The inspection modules extract raw text stories and partial source-backed transcription.
+They read the effective FIB revision, select the source's table stream, and decode the CLX
+piece table into body, footnote, header, comment, endnote and textbox stories. Inspection
+JSON retains source control characters and field instructions. A separate `transcription`
+object applies supported cached fields, accepted revisions, symbols and list labels, with
+UTF-16 source spans and explicit unresolved diagnostics.
 
 Inputs are limited to 64 MiB and text to 16 million UTF-16 units. Malformed allocation chains, invalid text, unsupported revisions and encrypted inputs fail explicitly. Only root-level document streams are read; embedded objects have separate ownership. Success is labeled `raw_stories_only` and is not a production completeness signal.
 
 Top-level `LISTNUM` fields with absent or empty cached results report `listnum_empty_result_unresolved` at the field's source position. This includes fields containing nested arguments. A `LISTNUM` nested inside another field remains suppressed; nonempty cached results retain their existing text. Reconstructing uncached numbers still requires source list and sequence resolution.
 
-The development `doc-render` helper maps qualified source formatting and structure into the shared document model and writes page images, PDF, page JSON and source-ownership ledgers. It supports a bounded body, header/footer and table scope; unresolved components reject the whole document. Validation tracks source text, geometry, page counts, failures and performance. Saved previews can be stale; LibreOffice remains a comparison baseline.
 
 Format references: [MS-CFB](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/53989ce4-7b05-4f8d-829b-d08d6148375b), [FIB](https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-doc/9aeaa2e7-4a45-468e-ab13-3f6193eb9394), [compressed character mapping](https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-doc/aa2e55a2-f4f2-4795-bab5-6d9d7a0ed249). The mapping deliberately preserves U+0080 rather than applying Windows-1252's euro substitution.
 
 Character-formatting primitives decode CHPX pages into source-addressed property runs, preserving ordered SPRM operands and style-relative toggles. Revision evidence resolves supported direct and piece properties. Both projection and formatting metadata have explicit resource bounds.
 
-The CLI exposes per-story `fields` metadata, cross-checking indexed markers against UTF-16 source positions. Missing and malformed tables have separate statuses; some field types are intentionally absent from the index. `revisions` reports source-property evidence. The transcription applies known deletions for the accepted-revision view, retaining zero-output source spans and preserving raw inspection. Unknown visibility and revised field structure remain diagnosed. Failed revision projection retains the preceding text and reports the error.
+Inspection exposes per-story `fields` metadata, cross-checking indexed markers against UTF-16 source positions. Missing and malformed tables have separate statuses; some field types are intentionally absent from the index. `revisions` reports source-property evidence. The transcription applies known deletions for the accepted-revision view, retaining zero-output source spans and preserving raw inspection. Unknown visibility and revised field structure remain diagnosed. Failed revision projection retains the preceding text and reports the error.
 
 `hidden_properties` resolves supported ordinary hidden-text formatting from paragraph styles, character styles and ordered direct properties. Direct paragraph-end properties can establish a non-table baseline even when unused table styles exist; conditional table contributions remain unresolved. Valid logical table alignment, repeat-header, preferred leading-indent, anchor and wrapping-distance properties preserve a table visibility baseline only when the selected style contributes no text properties and physical row ownership and revisions are resolved. A language-only selected-style contribution retains ordered complex-script language metadata and can independently qualify hidden visibility. It remains nonempty for list and capitalization consumers. This qualifies text visibility; table positioning and header repetition still require rendering support. The final `transcription` suppresses proven hidden ranges for a hidden-text-display-off view, while `accepted_transcription` retains the preceding text. Suppressed ranges keep zero-output source spans. Unknown styles, conditional table formatting and ambiguous generated labels remain explicit; a partial visible result is not a completeness guarantee. Textbox byte ranges are calculated after this projection. If metadata or projection fails, the preceding transcription is retained with a diagnostic.
 
@@ -93,7 +45,7 @@ Explicit symbol characters use source font/code evidence and published Adobe/Uni
 
 `capitalization` preserves logical spelling while reporting independently resolved all-capital and small-capital presentation properties. It records source CP ownership and final projected byte ranges, together with hidden/deleted state and unresolved style histories. A physical paragraph with a proven empty table-style text contribution supplies the initial capitalization baseline before paragraph, character and direct formatting. Coalesced source controls and field-display literals use source-verified scalar mappings with a sparse boundary index. Generated labels require their own formatting context; ambiguous partial transformations retain source ranges without guessing output slices. Visible Unicode casing, font shaping and small-cap sizing remain renderer work.
 
-`render_model::sections::resolve` preserves ordered source page geometry in twips, specified defaults and per-property limitations. It retains inactive grid properties and checks that margins and column gaps leave room for text. The CLI does not invoke this library resolver yet; geometry resolution does not qualify a whole document for rendering.
+`render_model::sections::resolve` preserves ordered source page geometry in twips, specified defaults and per-property limitations. It retains inactive grid properties and checks that margins and column gaps leave room for text. liteparse does not invoke this resolver yet; geometry resolution does not qualify a whole document for rendering.
 
 `render_model::settings::inspect_settings` reads versioned FIB/DOP layout inputs, source compatibility bits and feature restrictions. It retains source offsets, flags installation overrides and withholds extension semantics when the recorded version and length disagree. The recorded installation language may be normalized by Word; content-dependent compatibility and rendering-view qualification remain required before layout.
 
@@ -111,16 +63,6 @@ Numeric list overrides preserve the shared list counter across override switchba
 
 `textbox_anchors` links source textbox ranges to shape anchors where the binary records establish ownership. `textbox_flow` adds UTF-8 byte ranges into existing projected stories, reusable-record accounting and source anchor order. It preserves the transcription and reports unresolved linked shapes. Source anchor order does not establish visual reading order: wrapping, pagination and shape overrides still need resolution before assembling textboxes with body content.
 
-The [transcription comparison harness](tools/TRANSCRIPTION.md) freezes helper binaries and verifies source/conversion hashes. Its agreement diagnostics are separate from independent correctness evidence and held-out family evaluation.
-
-The development `doc-render` crate consumes `render_model::plain::resolve` to render
-complete qualified Western documents with plain headers/footers through the shared
-paginator. Source run/paragraph/section properties, slot guards and character
-ownership remain explicit. Actual font and kerning qualification happens in the
-renderer before export; model validation alone does not establish layout fidelity. Unsupported
-components reject the whole document; this does not change the inspection CLI or
-install a production worker route. See `../doc-render/README.md` for the artifact
-contract and validation limits.
 
 The Western rendering repertoire includes en/em dashes, curly single/double quotes,
 bullets and ellipses under the resolved default font hint. Source font selection and
@@ -177,10 +119,10 @@ Word 2000 physical table grids support ordered row borders, per-cell border colo
 
 ### Best-effort extraction summary
 
-The CLI returns raw stories and logical transcription independently of page-render qualification. `extraction_summary` accounts for source and output ranges, suppressed segments, unresolved controls, and generated anchors. Existing text and visibility evidence remain available in their original fields. These counts describe source accounting; they do not establish visible-text accuracy, reading order, or complete feature support.
+Inspection returns raw stories and logical transcription independently of page-render qualification. `extraction_summary` accounts for source and output ranges, suppressed segments, unresolved controls, and generated anchors. Existing text and visibility evidence remain available in their original fields. These counts describe source accounting; they do not establish visible-text accuracy, reading order, or complete feature support.
 
 Cached HYPERLINK rendering uses the saved display result for supported field envelopes. Instructions and delimiters retain source ownership without painting. This does not evaluate links or establish that Word would display the saved result under every viewing mode.
 
 Text-box rendering currently supports one foreground, column/paragraph-relative box anchored at the start of the body. The source ledger retains authored text and reusable storage separately. The renderer checks the painted glyph bounds and emits explicit fidelity diagnostics for inferred line metrics. Linked, header and multiple text boxes and other placement contexts remain unsupported. Cached body hyperlinks can coexist with the supported text-box anchor. Table-only compatibility settings do not block documents that contain no tables.
 
-The CLI's `linked_notes` object exposes existing logical footnote and endnote text in body-reference source order. Each entry includes `body_cp`, the note's UTF-16 `source_cp` interval, its `logical_utf8_range` within the corresponding transcription story, and `text`. Automatic/custom reference metadata remains separate from displayed labels. Global source-relationship limitations and local visibility or projection uncertainty remain explicit. A suppressed body reference does not silently discard its linked note; the entry reports that uncertainty. This output does not establish page placement or add text absent from the existing transcription. If the extension cannot be decoded, existing inspection and transcription output remain available.
+Inspection's `linked_notes` object exposes existing logical footnote and endnote text in body-reference source order. Each entry includes `body_cp`, the note's UTF-16 `source_cp` interval, its `logical_utf8_range` within the corresponding transcription story, and `text`. Automatic/custom reference metadata remains separate from displayed labels. Global source-relationship limitations and local visibility or projection uncertainty remain explicit. A suppressed body reference does not silently discard its linked note; the entry reports that uncertainty. This output does not establish page placement or add text absent from the existing transcription. If the extension cannot be decoded, existing inspection and transcription output remain available.

@@ -1,6 +1,6 @@
 //! The extract request: opens the presentation, picks the pages to emit, builds
-//! and renders each slide, and writes the protocol files (`index.json`,
-//! `pages.jsonl`, rasters, embedded images) and the optional screenshot PDF.
+//! and renders each slide, and returns the index and page records (screenshots,
+//! embedded images and the optional screenshot PDF go to the requested paths).
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -755,7 +755,7 @@ fn render_pdf_pages(
 }
 
 /// This process's peak RSS in bytes: VmHWM, since Linux `ru_maxrss` carries the
-/// spawning worker's high-water across fork+exec.
+/// parent's high-water across fork+exec.
 #[cfg(unix)]
 fn peak_rss_bytes() -> Option<u64> {
     // ponytail: the getrusage fallback only fires off Linux (local dev).
