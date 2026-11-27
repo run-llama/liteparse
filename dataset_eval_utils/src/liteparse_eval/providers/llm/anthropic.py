@@ -2,13 +2,27 @@ from anthropic import Anthropic
 
 from .base import LLMProvider, QA_PROMPT, JUDGE_PROMPT
 
+DEFAULT_MODEL = "claude-sonnet-5-5"
+
+
+def _response_text(response) -> str:
+    """
+    Join the text blocks of a Messages API response.
+
+    Newer models can start a response with `thinking` blocks, so the text is not
+    always at `content[0]`.
+    """
+    return "".join(
+        block.text for block in response.content if getattr(block, "type", None) == "text"
+    )
+
 
 class AnthropicProvider(LLMProvider):
     """
     LLM provider using Anthropic for QA.
     """
 
-    def __init__(self, api_key: str = None, model: str = "claude-sonnet-4-5-20250929"):
+    def __init__(self, api_key: str = None, model: str = DEFAULT_MODEL):
         """
         Initialize Anthropic QA provider.
 
@@ -26,7 +40,8 @@ class AnthropicProvider(LLMProvider):
         # Call Claude
         response = self.client.messages.create(
             model=self.model,
-            max_tokens=1024,
+            # max_tokens covers thinking as well as the answer on models that think by default.
+            max_tokens=4096,
             messages=[
                 {
                     "role": "user",
@@ -37,8 +52,11 @@ class AnthropicProvider(LLMProvider):
         )
         if not response.content or len(response.content) == 0:
             raise ValueError("No content returned from Anthropic response")
-        
-        return response.content[0].text
+
+        text = _response_text(response)
+        if not text:
+            raise ValueError("No text returned from Anthropic response")
+        return text
 
     def evaluate_answer(self, question: str, expected_answer: str, predicted_answer: str) -> bool:
         """
@@ -54,7 +72,8 @@ class AnthropicProvider(LLMProvider):
 
         response = self.client.messages.create(
             model=self.model,
-            max_tokens=256,
+            # Leave room for thinking before the <pass>/<fail> verdict.
+            max_tokens=2048,
             messages=[
                 {
                     "role": "user",
@@ -68,7 +87,7 @@ class AnthropicProvider(LLMProvider):
             return True  
 
         # Check if the response is "<pass>" or "<fail>"
-        resp_text = response.content[0].text.strip()
+        resp_text = _response_text(response).strip()
 
         resp_text_lower = resp_text.lower()
         return "<pass" in resp_text_lower and "<fail" not in resp_text_lower
