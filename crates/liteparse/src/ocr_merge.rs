@@ -2480,7 +2480,7 @@ struct EncodingSlips {
 }
 
 /// Fewest Latin-1 letters, and their least share of all letters, for text to count as garbled.
-/// On the 50,006 EXA pages the mojibake pages sit above 0.8 and nothing else above 0.5.
+/// Mojibake pages sit above 0.8; no clean page measured came above 0.5.
 const LATIN1_MIN: usize = 30;
 const LATIN1_MIN_SHARE: f32 = 0.5;
 /// Fewest Arabic letters to judge, fewest odd code points, and their least rate per Arabic
@@ -2488,11 +2488,11 @@ const LATIN1_MIN_SHARE: f32 = 0.5;
 const ARABIC_MIN_LETTERS: usize = 100;
 const ARABIC_ODD_MIN: usize = 10;
 const ARABIC_ODD_MIN_RATE: f32 = 0.02;
-/// Fewest back-to-front Arabic words, and their least share of the Arabic words.
-/// Fewest shifted-ASCII marks, and their least share of the visible characters. On the EXA pages
-/// the garbled ones sit at 6-10%; gene lists and parts tables, the densest clean text, under 5%.
+/// Fewest shifted-ASCII marks, and their least share of the visible characters. The
+/// garbled pages measured sit at 6-10%; gene lists and parts tables, the densest clean text, under 5%.
 const ASCII_SHIFT_MIN: usize = 30;
 const ASCII_SHIFT_MIN_SHARE: f32 = 0.06;
+/// Fewest back-to-front Arabic words, and their least share of the Arabic words.
 const ARABIC_REVERSED_MIN: usize = 5;
 const ARABIC_REVERSED_MIN_SHARE: f32 = 0.05;
 
