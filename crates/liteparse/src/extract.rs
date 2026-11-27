@@ -2169,6 +2169,15 @@ fn extract_page_text_items_pass(
         let baseline = ch
             .origin()
             .map(|(ox, oy)| vp_xform.transform_point(ox as f32, oy as f32).1);
+        // A font whose own metrics make its line box several ems tall: every glyph of it gets a
+        // normal line box on its baseline (#529).
+        let vp_loose = normalize_tall_font_box(
+            &vp_loose,
+            &vp_strict,
+            baseline,
+            obj_meta.meta_for(&ch, cv.text_object()).font_em_metrics,
+        )
+        .unwrap_or(vp_loose);
 
         if seg.has_content {
             // Use viewport-space coordinates for gap/overlap checks
@@ -3518,6 +3527,8 @@ struct ObjTextMeta {
     /// fallback size).
     font_ascent: Option<f32>,
     font_descent: Option<f32>,
+    /// The font's ascent and descent per em, independent of any size or scale.
+    font_em_metrics: Option<(f32, f32)>,
     /// Vertical scale of the char matrix (font_height = font_size * scale_y).
     scale_y: Option<f32>,
     /// Mirrors the pre-cache logic: only probed when the font has a base
@@ -3547,6 +3558,8 @@ struct FontMeta {
     is_embedded: bool,
     name_is_buggy: bool,
     space_width_per_em: Option<f32>,
+    /// The font's own ascent and descent per em (descriptor metrics at size 1).
+    em_metrics: Option<(f32, f32)>,
 }
 
 #[derive(Default)]
@@ -3604,6 +3617,7 @@ impl ObjMetaCache {
         let mut font_name_is_buggy = false;
         let mut font_ascent = None;
         let mut font_descent = None;
+        let mut font_em_metrics = None;
         match &font {
             Some(f) => {
                 let handle = f.handle() as usize;
@@ -3634,6 +3648,10 @@ impl ObjMetaCache {
                         is_embedded,
                         name_is_buggy,
                         space_width_per_em,
+                        em_metrics: match (f.ascent(1.0), f.descent(1.0)) {
+                            (Some(a), Some(d)) if a.is_finite() && d.is_finite() => Some((a, d)),
+                            _ => None,
+                        },
                     }
                 });
                 font_name = fm.base_name.clone().or_else(|| fm.info_name.clone());
@@ -3642,6 +3660,7 @@ impl ObjMetaCache {
                 font_is_embedded = fm.is_embedded;
                 font_name_is_buggy = fm.name_is_buggy;
                 font_space_width = fm.space_width_per_em;
+                font_em_metrics = fm.em_metrics;
                 if fs > 0.0 {
                     let (ascent, descent) = *self
                         .metrics
@@ -3675,6 +3694,7 @@ impl ObjMetaCache {
             font_size: fs,
             font_ascent,
             font_descent,
+            font_em_metrics,
             scale_y,
             font_is_embedded,
             font_name_is_buggy,
@@ -3894,6 +3914,65 @@ fn prescan_page_batched(
         .map(|(key, _)| key)
         .collect();
     (skip_invisible, garbage_fonts)
+}
+
+/// A font's own line box (ascent − descent, per em) above which its vertical metrics are treated
+/// as pathological. Text fonts sit between about 1.0 and 1.6 em. TeX symbol fonts that also hold
+/// big delimiters reach about 4 em (MnSymbol10 in the CI set's trouble_docs_3: 4.01 em) and lay
+/// out correctly with their own boxes, so the bar sits above them. Cambria Math carries 5.58 em
+/// (`/Ascent 3116 /Descent -2463`), and WPS Office and other producers embed those metrics in the
+/// Cambria subsets they use for digits, Latin letters and leader dots (#529).
+const TALL_FONT_LINE_BOX_EM: f32 = 5.0;
+
+/// Ascent and descent, per em, of the line box such a font's glyphs get instead.
+const NORMAL_ASCENT_EM: f32 = 0.8;
+const NORMAL_DESCENT_EM: f32 = 0.2;
+
+/// The loose box a glyph gets when its font's own line box is pathological (#529): one em on the
+/// glyph's baseline, `NORMAL_ASCENT_EM` above and `NORMAL_DESCENT_EM` below, grown to the glyph's
+/// ink where the ink reaches further. `None` keeps the loose box as it is.
+///
+/// A font with Cambria Math's metrics can still draw a glyph taller than one em (a big
+/// delimiter); taking the ink into account keeps such a glyph as tall as it is drawn, while a
+/// digit or a leader dot (ink well inside one em) gets the plain one-em box.
+///
+/// Decided per font, not per glyph, and applied to every glyph of the font, a run's first
+/// included: then a lone period lines up with its neighbours instead of falling out of the line
+/// their boxes define (the problem 2f644f2 fixed for the per-glyph #486 clamp), while short
+/// runs no longer reach over the lines around them. Scale-free like that clamp: the font's em
+/// on the page is the loose height over the font's own line box, so no `Tf`/`Tm` size enters.
+///
+/// Only upright glyphs: the baseline must split the loose box the way the font's ascent and
+/// descent do. A rotated glyph's vertical extent is its advance, which fails that check.
+fn normalize_tall_font_box(
+    vp_loose: &RectF,
+    vp_ink: &RectF,
+    baseline: Option<f32>,
+    em_metrics: Option<(f32, f32)>,
+) -> Option<RectF> {
+    let (ascent, descent) = em_metrics?;
+    let line_box = ascent - descent;
+    if line_box <= TALL_FONT_LINE_BOX_EM {
+        return None;
+    }
+    let baseline = baseline?;
+    let top = vp_loose.top.min(vp_loose.bottom);
+    let em = (vp_loose.bottom - vp_loose.top).abs() / line_box;
+    if em <= 0.0 || ((baseline - top) - ascent * em).abs() > 0.25 * em {
+        return None;
+    }
+    let mut top = baseline - NORMAL_ASCENT_EM * em;
+    let mut bottom = baseline + NORMAL_DESCENT_EM * em;
+    if vp_ink.bottom > vp_ink.top {
+        top = top.min(vp_ink.top);
+        bottom = bottom.max(vp_ink.bottom);
+    }
+    Some(RectF {
+        left: vp_loose.left,
+        top,
+        right: vp_loose.right,
+        bottom,
+    })
 }
 
 /// Maximum loose-box height as a multiple of the INK height before the
