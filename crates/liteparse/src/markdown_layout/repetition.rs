@@ -253,6 +253,33 @@ fn has_year(lower: &str) -> bool {
     false
 }
 
+/// Words that number an element of the document rather than cite pages:
+/// "Table 1-1", "Figure 2-1", "Worksheet 2-3".
+const NUMBERED_ELEMENT_WORDS: &[&str] = &["table", "figure", "fig", "worksheet"];
+
+/// Whether the digit pair starting at `chars[start]` is a label rather than a
+/// page range: it numbers an element named by the word before it
+/// ("Table 1-1"), or a hyphen joins it to the token before it
+/// ("Level-1-260C", a part or grade code).
+fn is_label_number(chars: &[char], start: usize) -> bool {
+    if start > 1 && chars[start - 1] == '-' && chars[start - 2].is_alphanumeric() {
+        return true;
+    }
+    let mut k = start;
+    while k > 0 && chars[k - 1].is_whitespace() {
+        k -= 1;
+    }
+    let word_end = k;
+    while k > 0 && (chars[k - 1].is_ascii_alphabetic() || chars[k - 1] == '.') {
+        k -= 1;
+    }
+    let word: String = chars[k..word_end]
+        .iter()
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    NUMBERED_ELEMENT_WORDS.contains(&word.trim_matches('.'))
+}
+
 fn has_digit_range(t: &str) -> bool {
     // Look for digit, optional spaces, '-' or '–', optional spaces, digit.
     let chars: Vec<char> = t.chars().collect();
@@ -289,7 +316,8 @@ fn has_digit_range(t: &str) -> bool {
                     let g1_is_year = g1_len == 4
                         && ((chars[i] == '1' && chars[i + 1] == '9')
                             || (chars[i] == '2' && chars[i + 1] == '0'));
-                    if !(g1_is_year && g2_len <= 2) {
+                    // Nor is a pair that labels something ("Table 1-1").
+                    if !(g1_is_year && g2_len <= 2) && !is_label_number(&chars, i) {
                         return true;
                     }
                     i = n;
@@ -703,6 +731,37 @@ mod tests {
         assert!(!has_digit_range("Generated 2025-01-23"));
         // A real page range still registers, even with a year on the line.
         assert!(has_digit_range("Vol 24, 1-9, 2017"));
+    }
+
+    #[test]
+    fn numbered_elements_and_codes_are_not_page_ranges() {
+        // Captions and worksheet titles from IRS Publications 17, 505 and 970:
+        // a year and a numbered element, but no page range.
+        for caption in [
+            "Table 1-1. 2025 Filing Requirements for Most Taxpayers",
+            "Worksheet 2-1. 2026 Estimated Tax Worksheet Keep for Your Records",
+            "Figure 3-1. Can You Claim the Lifetime Learning Credit for 2025?",
+            "Fig. 2-4 shows the 2019 results",
+            "Table\u{a0}1-1. 2025 Filing Requirements",
+        ] {
+            assert!(!matches_chrome_pattern(caption), "{caption}");
+        }
+        // An orderable-device row from a TI datasheet: the reel quantity 2000
+        // reads as a year, and the moisture rating "Level-1-260C" is a code.
+        assert!(!matches_chrome_pattern(
+            "LM2904BAIPWR.A Active Production TSSOP (PW) 8 2000 LARGE T&R Yes NIPDAU Level-1-260C-UNLIM -40 to 125 2904BA"
+        ));
+        assert!(!has_digit_range("Level-1-260 2000"));
+        // A real range elsewhere on the same line still counts, also when a
+        // journal title ends in one of the words.
+        assert!(has_digit_range("Table 1-1, J. Chem. 12, 1-9, 2017"));
+        assert!(matches_chrome_pattern(
+            "Atomic Data and Nuclear Data Tables 111–112, 1–9 (2016)"
+        ));
+        // A dash that is punctuation does not make a code.
+        assert!(matches_chrome_pattern("ICML 2017, Sydney–6–11 August"));
+        assert!(matches_chrome_pattern("ICML 2017 (Sydney)-6–11 August"));
+        assert!(matches_chrome_pattern("ICML 2017, Sydney - 6-11 August"));
     }
 
     #[test]
