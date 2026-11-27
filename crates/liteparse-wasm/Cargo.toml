@@ -1,6 +1,6 @@
 [package]
 name = "liteparse-wasm"
-version = "2.21.3"
+version = "2.21.4"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
