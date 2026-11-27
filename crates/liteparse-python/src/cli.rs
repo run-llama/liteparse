@@ -89,6 +89,9 @@ struct ParseCommand {
     password: Option<String>,
     #[arg(short, long)]
     quiet: bool,
+    /// Legacy: convert .doc/.docx/.ppt/.pptx with LibreOffice instead of the native decoders
+    #[arg(long)]
+    with_libre_office: bool,
     #[arg(long)]
     num_workers: Option<usize>,
     /// How to surface raster images in markdown output: `off`, `placeholder`
@@ -164,6 +167,9 @@ struct ScreenshotCommand {
     password: Option<String>,
     #[arg(short, long)]
     quiet: bool,
+    /// Legacy: convert .doc/.docx/.ppt/.pptx with LibreOffice instead of the native decoders
+    #[arg(long)]
+    with_libre_office: bool,
 }
 
 #[derive(Args, Debug)]
@@ -182,6 +188,9 @@ struct IsComplexCommand {
     password: Option<String>,
     #[arg(short, long)]
     quiet: bool,
+    /// Legacy: convert .doc/.docx/.ppt/.pptx with LibreOffice instead of the native decoders
+    #[arg(long)]
+    with_libre_office: bool,
 }
 
 #[derive(Args, Debug)]
@@ -219,6 +228,9 @@ struct BatchParseCommand {
     password: Option<String>,
     #[arg(short, long)]
     quiet: bool,
+    /// Legacy: convert .doc/.docx/.ppt/.pptx with LibreOffice instead of the native decoders
+    #[arg(long)]
+    with_libre_office: bool,
     #[arg(long)]
     num_workers: Option<usize>,
     /// Include per-page complexity signals as a `complexity` object on each
@@ -337,6 +349,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 preserve_very_small_text: cmd.preserve_small_text,
                 password: cmd.password,
                 quiet: cmd.quiet,
+                use_libreoffice: cmd.with_libre_office,
                 ocr_server_url: cmd.ocr_server_url,
                 ocr_server_headers: cmd.ocr_server_headers,
                 image_mode,
@@ -407,6 +420,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 dpi: Some(cmd.dpi),
                 password: cmd.password.clone(),
                 quiet: cmd.quiet,
+                use_libreoffice: cmd.with_libre_office,
                 ..Default::default()
             };
             let lp = LiteParse::new(config);
@@ -447,6 +461,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 preserve_very_small_text: false,
                 password: cmd.password,
                 quiet: cmd.quiet,
+                use_libreoffice: cmd.with_libre_office,
                 ocr_server_url: cmd.ocr_server_url,
                 ocr_server_headers: cmd.ocr_server_headers,
                 include_complexity: cmd.complexity,
@@ -563,6 +578,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 target_pages: cmd.target_pages,
                 password: cmd.password,
                 quiet: cmd.quiet,
+                use_libreoffice: cmd.with_libre_office,
                 ..Default::default()
             };
             let lp = LiteParse::new(config);

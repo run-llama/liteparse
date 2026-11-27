@@ -1277,6 +1277,8 @@ struct PyLiteParseConfig {
     #[pyo3(get)]
     quiet: bool,
     #[pyo3(get)]
+    use_libreoffice: bool,
+    #[pyo3(get)]
     num_workers: usize,
     #[pyo3(get)]
     image_mode: String,
@@ -1373,6 +1375,7 @@ impl PyLiteParseConfig {
             preserve_very_small_text: cfg.preserve_very_small_text,
             password: cfg.password.clone(),
             quiet: cfg.quiet,
+            use_libreoffice: cfg.use_libreoffice,
             num_workers: cfg.num_workers,
             image_mode: match cfg.image_mode {
                 ImageMode::Off => "off".to_string(),
@@ -1523,6 +1526,7 @@ impl LiteParse {
         preserve_very_small_text = None,
         password = None,
         quiet = None,
+        use_libreoffice = None,
         num_workers = None,
         image_mode = None,
         extract_images = None,
@@ -1569,6 +1573,7 @@ impl LiteParse {
         preserve_very_small_text: Option<bool>,
         password: Option<String>,
         quiet: Option<bool>,
+        use_libreoffice: Option<bool>,
         num_workers: Option<usize>,
         image_mode: Option<String>,
         extract_images: Option<bool>,
@@ -1648,6 +1653,9 @@ impl LiteParse {
         }
         if let Some(v) = quiet {
             cfg.quiet = v;
+        }
+        if let Some(v) = use_libreoffice {
+            cfg.use_libreoffice = v;
         }
         if let Some(v) = num_workers {
             cfg.num_workers = v;

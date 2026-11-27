@@ -98,6 +98,13 @@ pub struct LiteParseConfig {
     pub password: Option<String>,
     /// Suppress progress output.
     pub quiet: bool,
+    /// Legacy behaviour for Word and PowerPoint files (`.doc`, `.docx`,
+    /// `.ppt`, `.pptx`): convert them to PDF with LibreOffice instead of
+    /// decoding them with the built-in native decoders (`crate::office`).
+    /// Needs LibreOffice installed. Other office formats (spreadsheets, ODF,
+    /// RTF, ...) always go through LibreOffice.
+    #[serde(default)]
+    pub use_libreoffice: bool,
     /// Number of concurrent OCR workers. Defaults to (number of CPU cores - 1), minimum 1.
     pub num_workers: usize,
     /// Controls how raster image references are surfaced in markdown output.
@@ -423,6 +430,7 @@ impl Default for LiteParseConfig {
             preserve_very_small_text: false,
             password: None,
             quiet: false,
+            use_libreoffice: false,
             num_workers: default_num_workers(),
             image_mode: ImageMode::Placeholder,
             extract_images: false,

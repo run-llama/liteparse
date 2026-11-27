@@ -28,10 +28,10 @@ oar-ocr-webgpu = ["oar-ocr", "oar-ocr/webgpu"]
 oar-ocr-openvino = ["oar-ocr", "oar-ocr/openvino"]
 tesseract = ["dep:tesseract-rs"]
 # LiteParse's own OCR models in-process; ONNX Runtime is loaded at run time, not linked.
-ocria-nano = ["dep:ort", "dep:unicode-bidi", "dep:sha2", "dep:tar", "dep:zip"]
+ocria-nano = ["dep:ort", "dep:sha2", "dep:tar"]
 # ocria-nano in the WebAssembly build: the same engine on tract (pure Rust), models passed in
 # as bytes (no `lit models pull`, no ONNX Runtime). Only takes effect on wasm32.
-ocria-nano-wasm = ["dep:tract-onnx", "dep:getrandom", "dep:unicode-bidi", "dep:sha2"]
+ocria-nano-wasm = ["dep:tract-onnx", "dep:getrandom", "dep:sha2"]
 # Testing: run the native ocria-nano engine on tract instead of ONNX Runtime (WASM parity checks).
 ocria-tract = ["ocria-nano", "dep:tract-onnx"]
 # `lit ocr-serve`: ocria-nano as an HTTP OCR server (the `--ocr-server-url` protocol), so
@@ -53,19 +53,20 @@ pdfium = { package = "liteparse-pdfium", version = "1.15.0", path = "../pdfium" 
 pdfium-sys = { package = "liteparse-pdfium-sys", version = "1.15.0", path = "../pdfium-sys" }
 reqwest = { version = "0.13.3", default-features = false, features = ["json", "form", "multipart", "rustls"] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+# preserve_order: the Office decoders edit page records in place (`shift_remove`).
+serde_json = { version = "1.0.149", features = ["preserve_order"] }
 tempfile = "3.27.0"
 thiserror = "2"
 tesseract-rs = { version = "0.4.2", features = ["build-tesseract"], optional = true }
 tokio = { version = "1.52.3", features = ["rt", "macros", "sync", "time", "io-util"] }
 url = "2"
-unicode-bidi = { version = "0.3.18", optional = true }
+unicode-bidi = "0.3.18"
 sha2 = { version = "0.10.9", optional = true }
 tract-onnx = { version = "0.23", optional = true }
 web-time = "1.1.0"
 flate2 = "1.1.9"
-resvg = "0.44"
-usvg = "0.44"
+resvg = "0.49"
+usvg = "0.49"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 lopdf = { version = "0.42", default-features = false }
@@ -73,8 +74,25 @@ oar-ocr = { version = "0.8", optional = true }
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-24"], optional = true }
 tar = { version = "0.4.46", default-features = false, optional = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "multipart", "json"], optional = true }
-zip = { version = "9.8.1", default-features = false, features = ["deflate"], optional = true }
+zip = { version = "9.8.1", default-features = false, features = ["deflate"] }
 rmp = "0.8"
+# Native Word/PowerPoint decoders (`src/office`).
+roxmltree = "0.21"
+tiny-skia = "0.12"
+rustybuzz = "0.20"
+fontdb = "0.24"
+unicode-linebreak = "0.1"
+miniz_oxide = "0.9"
+encoding_rs = "0.8"
+tiff = { version = "0.11", default-features = false }
+icu_segmenter = { version = "~2.3", default-features = false, features = ["compiled_data"] }
+html5ever = "=0.40.1"
+simplecss = "0.2.2"
+jpeg-encoder = { version = "0.7", features = ["simd"] }
+zune-jpeg = "=0.5.15"
+png = "0.18"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+libc = "0.2"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "fs", "process"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

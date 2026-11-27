@@ -64,6 +64,7 @@ export interface LiteParseNativeConfig {
   preserveVerySmallText?: boolean;
   password?: string;
   quiet?: boolean;
+  useLibreoffice?: boolean;
   numWorkers?: number;
   ocrFailureFatal?: boolean;
   ocrDespeckleScans?: boolean;

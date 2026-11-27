@@ -112,6 +112,8 @@ export interface LiteParseConfig {
   preserveVerySmallText: boolean;
   password?: string;
   quiet: boolean;
+  /** Legacy: convert .doc/.docx/.ppt/.pptx to PDF with LibreOffice instead of the built-in native decoders (needs LibreOffice installed; default: false). */
+  useLibreoffice: boolean;
   numWorkers: number;
   /**
    * Whether a systemic OCR failure (every OCR task failed and at least one was
@@ -727,6 +729,7 @@ export class LiteParse {
       preserveVerySmallText: userConfig.preserveVerySmallText,
       password: userConfig.password,
       quiet: userConfig.quiet,
+      useLibreoffice: userConfig.useLibreoffice,
       numWorkers: userConfig.numWorkers,
       ocrFailureFatal: userConfig.ocrFailureFatal,
       ocrDespeckleScans: userConfig.ocrDespeckleScans,
@@ -794,6 +797,7 @@ export class LiteParse {
       preserveVerySmallText: resolved.preserveVerySmallText ?? false,
       password: resolved.password ?? undefined,
       quiet: resolved.quiet ?? false,
+      useLibreoffice: resolved.useLibreoffice ?? false,
       numWorkers: resolved.numWorkers ?? 1,
       ocrFailureFatal: resolved.ocrFailureFatal ?? true,
       ocrDespeckleScans: resolved.ocrDespeckleScans ?? true,
