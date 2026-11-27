@@ -89,7 +89,27 @@ fn is_cp1251_mojibake(text: &str) -> bool {
         .filter(|&c| CYRILLIC_VOWELS.contains(c))
         .count();
     let share = vowels as f32 / cyr.max(1) as f32;
-    share >= CYRILLIC_VOWEL_RANGE.0 && share <= CYRILLIC_VOWEL_RANGE.1
+    if share < CYRILLIC_VOWEL_RANGE.0 || share > CYRILLIC_VOWEL_RANGE.1 {
+        return false;
+    }
+    // Another 8-bit code page (Armenian ArmSCII, say) re-read as Windows-1251 can land in the
+    // vowel range by leaning on one letter ("пісіНщіЫЗЭ ПійінісЩіЭ"): no Cyrillic language
+    // gives one letter a fifth of its text, or capitals after lowercase inside its words.
+    let mut counts: HashMap<char, usize> = HashMap::new();
+    for c in fixed.chars().filter(|&c| is_cyrillic(c)) {
+        *counts
+            .entry(c.to_lowercase().next().unwrap_or(c))
+            .or_insert(0) += 1;
+    }
+    let top = counts.values().copied().max().unwrap_or(0);
+    let cs: Vec<char> = fixed.chars().collect();
+    let humps = cs
+        .windows(2)
+        .filter(|w| {
+            is_cyrillic(w[0]) && w[0].is_lowercase() && is_cyrillic(w[1]) && w[1].is_uppercase()
+        })
+        .count();
+    top * 5 <= cyr && humps * 50 <= cyr
 }
 
 /// Fewest U+03A2 in a font's text for the Greek shift to be undone.
@@ -214,6 +234,8 @@ mod tests {
             "Tiếng Việt có rất nhiều dấu: được, đã, đến, để, là, và, các, những, một, người.",
             "Þetta er íslenska: það, ég, þú, hún, við, þið, þeir, þær, þau, áður, síðan, núna.",
             "ÀÉÎÕÜ ÇÑ ÆØÅ ÀÉÎÕÜ ÇÑ ÆØÅ ÀÉÎÕÜ ÇÑ ÆØÅ ÀÉÎÕÜ ÇÑ ÆØÅ ÀÉÎÕÜ ÇÑ ÆØÅ ÀÉÎÕÜ",
+            // Armenian (ArmSCII) read as Latin-1: garbled, but not Windows-1251
+            "ÐÐ ï³ñ³Íù³ÛÇÝ Ï³é³í³ñÙ³Ý ¨ ½³ñ·³óÙ³Ý Ý³Ë³ñ³ñáõÃÛáõÝ",
             RUSSIAN,
             "ΕΛΛΗΝΙΚΗ ΔΗΜΟΚΡΑΤΙΑ ΝΟΜΟΣ ΗΜΑΘΙΑΣ ΥΠΟΥΡΓΕΙΟ",
             "وزيادة على هذا، لم يعالج الفضيل قضايا وطنه فحسب، فقد كان غيره متأثرا بالمدرسة",
