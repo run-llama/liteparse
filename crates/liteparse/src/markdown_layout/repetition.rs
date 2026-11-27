@@ -445,33 +445,53 @@ pub fn detect_single_page_chrome(
             line.bbox.height.max(1.0)
         };
         let required_gap = SP_ISOLATION_GAP_RATIO * gap_ref;
-        // Isolation: gap to the nearest neighbor line (by y) on the body
-        // side must be ≥ required_gap. Multi-line chrome counts as one
-        // unit — we check the gap from this group's outer edge to the
-        // nearest *non-chrome-candidate* line. As a simple proxy, look
-        // at the nearest line in y-order whose pattern doesn't match.
-        let isolated = if in_top {
-            page.projected_lines
-                .iter()
-                .enumerate()
-                .filter(|(j, l)| {
-                    *j != idx && tops[*j] > bots[idx] && !matches_chrome_pattern(l.text.trim())
+        // Isolation: the gap from the chrome group's outer edge to the nearest line on the
+        // body side must be >= required_gap. Multi-line chrome counts as one unit: the group
+        // grows through band lines that match the chrome pattern and sit tight against it.
+        // (Skipping every pattern-matching line instead let a page whose body is itself a list
+        // of URLs, such as a reference list, lose its first entries as chrome: every line
+        // below was skipped, so nothing ever broke the isolation.)
+        let is_candidate = |j: usize| {
+            let band = if in_top {
+                bots[j] <= top_cutoff
+            } else {
+                tops[j] >= bottom_cutoff
+            };
+            band && matches_chrome_pattern(page.projected_lines[j].text.trim())
+        };
+        let mut edge = if in_top { bots[idx] } else { tops[idx] };
+        let isolated = loop {
+            let next = (0..tops.len())
+                .filter(|&j| {
+                    j != idx
+                        && if in_top {
+                            tops[j] > edge
+                        } else {
+                            bots[j] < edge
+                        }
                 })
-                .map(|(j, _)| tops[j] - bots[idx])
-                .min_by(|a, b| a.total_cmp(b))
-                .map(|gap| gap >= required_gap)
-                .unwrap_or(true)
-        } else {
-            page.projected_lines
-                .iter()
-                .enumerate()
-                .filter(|(j, l)| {
-                    *j != idx && bots[*j] < tops[idx] && !matches_chrome_pattern(l.text.trim())
-                })
-                .map(|(j, _)| tops[idx] - bots[j])
-                .min_by(|a, b| a.total_cmp(b))
-                .map(|gap| gap >= required_gap)
-                .unwrap_or(true)
+                .min_by(|&a, &b| {
+                    if in_top {
+                        tops[a].total_cmp(&tops[b])
+                    } else {
+                        bots[b].total_cmp(&bots[a])
+                    }
+                });
+            let Some(next) = next else {
+                break true;
+            };
+            let gap = if in_top {
+                tops[next] - edge
+            } else {
+                edge - bots[next]
+            };
+            if gap >= required_gap {
+                break true;
+            }
+            if !is_candidate(next) {
+                break false;
+            }
+            edge = if in_top { bots[next] } else { tops[next] };
         };
         if !isolated {
             continue;
@@ -777,5 +797,51 @@ mod tests {
             "no isolation gap means it's part of body, got {:?}",
             strip
         );
+    }
+
+    #[test]
+    fn reference_list_at_the_top_is_not_chrome() {
+        // ParseBench text_simple__references: a page that is a list of URLs. Every entry
+        // matches the chrome pattern, the first few sit in the top band, and the list runs
+        // on tight below it, so none of them is isolated.
+        let mut lines = vec![line("References", 50.0, 20.0, 16.0, 16.0)];
+        for k in 0..12 {
+            let y = 46.0 + 17.0 * k as f32;
+            lines.push(line(
+                &format!("[{}] https://example.org/ref/{k}", k + 1),
+                50.0,
+                y,
+                14.0,
+                11.0,
+            ));
+        }
+        let p = page(lines);
+        let strip = detect_single_page_chrome(&p, 11.0);
+        assert!(
+            strip.is_empty(),
+            "reference entries stripped as chrome: {:?}",
+            strip
+        );
+    }
+
+    #[test]
+    fn stacked_top_chrome_lines_strip_as_one_group() {
+        // Two tight chrome lines over a clear gap still strip together.
+        let lines = vec![
+            line("https://doi.org/10.1000/xyz", 50.0, 20.0, 10.0, 10.0),
+            line(
+                "Downloaded from https://example.org",
+                50.0,
+                31.0,
+                10.0,
+                10.0,
+            ),
+            line("Main Body Title", 50.0, 200.0, 14.0, 14.0),
+            line("Body prose line one.", 50.0, 220.0, 10.0, 10.0),
+        ];
+        let p = page(lines);
+        let strip = detect_single_page_chrome(&p, 10.0);
+        assert!(strip.contains(&0) && strip.contains(&1), "{:?}", strip);
+        assert!(!strip.contains(&2));
     }
 }
