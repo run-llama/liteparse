@@ -86,13 +86,13 @@ const parser = new LiteParse({
   ocrEnabled: true,              // Enable OCR (default: true)
   ocrLanguage: 'eng',           // Tesseract language code
   ocrServerUrl: undefined,       // HTTP OCR server URL (optional)
-  ocrBackend: undefined,         // "tesseract" | "ocria-nano" (default: ocria-nano once pulled, else tesseract)
+  ocrBackend: undefined,         // "tesseract" | "ocria-nano" (default: OCRia-nano-1 once pulled, else tesseract)
   tessdataPath: undefined,       // Path to tessdata directory (optional)
   maxPages: 1000,                // Max pages to parse
   targetPages: '1-5,10',        // Specific pages (optional)
   extractScreenshots: false,    // Return parsed pages as PNG buffers
   continueOnPageError: false,   // Skip broken pages and return pageErrors
-  dpi: 150,                      // Rendering DPI (default: 250 with ocria-nano, else 150)
+  dpi: 150,                      // Rendering DPI (default: 250 with OCRia-nano-1, else 150)
   outputFormat: 'json',          // "json" | "text" | "markdown"
   imageMode: 'placeholder',      // Markdown image handling: "placeholder" | "off" | "embed"
   extractImages: true,           // Extract image bytes + metadata (default: false)
@@ -152,9 +152,9 @@ empty array. Screenshots draw form-field appearances into the raster and
 report `isSolidFill` per page, plus detected solid `rects` when
 `detectScreenshotRects` is enabled.
 
-## OCR with ocria-nano
+## OCR with OCRia-nano-1
 
-ocria-nano is LiteParse's own OCR and table model package (8.1M parameters, CPU only): a line detector, a script
+OCRia-nano-1 is LiteParse's own OCR and table model package (8.1M parameters, CPU only): a line detector, a script
 router, four recognizers and LayoutNet, a learned table and layout model. It is opt-in: pull it once, after which it
 is the default OCR backend.
 
@@ -163,16 +163,19 @@ import { LiteParse, models } from "@llamaindex/liteparse";
 
 models.pull("ocria-nano");                 // once: models + ONNX Runtime (60-75 MB); prints the licence notice
 const parser = new LiteParse({ outputFormat: "markdown" });
-const result = await parser.parse("scan.pdf"); // OCR + tables with ocria-nano
+const result = await parser.parse("scan.pdf"); // OCR + tables with OCRia-nano-1
 
 new LiteParse({ ocrBackend: "tesseract" });   // Tesseract instead, for this parser
 models.list();                             // installed packages
 models.rm("ocria-nano");                   // remove
 ```
 
-The CLI has the same commands (`lit models pull|list|rm`). With ocria-nano, pages render at 250 dpi (Tesseract: 150)
+The CLI has the same commands (`lit models pull|list|rm`). With OCRia-nano-1, pages render at 250 dpi (Tesseract: 150)
 unless `dpi` is set, and `ocrLanguage` is ignored (it detects each line's script). The model weights are licensed
 separately from LiteParse (see the `LICENSE` installed with them).
+
+See the [OCRia-nano-1 guide](https://developers.llamaindex.ai/liteparse/guides/ocria-nano/) and the
+[model card](https://huggingface.co/llamaindex/OCRia-nano-1).
 
 ## Parsing from Bytes
 

@@ -16,22 +16,22 @@ LiteParse is designed specifically for use cases that require fast, accurate tex
 - **Parse PDFs** with precise spatial layout. Text comes back positioned where it appears on the page
 - **Render to Markdown** with headings, tables, lists, images, and links — clean structured output for LLMs and RAG pipelines
 - **Extract bounding boxes** for every text line, ready for downstream processing or visualization
-- **OCR scanned documents** using built-in Tesseract or plug in your own OCR server
+- **OCR scanned documents** using OCRia-nano-1, built-in Tesseract, or your own OCR server
 - **Parse Office files and images** with support for DOCX, XLSX, PPTX, PNG, JPG, and more via automatic conversion
 - **Screenshot PDF pages** as high-quality images for LLM-based workflows
 - **Pull structured PDF data** — embedded images, vector graphics, annotations, AcroForm fields, and tagged-structure trees
 - **Score document complexity** before you parse, so you can route scanned or multi-column documents to the right pipeline
 - **Use from Node.js/TypeScript, Python, Rust, or the browser (WASM)** — whatever fits your stack
 
-## Using OCRia-nano with LiteParse
+## Using OCRia-nano-1 with LiteParse
 
-OCRia-nano is our 8.1M parameter model pipeline for better parsing with LiteParse, built to be the fastest and most accurate 
-parser that runs locally on your CPU. It's open-weights are on HuggingFace and is provied under a modifed OpenRAIL license. 
+OCRia-nano-1 is our 8.1M parameter model pipeline for better parsing with LiteParse, built to be the fastest and most accurate 
+parser that runs locally on your CPU. Its open weights are on Hugging Face under a modified OpenRAIL license. 
 
-- [Learn how to use it](/liteparse/guides/ocr/)
+- [Learn how to use it](/liteparse/guides/ocria-nano/)
 - [Read the launch blog](https://www.llamaindex.ai/blog/introducing-ocria-nano-1)
 - [Read the technical report](https://www.llamaindex.ai/ocria/ocria-nano-1-report.pdf)
-- [Find it on huggingface](https://huggingface.co/llamaindex/OCRia-nano-1)
+- [Find it on Hugging Face](https://huggingface.co/llamaindex/OCRia-nano-1)
 
 ## Get started
 

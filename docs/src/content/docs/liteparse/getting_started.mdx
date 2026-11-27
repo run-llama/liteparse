@@ -64,7 +64,7 @@ lit parse document.pdf --format markdown -o output.md
 # Parse only specific pages
 lit parse document.pdf --target-pages "1-5,10,15-20"
 
-# Improve your parsing with OCRia-nano
+# Improve your parsing with OCRia-nano-1 (local OCR, table and layout models)
 lit models pull ocria-nano
 lit parse document.pdf
 ```
@@ -90,7 +90,8 @@ lit screenshot document.pdf -o ./screenshots
 - [Markdown output](/liteparse/guides/markdown/): Render documents to clean, structured Markdown.
 - [Extraction options](/liteparse/guides/extraction/): Opt in to embedded images, vector graphics, annotations, form fields, and structure trees.
 - [Library usage](/liteparse/guides/library-usage/): Use LiteParse programmatically from TypeScript or Python.
-- [OCR configuration](/liteparse/guides/ocr/): Configure OCRia-nano, Tesseract, use an external OCR server, or bring your own.
+- [OCRia-nano-1](/liteparse/guides/ocria-nano/): LiteParse's own OCR, table and layout models, for scans and tables.
+- [OCR configuration](/liteparse/guides/ocr/): Configure OCRia-nano-1, Tesseract, use an external OCR server, or bring your own.
 - [Multi-format support](/liteparse/guides/multi-format/): Parse DOCX, XLSX, PPTX, images, and more.
 - [Document complexity](/liteparse/guides/complexity/): Check whether a document needs OCR / heavy processing before parsing, and route accordingly.
 - [Browser usage (WASM)](/liteparse/guides/browser-usage/): Run LiteParse entirely in the browser.

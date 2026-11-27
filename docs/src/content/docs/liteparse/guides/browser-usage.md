@@ -2,10 +2,10 @@
 title: Browser Usage (WASM)
 description: Run LiteParse entirely in the browser with the WASM package.
 sidebar:
-  order: 9
+  order: 10
 ---
 
-LiteParse ships a WebAssembly package that runs entirely in the browser. It supports PDF parsing, LiteParse's own OCR models (ocria-nano), and custom OCR engines implemented in JavaScript.
+LiteParse ships a WebAssembly package that runs entirely in the browser. It supports PDF parsing, LiteParse's own OCR models (OCRia-nano-1), and custom OCR engines implemented in JavaScript.
 
 ## Install
 
@@ -37,7 +37,7 @@ console.log(result.pages[0]);
 ## What works in the browser
 
 - **PDF parsing** from `Uint8Array` input (use `file.arrayBuffer()` to get bytes from a file picker for example)
-- **Built-in OCR with ocria-nano**: LiteParse's own models, including LayoutNet for tables and layout (see below)
+- **Built-in OCR with OCRia-nano-1**: LiteParse's own models, including LayoutNet for tables and layout (see below)
 - **Custom OCR** via the `ocrEngine` callback interface (see below)
 - **Text, JSON, and markdown output formats**
 - **Document complexity** via `parser.isComplex(bytes)` — see the [complexity guide](/liteparse/guides/complexity/)
@@ -47,13 +47,13 @@ console.log(result.pages[0]);
 
 - **File path input** — pass `Uint8Array` instead
 - **DOCX/XLSX/PPTX conversion** — requires LibreOffice, which isn't available in the browser
-- **Built-in Tesseract or HTTP OCR** — use ocria-nano or the custom `ocrEngine` interface instead
+- **Built-in Tesseract or HTTP OCR** — use OCRia-nano-1 or the custom `ocrEngine` interface instead
 - **Screenshots** — not available in the WASM build
 - **`imageOutputDir`** — there is no filesystem to write to. Use `extractImages` and read the bytes from the result instead
 
-## OCR with ocria-nano
+## OCR with OCRia-nano-1
 
-The WASM build runs ocria-nano, the same OCR and table models as the native CLI, inside WebAssembly (no server, no
+The WASM build runs [OCRia-nano-1](/liteparse/guides/ocria-nano/), the same OCR and table models as the native CLI, inside WebAssembly (no server, no
 ONNX Runtime). The models are downloaded on first use: load them once and share the handle across parsers.
 
 ```ts
@@ -135,7 +135,7 @@ All optional, camelCase:
 | `ocrHedgeDelaysMs` | `number[]` | `[]` | Request-hedging schedule for a remote `ocrEngine` |
 | `maxPages` | `number` | `1000` | Stop after this many pages |
 | `targetPages` | `string` | — | e.g. `"1-5,10,15-20"` |
-| `dpi` | `number` | `150` (`250` with ocria-nano) | Render DPI for OCR |
+| `dpi` | `number` | `150` (`250` with OCRia-nano-1) | Render DPI for OCR |
 | `outputFormat` | `"json" \| "text" \| "markdown"` | `"json"` | Shape of `result.text`. Also accepts `"md"`. Throws on any other value |
 | `preserveVerySmallText` | `boolean` | `false` | Keep tiny text that's normally filtered |
 | `skipDiagonalText` | `boolean` | `false` | Drop text more than 2° off the nearest right angle |
