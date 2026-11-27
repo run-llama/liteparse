@@ -72,14 +72,18 @@ const DET_MERGE: f32 = 0.6;
 /// The default second detection pass for small print (see [`det::Adaptive`]). On 132 scanned
 /// control pages at 250 dpi it runs on two, a broadsheet page saved as letter (11,358 ->
 /// 27,252 characters read) and a wiring diagram (695 -> 2,085), and leaves the others as they
-/// were; at a `quantile` of 0.4 it no longer runs on the broadsheet page. Off in the
-/// WebAssembly build, where a 3200 px detector input does not fit a small isolate.
+/// were; at a `quantile` of 0.4 it no longer runs on the broadsheet page. `min_cover` keeps it
+/// off pages whose small lines are a few scattered labels: of the pages it ran on in a
+/// 2,300-page sample, 45 of 108 came out unchanged, and every page it improved had small lines
+/// over at least 0.3% of the page. Off in the WebAssembly build, where a 3200 px detector input
+/// does not fit a small isolate.
 #[cfg(not(target_arch = "wasm32"))]
 const DET_ADAPTIVE: Option<det::Adaptive> = Some(det::Adaptive {
     min_h: 14.0,
     target_h: 22.0,
     max_side: 3200,
     quantile: 0.25,
+    min_cover: 0.003,
 });
 #[cfg(target_arch = "wasm32")]
 const DET_ADAPTIVE: Option<det::Adaptive> = None;
