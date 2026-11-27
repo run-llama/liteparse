@@ -3346,6 +3346,7 @@ fn projected_item_frames(items: &[ProjectedTextItem]) -> Vec<(Rect, Rect)> {
 /// PDF font descriptor flag bits we care about.
 /// See PDF spec §9.8.2 (table 123).
 const PDF_FONT_FLAG_FIXED_PITCH: i32 = 1; // bit 1
+const PDF_FONT_FLAG_SYMBOLIC: i32 = 4; // bit 3
 const PDF_FONT_FLAG_ITALIC: i32 = 64; // bit 7
 const PDF_FONT_FLAG_FORCE_BOLD: i32 = 262144; // bit 19
 
@@ -3567,9 +3568,32 @@ pub(crate) fn is_strike_item(item: &TextItem) -> bool {
     item.strike
 }
 
+/// Whether most of the letters in `text` are CJK (Han, kana, Hangul, full-width forms).
+fn is_mostly_cjk(text: &str) -> bool {
+    let (mut cjk, mut letters) = (0usize, 0usize);
+    for c in text.chars().filter(|c| c.is_alphanumeric()) {
+        letters += 1;
+        if matches!(c as u32,
+            0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF
+                | 0xF900..=0xFAFF | 0xFF00..=0xFFEF | 0x20000..=0x2FA1F)
+        {
+            cjk += 1;
+        }
+    }
+    letters > 0 && cjk * 2 > letters
+}
+
 pub(crate) fn is_mono_item(item: &TextItem) -> bool {
+    // The fixed-pitch flag marks a code font only on a Latin text font. CJK fonts are
+    // full-width (fixed pitch) by design, and symbolic subsets (fallback glyphs, symbol sets)
+    // carry it loosely: Japanese prose in MS-Mincho came out as `inline code` (ParseBench
+    // text_multilang__japanese2), and so did a Word fallback "č". Across the ParseBench text
+    // and opendataloader-bench PDFs, every fixed-pitch font without a monospace name that held
+    // code (CMTT, t1xtt) was non-symbolic.
     if let Some(flags) = item.font_flags
         && flags & PDF_FONT_FLAG_FIXED_PITCH != 0
+        && flags & PDF_FONT_FLAG_SYMBOLIC == 0
+        && !is_mostly_cjk(&item.text)
     {
         return true;
     }
@@ -6104,6 +6128,25 @@ mod tests {
         );
         assert_eq!(lines[1].text, "100");
         assert_eq!(lines[1].region_path, NUMERIC_FOOTER_PATH);
+    }
+
+    #[test]
+    fn fixed_pitch_flag_means_code_only_on_latin_text_fonts() {
+        let item = |text: &str, flags: i32, name: &str| {
+            let mut it = item_at(text, 0.0, 0.0, 10.0, 10.0).item;
+            it.font_flags = Some(flags);
+            it.font_name = Some(name.to_string());
+            it
+        };
+        // A non-symbolic fixed-pitch font (TeX typewriter) is code.
+        assert!(is_mono_item(&item("printf", 1 | 32, "CMTT10")));
+        // Full-width CJK fonts are fixed pitch by design (MS-Mincho, symbolic).
+        assert!(!is_mono_item(&item("規則第", 1 | 4, "MS-Mincho")));
+        assert!(!is_mono_item(&item("規則第", 1 | 32, "SomeCJKFont")));
+        // A symbolic fallback subset drawing one letter in Times text.
+        assert!(!is_mono_item(&item("č", 1 | 4, "TT288o00")));
+        // A monospace name still decides, whatever the flags.
+        assert!(is_mono_item(&item("x = 1", 4, "CourierNewPSMT")));
     }
 
     #[test]
