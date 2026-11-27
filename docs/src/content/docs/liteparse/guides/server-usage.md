@@ -2,7 +2,7 @@
 title: Server Usage
 description: Run LiteParse as an HTTP service with liteparse-server.
 sidebar:
-  order: 10
+  order: 11
 ---
 
 [`liteparse-server`](https://github.com/run-llama/liteparse-server) is an Express server that exposes [`@llamaindex/liteparse`](https://www.npmjs.com/package/@llamaindex/liteparse) as an HTTP parsing backend. It lets you run LiteParse as a standalone service, which is useful when your application isn't Node.js, when you want to share one parsing instance across multiple clients, or when you need a parsing endpoint behind your own infrastructure.

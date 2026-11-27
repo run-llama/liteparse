@@ -2,7 +2,7 @@
 title: Agent Skill
 description: Add LiteParse as a skill for coding agents like Claude Code, Cursor, and others.
 sidebar:
-  order: 11
+  order: 12
 ---
 
 LiteParse ships as a **coding agent skill** — a self-contained capability that Claude Code, Cursor,

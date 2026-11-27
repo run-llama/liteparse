@@ -38,7 +38,7 @@ TIFF, WebP, BMP, GIF and SVG. An image is read as a one-page document, its
 page sized from the image's DPI metadata (150 dpi when it has none). The format
 is detected from the bytes, so no file name or MIME type is needed. An image has
 no text layer, so its text comes from OCR (`ocrEnabled: true` with an
-`ocrEngine`, or [ocria-nano](#built-in-ocr-ocria-nano)).
+`ocrEngine`, or [OCRia-nano-1](#built-in-ocr-ocria-nano-1)).
 
 ```ts
 const png = new Uint8Array(await (await fetch("/scan.png")).arrayBuffer());
@@ -136,13 +136,14 @@ failed and at least one failed page had little native text. Other parsing or
 callback errors can also reject parsing. If parsing fails, OCR calls that have
 already started can continue.
 
-### Built-in OCR: ocria-nano
+### Built-in OCR: OCRia-nano-1
 
-ocria-nano, LiteParse's own OCR models, also runs inside the WASM build: the
+OCRia-nano-1, LiteParse's own OCR models, also runs inside the WASM build: the
 same detector, script router and recognizers as the native CLI, executed in
 WebAssembly (no server, no ONNX Runtime). Optionally it also runs LayoutNet,
 LiteParse's learned table and layout model. The models are downloaded on first
-use; load them once and share the handle.
+use; load them once and share the handle. See the [OCRia-nano-1 guide](https://developers.llamaindex.ai/liteparse/guides/ocria-nano/) and the
+[model card](https://huggingface.co/llamaindex/OCRia-nano-1).
 
 ```ts
 import init, { LiteParse, OcriaNano } from "@llamaindex/liteparse-wasm";
@@ -183,7 +184,7 @@ name in the model repository (`det.onnx`, `det.meta.json`, `router.onnx`,
 
 Notes:
 
-- The ocria-nano models are licensed separately from LiteParse (see the
+- The OCRia-nano-1 models are licensed separately from LiteParse (see the
   `LICENSE` in the model repository); using them is opt-in.
 - Output matches the native CLI on clean pages. On very noisy scans a few
   characters can differ: the Latin recognizer is int8-quantized, and WASM

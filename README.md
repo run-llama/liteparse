@@ -33,7 +33,7 @@ hard stuff so your models see clean, structured data and markdown.
 - **Fast Text Parsing**: Spatial text parsing using PDFium, ~2-5ms per page
 - **Flexible OCR System**:
   - **Built-in**: Tesseract (zero setup, bundled with the library)
-  - **ocria-nano (opt-in)**: LiteParse's own CPU models (8.1M parameters): line detector, script router, four recognizers and LayoutNet, a learned table and layout model. `lit models pull ocria-nano` once, then it is the OCR backend ([details](#optional-ocria-nano-liteparses-own-models))
+  - **OCRia-nano-1 (opt-in)**: LiteParse's own CPU models (8.1M parameters): line detector, script router, four recognizers and LayoutNet, a learned table and layout model. `lit models pull ocria-nano` once, then it is the OCR backend ([details](#optional-ocria-nano-1-liteparses-own-models))
   - **HTTP Servers**: Plug in any OCR server (EasyOCR, PaddleOCR, custom)
   - **Standard API**: Simple, well-defined OCR API specification
 - **Complexity Detection**: Cheaply check whether a document needs OCR or heavier parsing — route, reject, or estimate cost before a full parse
@@ -118,16 +118,16 @@ flowchart LR
 
 ## Benchmarks
 
-### With ocria-nano
+### With OCRia-nano-1
 
 With its optional models (`lit models pull ocria-nano`), LiteParse runs a full OCR and table/layout
 pipeline on CPU on pages that need it. 
 
-The following numbers are from the [ocria-nano technical report](https://www.llamaindex.ai/ocria/ocria-nano-1-report.pdf):
+The following numbers are from the [OCRia-nano-1 technical report](https://www.llamaindex.ai/ocria/ocria-nano-1-report.pdf):
 
 | System (CPU) | ParseBench-2 | OmniParseBench | ParseBench-1 | olmOCR-bench | BHL CER ↓ | pages/s |
 |---|---:|---:|---:|---:|---:|---:|
-| **LiteParse + ocria-nano** | **59.2** | **74.8** | **52.7** | **60.9** | **0.048** | 27.8 |
+| **LiteParse + OCRia-nano-1** | **59.2** | **74.8** | **52.7** | **60.9** | **0.048** | 27.8 |
 | Indra 1.1.2 | 55.1 | 70.9 | 42.6 | 60.8 | 0.062 | **29.6** |
 | Marker 2.2.0 (fast) | 52.5 | 69.8 | 40.4 | 60.8 | 0.067 | 24.7 |
 | LiteParse (Tesseract, default) | 48.7 | 42.3 | 40.5 | 45.7 | 0.275 | 14.2 |
@@ -559,7 +559,7 @@ lit models list                                         Show installed model pac
 lit models rm <name>                                    Remove an installed model package
 ```
 
-The one package is `ocria-nano` (see [ocria-nano](#optional-ocria-nano-liteparses-own-models)).
+The one package is `ocria-nano` (see [OCRia-nano-1](#optional-ocria-nano-1-liteparses-own-models)).
 
 #### Batch Parse Command
 
@@ -638,29 +638,30 @@ Or pass the path directly:
 lit parse document.pdf --tessdata-path /path/to/tessdata
 ```
 
-### Optional: ocria-nano (LiteParse's own models)
+### Optional: OCRia-nano-1 (LiteParse's own models)
 
-ocria-nano is LiteParse's own model package: a text-line detector, a script router, four
+OCRia-nano-1 is LiteParse's own model package: a text-line detector, a script router, four
 recognizers (Latin, CJK, right-to-left, and a world-script model covering about 17 more scripts) and
 LayoutNet, a learned table and layout model. Everything runs in-process on CPU through ONNX Runtime,
 which is downloaded with the models. It is opt-in, the models are not bundled and are licensed
-separately from LiteParse.
+separately from LiteParse. See the [OCRia-nano-1 guide](https://developers.llamaindex.ai/liteparse/guides/ocria-nano/?utm_source=github&utm_medium=liteparse)
+in the docs, and the [model card on Hugging Face](https://huggingface.co/llamaindex/OCRia-nano-1).
 
 ```bash
 lit models pull ocria-nano     # once: models + ONNX Runtime, checked against pinned sha256 (60-75 MB)
-lit parse scan.pdf             # ocria-nano is now the OCR backend
+lit parse scan.pdf             # OCRia-nano-1 is now the OCR backend
 lit parse scan.pdf --ocr-backend tesseract   # back to Tesseract for one run
 lit models list                # installed packages
 lit models rm ocria-nano       # remove
 ```
 
-- Once pulled, ocria-nano is the default backend and pages are rendered at 250 dpi (150 with
-  Tesseract); `--dpi` overrides it. LayoutNet runs whenever ocria-nano is the backend, also with
+- Once pulled, OCRia-nano-1 is the default backend and pages are rendered at 250 dpi (150 with
+  Tesseract); `--dpi` overrides it. LayoutNet runs whenever OCRia-nano-1 is the backend, also with
   `--no-ocr`.
 - Offline / air-gapped machines: `lit models pull ocria-nano --from <dir>` installs from a directory
   holding the package files. `LITEPARSE_MODEL_DIR` moves the model directory (default
   `~/.cache/liteparse/models`), and `ORT_DYLIB_PATH` points at an existing ONNX Runtime library.
-- `--ocr-language` applies to Tesseract only: ocria-nano detects the script of each line itself.
+- `--ocr-language` applies to Tesseract only: OCRia-nano-1 detects the script of each line itself.
 - From Python and Node.js:
 
 ```python
@@ -676,7 +677,7 @@ await new LiteParse({ ocrBackend: "ocria-nano" }).parse("scan.pdf");
 ```
 
 - In the browser and on edge runtimes, the WASM package runs the same models: see
-  [`packages/wasm`](packages/wasm/README.md#built-in-ocr-ocria-nano).
+  [`packages/wasm`](packages/wasm/README.md#built-in-ocr-ocria-nano-1).
 
 ### Optional: HTTP OCR Servers
 
@@ -732,7 +733,7 @@ choco install libreoffice-fresh
 |----------|-------------|
 | `TESSDATA_PREFIX` | Path to a directory containing Tesseract `.traineddata` files. Used for offline/air-gapped environments. |
 | `LITEPARSE_MODEL_DIR` | Directory for optional model packages (`lit models`); default `~/.cache/liteparse/models` (`%LOCALAPPDATA%\liteparse\models` on Windows). |
-| `ORT_DYLIB_PATH` | An ONNX Runtime shared library to use for ocria-nano instead of the one `lit models pull` installs. |
+| `ORT_DYLIB_PATH` | An ONNX Runtime shared library to use for OCRia-nano-1 instead of the one `lit models pull` installs. |
 | `HF_TOKEN` | Hugging Face token, sent only to huggingface.co when pulling models (needed for a private mirror only). |
 
 ## Development

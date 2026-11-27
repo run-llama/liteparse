@@ -2,7 +2,7 @@
 title: Parsing URLs
 description: Parse remote documents by reading URLs.
 sidebar:
-  order: 8
+  order: 9
 ---
 
 To parse remote files, LiteParse supports both CLI and library usage for reading bytes and streams. The CLI can download them with any tool you like and pipe the bytes to `lit parse` using `-` as the file argument, while the libraries can fetch the bytes directly and pass them to the parser.

@@ -41,8 +41,8 @@ lit parse [options] <file>
 | `--num-workers <n>` | Pages to OCR in parallel | CPU cores - 1 |
 | `--max-pages <n>` | Maximum pages to parse | `1000` |
 | `--target-pages <pages>` | Pages to parse (e.g., `"1-5,10"`) | — (all pages) |
-| `--dpi <dpi>` | Rendering DPI | `250` with ocria-nano, else `150` |
-| `--table-model <file>` | Learned table / layout model weights (LayoutNet) | the installed ocria-nano package's |
+| `--dpi <dpi>` | Rendering DPI | `250` with OCRia-nano-1, else `150` |
+| `--table-model <file>` | Learned table / layout model weights (LayoutNet) | the installed OCRia-nano-1 package's |
 | `--preserve-small-text` | Keep very small text | — |
 | `--password <password>` | Password for encrypted/protected documents | — |
 | `-q, --quiet` | Suppress progress output | — |
@@ -138,8 +138,8 @@ lit batch-parse [options] <input-dir> <output-dir>
 | `--tessdata-path <path>` | Path to tessdata directory | — |
 | `--num-workers <n>` | Pages to OCR in parallel | CPU cores - 1 |
 | `--max-pages <n>` | Maximum pages per file | `1000` |
-| `--dpi <dpi>` | Rendering DPI | `250` with ocria-nano, else `150` |
-| `--table-model <file>` | Learned table / layout model weights (LayoutNet) | the installed ocria-nano package's |
+| `--dpi <dpi>` | Rendering DPI | `250` with OCRia-nano-1, else `150` |
+| `--table-model <file>` | Learned table / layout model weights (LayoutNet) | the installed OCRia-nano-1 package's |
 | `--recursive` | Search subdirectories | — |
 | `--extension <ext>` | Only process this extension (e.g., `".pdf"`) | — (all supported) |
 | `--password <password>` | Password for encrypted/protected documents (applied to all files) | — |
@@ -249,8 +249,8 @@ lit is-complex document.pdf --compact | jq '[.[] | select(.needs_ocr) | .page_nu
 
 ## `lit models`
 
-Download, list or remove optional model packages. The one package is `ocria-nano`, LiteParse's own OCR and table
-models (see [OCR configuration](/liteparse/guides/ocr/#ocria-nano-liteparses-own-models)).
+Download, list or remove optional model packages. The one package is `ocria-nano`, which installs OCRia-nano-1,
+LiteParse's own OCR and table models (see the [OCRia-nano-1 guide](/liteparse/guides/ocria-nano/)).
 
 ```bash
 lit models pull ocria-nano            # download + verify (models and ONNX Runtime)
