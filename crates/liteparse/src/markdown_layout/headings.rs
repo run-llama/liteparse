@@ -817,12 +817,14 @@ fn parse_heading_role(role: &str) -> Option<u8> {
 /// Second-priority heading source: a document outline (bookmark) entry that
 /// points at this page near this line's y coordinate, with a title that
 /// prefix-matches the line text. Used on untagged PDFs that ship a TOC.
-pub(super) fn outline_heading_level(
+/// `exclude` lets wrapped-title lookahead detect a different bookmark.
+pub(super) fn outline_heading_match<'a>(
     line: &ProjectedLine,
     page_height: f32,
-    outline: &[OutlineTarget],
+    outline: &'a [OutlineTarget],
     line_text: &str,
-) -> Option<u8> {
+    exclude: Option<&OutlineTarget>,
+) -> Option<&'a OutlineTarget> {
     if outline.is_empty() {
         return None;
     }
@@ -833,6 +835,9 @@ pub(super) fn outline_heading_level(
     let row_h = line.bbox.height.max(super::MIN_ROW_HEIGHT_PT);
     let y_tolerance = row_h * 1.5;
     for entry in outline {
+        if exclude.is_some_and(|other| std::ptr::eq(entry, other)) {
+            continue;
+        }
         let normalized_title = normalize_outline_text(&entry.title);
         if normalized_title.is_empty() {
             continue;
@@ -878,7 +883,7 @@ pub(super) fn outline_heading_level(
         if normalized_line.starts_with(&normalized_title)
             || normalized_title.starts_with(&normalized_line)
         {
-            return Some(entry.level.min(MAX_HEADING_LEVELS as u8));
+            return Some(entry);
         }
     }
     None
@@ -887,7 +892,7 @@ pub(super) fn outline_heading_level(
 /// Lowercase + collapse whitespace, for forgiving outline-title vs line-text
 /// comparison. Outline titles often have trailing numbering or punctuation
 /// not present on the rendered line (and vice versa).
-fn normalize_outline_text(s: &str) -> String {
+pub(super) fn normalize_outline_text(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_space = true;
     for c in s.chars() {

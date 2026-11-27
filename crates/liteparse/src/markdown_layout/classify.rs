@@ -4,7 +4,7 @@ use super::blocks::{Block, Cell, PositionedBlock, paragraph_from_accum};
 use super::headings::{
     HEADING_MAX_TEXT_CHARS, MAX_HEADING_LEVELS, heading_level_for, heading_size_of,
     is_caption_line, is_toc_title, looks_like_bold_heading, looks_like_numbered_bold_heading,
-    outline_heading_level, page_is_toc, struct_heading_level,
+    normalize_outline_text, outline_heading_match, page_is_toc, struct_heading_level,
 };
 use super::hr::detect_horizontal_rules;
 use super::inline::{
@@ -81,6 +81,68 @@ enum Interruption {
     /// at its top-y position like other interruptions; its lines were pulled
     /// out of the region pipeline so it won't be re-detected per-region.
     Table(super::blocks::PositionedBlock),
+}
+
+#[derive(Clone, Copy)]
+struct HeadingRun<'a> {
+    level: u8,
+    last_line: usize,
+    outline: Option<&'a OutlineTarget>,
+}
+
+/// Find a complete wrapped bookmark title without consuming any lines on a
+/// partial match. The normal heading-flow checks still decide how to emit it.
+fn complete_outline_heading(
+    lines: &[ProjectedLine],
+    start: usize,
+    entry: &OutlineTarget,
+    page: &ParsedPage,
+    outline: &[OutlineTarget],
+    table_covered: &std::collections::HashSet<usize>,
+    interruptions: &[f32],
+) -> Option<usize> {
+    let title = normalize_outline_text(&entry.title);
+    let mut matched = normalize_outline_text(lines[start].text.trim());
+    if matched.is_empty() || matched == title || !title.starts_with(&matched) {
+        return None;
+    }
+    if title.chars().count() > HEADING_MAX_TEXT_CHARS {
+        return None;
+    }
+    // A short bounded lookahead avoids considering an entire paragraph as a
+    // title while supporting ordinary wrapped headings.
+    const MAX_OUTLINE_HEADING_LINES: usize = 8;
+    for end in (start + 1)..lines.len().min(start + MAX_OUTLINE_HEADING_LINES) {
+        let previous = &lines[end - 1];
+        let next = &lines[end];
+        let text = next.text.trim();
+        if text.is_empty()
+            || table_covered.contains(&end)
+            || next.all_mono
+            || next.in_figure
+            || is_rotated_line(next)
+            || decorative_divider_kind(text).is_some()
+            || parse_list_marker(text).is_some()
+            || struct_heading_level(next, &page.struct_nodes).is_some()
+            || outline_heading_match(next, page.page_height, outline, text, Some(entry)).is_some()
+            || next.bbox.y <= previous.bbox.y
+            || interruptions
+                .iter()
+                .any(|y| *y > previous.bbox.y && *y <= next.bbox.y)
+            || !continues_heading(previous, next)
+        {
+            return None;
+        }
+        matched.push(' ');
+        matched.push_str(&normalize_outline_text(text));
+        if matched == title {
+            return Some(end);
+        }
+        if !title.starts_with(&matched) {
+            return None;
+        }
+    }
+    None
 }
 
 /// Returns true if any span on the line is rotated more than ~5° off
@@ -832,8 +894,10 @@ fn classify_region(
 ) -> Vec<PositionedBlock> {
     let mut blocks: Vec<PositionedBlock> = Vec::new();
     let mut state = FlowState::default();
-    let mut heading_run: Option<(u8, usize)> = None;
+    let mut heading_run: Option<HeadingRun<'_>> = None;
     let rotated_content = rotated_text_is_content(page);
+    // (first line, last line, outline level) for a fully verified title.
+    let mut outline_heading_run: Option<(usize, usize, u8)> = None;
     // Track whether we've already emitted a TOC title on this page. Once seen,
     // any subsequent line matching `is_toc_title` (e.g. "Index", "List of
     // Figures") is a TOC entry pointing at that chapter, not another title,
@@ -951,6 +1015,7 @@ fn classify_region(
         .filter(|(y, kind)| matches!(kind, Interruption::Table(_)) || !in_table_band(*y))
         .collect();
     region_interruptions.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let interruption_positions: Vec<f32> = region_interruptions.iter().map(|(y, _)| *y).collect();
     let mut interruptions = region_interruptions.into_iter().peekable();
 
     // Outside tables, a line whose only sideways text is a stray OCR glyph
@@ -1102,13 +1167,29 @@ fn classify_region(
         // Promoting them to `##` shreds the document's heading structure (a
         // TOC page is just `# Contents`). Tagged-PDF struct levels are explicit
         // and still win.
-        let outline_level = tagged_level.or_else(|| {
-            if toc_suppress {
-                None
-            } else {
-                outline_heading_level(line, page.page_height, outline, text)
-            }
-        });
+        let outline_match = if tagged_level.is_none() && !toc_suppress {
+            outline_heading_match(line, page.page_height, outline, text, None)
+        } else {
+            None
+        };
+        if let Some(entry) = outline_match
+            && let Some(end) = complete_outline_heading(
+                lines,
+                line_idx,
+                entry,
+                page,
+                outline,
+                &table_covered,
+                &interruption_positions,
+            )
+        {
+            outline_heading_run = Some((line_idx, end, entry.level));
+        }
+        let continuation_level = outline_heading_run
+            .and_then(|(start, end, level)| (line_idx > start && line_idx <= end).then_some(level));
+        let outline_level = tagged_level
+            .or_else(|| outline_match.map(|entry| entry.level))
+            .or(continuation_level);
         // Rotated lines (margin stamps like a sideways "arXiv:…" watermark) are
         // excluded from `build_heading_map`, but their size can still coincide
         // with a map entry built from horizontal text. Suppress font-size
@@ -1259,8 +1340,8 @@ fn classify_region(
         if level.is_none()
             && cont_looks_like_heading
             && heading_directly_above
-            && let Some((run_level, run_idx)) = heading_run.as_ref()
-            && continues_heading(&lines[*run_idx], line)
+            && let Some(run) = heading_run
+            && continues_heading(&lines[run.last_line], line)
             && let Some(PositionedBlock {
                 block:
                     Block::Heading {
@@ -1270,31 +1351,42 @@ fn classify_region(
                 bbox: heading_bbox,
                 text_item_indices: heading_items,
             }) = blocks.last_mut()
-            && *last_level == *run_level
+            && *last_level == run.level
         {
             // The continuation line is part of the same heading.
             Rect::extend(heading_bbox, &line.bbox);
             let combined_chars = htext.chars().count() + 1 + text.chars().count();
             if combined_chars <= HEADING_MAX_TEXT_CHARS {
-                let run_level = *run_level;
                 if debug {
                     eprintln!(
                         "[MD heading-wrap-uncond] merge h{} '{}' <- '{}' (prev_idx={} cur_idx={} combined={})",
-                        run_level,
+                        run.level,
                         htext.chars().take(40).collect::<String>(),
                         text.chars().take(60).collect::<String>(),
-                        run_idx,
+                        run.last_line,
                         line_idx,
                         combined_chars
                     );
                 }
                 append_inline_continuation(htext, text, &collapse_whitespace(text));
                 heading_items.extend_from_slice(&line.span_item_indices);
-                heading_run = Some((run_level, line_idx));
+                heading_run = Some(HeadingRun {
+                    last_line: line_idx,
+                    ..run
+                });
                 continue;
             }
         }
         if let Some(level) = level {
+            // Only a complete match to a different bookmark is an unambiguous
+            // new heading; preserve the normal fallback for partial matches.
+            let starts_new_outline = heading_run
+                .and_then(|run| run.outline)
+                .zip(outline_match)
+                .is_some_and(|(previous, current)| {
+                    !std::ptr::eq(previous, current)
+                        && normalize_outline_text(text) == normalize_outline_text(&current.title)
+                });
             // Merge a wrapped continuation into the heading directly above when
             // it flows as one block: same level, the heading is still the last
             // emitted block, and the line continues the paragraph. A real
@@ -1302,10 +1394,12 @@ fn classify_region(
             // so only a genuinely multi-line heading/caption merges here.
             // Without `heading_directly_above`, demotion below would overwrite
             // the pending paragraph and drop its text.
+            // Two lines matching different bookmarks begin distinct headings.
             if heading_directly_above
-                && let Some((run_level, run_idx)) = heading_run.as_ref()
-                && *run_level == level
-                && continues_heading(&lines[*run_idx], line)
+                && !starts_new_outline
+                && let Some(run) = heading_run
+                && run.level == level
+                && continues_heading(&lines[run.last_line], line)
                 && let Some(PositionedBlock {
                     block:
                         Block::Heading {
@@ -1313,6 +1407,7 @@ fn classify_region(
                             text: htext,
                         },
                     text_item_indices: heading_items,
+                    bbox: heading_bbox,
                     ..
                 }) = blocks.last_mut()
                 && *last_level == level
@@ -1334,17 +1429,21 @@ fn classify_region(
                     state.paragraph = Some(ParaAccum {
                         raw: demoted.clone(),
                         inline: demoted,
-                        last: lines[*run_idx].clone(),
+                        last: lines[run.last_line].clone(),
                         uniform: None,
-                        bbox: Some(lines[*run_idx].bbox.clone()),
+                        bbox: Some(lines[run.last_line].bbox.clone()),
                         item_indices,
                     });
                     heading_run = None;
                     demoted_heading = true;
                 } else {
+                    Rect::extend(heading_bbox, &line.bbox);
                     append_inline_continuation(htext, text, &collapse_whitespace(text));
                     heading_items.extend_from_slice(&line.span_item_indices);
-                    heading_run = Some((level, line_idx));
+                    heading_run = Some(HeadingRun {
+                        last_line: line_idx,
+                        ..run
+                    });
                     continue;
                 }
             }
@@ -1368,7 +1467,11 @@ fn classify_region(
                     Some(line.bbox.clone()),
                     line.span_item_indices.clone(),
                 ));
-                heading_run = Some((level, line_idx));
+                heading_run = Some(HeadingRun {
+                    level,
+                    last_line: line_idx,
+                    outline: outline_match,
+                });
                 continue;
             }
         }
@@ -1511,7 +1614,11 @@ fn classify_region(
             ));
             // Arm the heading_run so a wrapped continuation on the next line
             // merges into this heading instead of emitting as a second one.
-            heading_run = Some((level, line_idx));
+            heading_run = Some(HeadingRun {
+                level,
+                last_line: line_idx,
+                outline: None,
+            });
             continue;
         }
 
