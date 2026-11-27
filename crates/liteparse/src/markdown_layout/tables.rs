@@ -3827,13 +3827,23 @@ pub(super) struct RuleSegments {
     raw_vs: Vec<VSeg>,
     /// Vertical segments, clustered by x.
     vs: Vec<VSeg>,
+    /// Top and bottom edges of white fill-only boxes, clustered by y. They draw nothing, so
+    /// they never form a grid; inside a grid the visible rules found, they can split rows
+    /// (see `drop_soft_lines_in_prose`).
+    soft_hs: Vec<HSeg>,
 }
 
 pub(super) fn extract_rule_segments(graphics: &[GraphicPrimitive]) -> RuleSegments {
-    let (hs, raw_vs) = extract_h_v_segments(graphics);
+    let (hs, raw_vs, soft_hs) = extract_h_v_segments(graphics);
     let hs = cluster_h_segments(hs);
     let vs = cluster_v_segments(raw_vs.clone());
-    RuleSegments { hs, raw_vs, vs }
+    let soft_hs = cluster_h_segments(soft_hs);
+    RuleSegments {
+        hs,
+        raw_vs,
+        vs,
+        soft_hs,
+    }
 }
 
 /// Extract horizontal and vertical line segments from a page's graphics. Each
@@ -3849,9 +3859,10 @@ fn is_invisible_ink(argb: &str) -> bool {
     (argb.len() == 8 && a == 0) || (r >= 0xf5 && g >= 0xf5 && b >= 0xf5)
 }
 
-fn extract_h_v_segments(graphics: &[GraphicPrimitive]) -> (Vec<HSeg>, Vec<VSeg>) {
+fn extract_h_v_segments(graphics: &[GraphicPrimitive]) -> (Vec<HSeg>, Vec<VSeg>, Vec<HSeg>) {
     let mut hs = Vec::new();
     let mut vs = Vec::new();
+    let mut soft_hs = Vec::new();
     // A white (or fully transparent) rule shows only over a coloured fill (a white separator in
     // a dark header band). On the white page it is invisible: Word draws a white border per
     // text line inside a tall cell, which cut one row of a SWOT table into 35.
@@ -3913,6 +3924,17 @@ fn extract_h_v_segments(graphics: &[GraphicPrimitive]) -> (Vec<HSeg>, Vec<VSeg>)
                 let stroked = stroke.is_some() && !invisible(stroke, mx, my);
                 let filled = fill.as_deref().is_some_and(|f| !is_invisible_ink(f));
                 if !stroked && !filled {
+                    // A white box still marks out a row: a timetable or a zebra-striped table
+                    // draws its unshaded rows this way, with rules only every few rows.
+                    if fill.is_some() && bbox.width > 1.0 && bbox.height > 1.0 {
+                        for y in [bbox.y, bbox.y + bbox.height] {
+                            soft_hs.push(HSeg {
+                                x_min: bbox.x,
+                                x_max: bbox.x + bbox.width,
+                                y,
+                            });
+                        }
+                    }
                     continue;
                 }
                 let top = bbox.y;
@@ -3946,7 +3968,7 @@ fn extract_h_v_segments(graphics: &[GraphicPrimitive]) -> (Vec<HSeg>, Vec<VSeg>)
             }
         }
     }
-    (hs, vs)
+    (hs, vs, soft_hs)
 }
 
 /// Cluster H segments sharing a y-coordinate (within `TABLE_GRID_CLUSTER_PT`)
@@ -5282,6 +5304,7 @@ fn extend_to_perpendicular_extent(
 /// and a rejected component flips into an accepted junk table.
 fn build_ruled_table(
     hs: &[HSeg],
+    soft_hs: &[HSeg],
     vs: &[VSeg],
     h_indices: &[usize],
     v_indices: &[usize],
@@ -5292,6 +5315,7 @@ fn build_ruled_table(
 ) -> Option<(TableRun, Vec<usize>)> {
     let base = build_ruled_table_from(
         hs,
+        soft_hs,
         vs,
         h_indices,
         v_indices,
@@ -5308,6 +5332,7 @@ fn build_ruled_table(
     let dbg = *super::flags::DEBUG_RULED;
     let retry = build_ruled_table_from(
         hs,
+        soft_hs,
         vs,
         h_indices,
         &v_kept,
@@ -5346,6 +5371,7 @@ const STRADDLE_IMPROVEMENT: f32 = 0.05;
 #[allow(clippy::too_many_arguments)]
 fn build_ruled_table_from(
     hs: &[HSeg],
+    soft_hs: &[HSeg],
     vs: &[VSeg],
     h_indices: &[usize],
     v_kept: &[usize],
@@ -5422,6 +5448,7 @@ fn build_ruled_table_from(
         },
     );
     dedup_close(&mut ys, TABLE_GRID_CLUSTER_PT);
+    add_soft_row_lines(&mut ys, soft_hs, &xs, lines);
     let ys = ys;
     if dbg {
         eprintln!(
@@ -5687,7 +5714,11 @@ fn bucket_words_into_columns(span: &TextItem, xs: &[f32]) -> Option<Vec<(usize, 
 fn split_span_at_rules(span: &TextItem, inner_xs: &[f32]) -> Vec<TextItem> {
     let chars: Vec<char> = span.text.chars().collect();
     let n = chars.len();
-    if n < 3 || span.width <= 0.0 {
+    // Only horizontal text runs left to right across its width; a rotated span's characters
+    // run down or up its box (a column header turned 90 degrees).
+    let horizontal =
+        span.rotation.rem_euclid(180.0) < 1.0 || span.rotation.rem_euclid(180.0) > 179.0;
+    if n < 3 || span.width <= 0.0 || !horizontal {
         return vec![span.clone()];
     }
     let cw = span.width / n as f32;
@@ -5727,6 +5758,99 @@ fn split_span_at_rules(span: &TextItem, inner_xs: &[f32]) -> Vec<TextItem> {
     out
 }
 
+/// Add the soft row lines (white-box edges, `RuleSegments::soft_hs`) that fall strictly inside
+/// the grid and span most of one of its columns, then drop those that cut wrapped prose.
+fn add_soft_row_lines(ys: &mut Vec<f32>, soft_hs: &[HSeg], xs: &[f32], lines: &[ProjectedLine]) {
+    // Soft lines only refine a grid the visible rules already make a table (two rows, two
+    // columns), so they can't lift a ruled box over the row gates on their own.
+    if ys.len() < 3 || xs.len() < 3 || soft_hs.is_empty() {
+        return;
+    }
+    let (y_lo, y_hi) = (ys[0], ys[ys.len() - 1]);
+    let soft: Vec<f32> = soft_hs
+        .iter()
+        .filter(|h| h.y > y_lo + TABLE_GRID_CLUSTER_PT && h.y < y_hi - TABLE_GRID_CLUSTER_PT)
+        .filter(|h| {
+            xs.windows(2).any(|w| {
+                let overlap = h.x_max.min(w[1]) - h.x_min.max(w[0]);
+                overlap >= 0.8 * (w[1] - w[0])
+            })
+        })
+        .map(|h| h.y)
+        .filter(|&y| !ys.iter().any(|&r| (r - y).abs() <= TABLE_GRID_CLUSTER_PT))
+        .collect();
+    if soft.is_empty() {
+        return;
+    }
+    let mut soft = soft;
+    soft.sort_by(|a, b| a.total_cmp(b));
+    dedup_close(&mut soft, TABLE_GRID_CLUSTER_PT);
+    // (y, soft): the grid's own lines are hard
+    let mut all: Vec<(f32, bool)> = ys.iter().map(|&y| (y, false)).collect();
+    all.extend(soft.into_iter().map(|y| (y, true)));
+    all.sort_by(|a, b| a.0.total_cmp(&b.0));
+    *ys = drop_soft_lines_in_prose(&all, xs, lines);
+}
+
+/// Row lines in order, without the soft ones that cut prose. A white box per text line (Word's
+/// per-line cell backgrounds) puts a soft line between every two lines of a paragraph; records
+/// in a timetable get one too. A soft line goes when every cell the line below it fills is
+/// mostly letters and has text above it, and when either side of it has no text. Times, codes
+/// and figures fail the letters test, so record rows keep their lines; prose cells read as they
+/// do without the white boxes.
+fn drop_soft_lines_in_prose(all: &[(f32, bool)], xs: &[f32], lines: &[ProjectedLine]) -> Vec<f32> {
+    // Text of the line nearest to `y` inside (lo, hi), by column: the last line above or the
+    // first below.
+    let cells_near = |lo: f32, hi: f32, last: bool| -> Option<Vec<String>> {
+        let inside = lines.iter().filter(|l| {
+            let c = l.bbox.y + l.bbox.height * 0.5;
+            c > lo && c < hi
+        });
+        let line = if last {
+            inside.max_by(|a, b| a.bbox.y.total_cmp(&b.bbox.y))
+        } else {
+            inside.min_by(|a, b| a.bbox.y.total_cmp(&b.bbox.y))
+        }?;
+        let mut cols = vec![String::new(); xs.len() - 1];
+        for span in line.spans.iter().filter(|s| !s.text.trim().is_empty()) {
+            if let Some(c) = find_bucket(xs, span.x + span.width * 0.5) {
+                if !cols[c].is_empty() {
+                    cols[c].push(' ');
+                }
+                cols[c].push_str(span.text.trim());
+            }
+        }
+        Some(cols)
+    };
+    let prose = |t: &str| {
+        let visible = t.chars().filter(|c| !c.is_whitespace()).count();
+        let letters = t.chars().filter(|c| c.is_alphabetic()).count();
+        letters >= 2 && letters * 10 >= visible * 7
+    };
+    let mut out: Vec<f32> = Vec::with_capacity(all.len());
+    for (i, &(y, soft)) in all.iter().enumerate() {
+        if soft && let (Some(&prev), Some(&(next, _))) = (out.last(), all.get(i + 1)) {
+            // a soft line with no text on one side would only add an empty row
+            let wraps = match (cells_near(prev, y, true), cells_near(y, next, false)) {
+                (None, _) | (_, None) => true,
+                (Some(above), Some(below)) => {
+                    let filled: Vec<usize> =
+                        (0..below.len()).filter(|&c| !below[c].is_empty()).collect();
+                    !filled.is_empty()
+                        && filled
+                            .iter()
+                            .all(|&c| prose(&below[c]) && !above[c].is_empty())
+                }
+            };
+            if wraps {
+                continue;
+            }
+        }
+        out.push(y);
+    }
+    out
+}
+
 fn find_bucket(boundaries: &[f32], val: f32) -> Option<usize> {
     if boundaries.len() < 2 || val < boundaries[0] || val > *boundaries.last().unwrap() {
         return None;
@@ -5754,7 +5878,7 @@ pub fn detect_table_rects(
     page_width: f32,
     page_height: f32,
 ) -> Vec<Rect> {
-    let (hs, vs) = extract_h_v_segments(graphics);
+    let (hs, vs, _) = extract_h_v_segments(graphics);
     let hs = cluster_h_segments(hs);
     let vs = cluster_v_segments(vs);
     if hs.len() < 2 || vs.len() < 2 {
@@ -5917,7 +6041,12 @@ fn detect_ruled_tables_impl(
     page_height: f32,
     pass: RuledPass,
 ) -> Vec<(TableRun, Vec<usize>)> {
-    let RuleSegments { hs, raw_vs, vs } = segs;
+    let RuleSegments {
+        hs,
+        raw_vs,
+        vs,
+        soft_hs,
+    } = segs;
     if hs.len() < 2 || vs.len() < 2 {
         return Vec::new();
     }
@@ -5927,6 +6056,7 @@ fn detect_ruled_tables_impl(
         for band in split_component_at_grid_gaps(hs, vs, raw_vs, &h_idx, &v_idx) {
             if let Some(run) = build_ruled_table(
                 hs,
+                soft_hs,
                 &band.vs,
                 &band.h_idx,
                 &band.v_idx,
@@ -7512,6 +7642,152 @@ mod tests {
     #[test]
     fn escapes_pipe_inside_cell() {
         assert_eq!(escape_table_cell("a|b"), "a\\|b");
+    }
+
+    /// A white fill-only cell background: no border, no visible fill.
+    fn white_box(x: f32, y: f32, w: f32, h: f32) -> GraphicPrimitive {
+        GraphicPrimitive::Rect {
+            bbox: Rect {
+                x,
+                y,
+                width: w,
+                height: h,
+            },
+            fill: Some("ffffffff".into()),
+            stroke: None,
+        }
+    }
+
+    /// Ruled columns at `xs` from `top` to `bottom`, rules only at `rules`, and a white box
+    /// per cell per text row (rows `pitch` apart from `top`).
+    fn white_box_grid(
+        xs: &[f32],
+        top: f32,
+        bottom: f32,
+        rules: &[f32],
+        pitch: f32,
+    ) -> Vec<GraphicPrimitive> {
+        let mut g: Vec<GraphicPrimitive> = rules
+            .iter()
+            .map(|&y| stroke(xs[0], y, xs[xs.len() - 1], y, 0.5))
+            .collect();
+        g.extend(xs.iter().map(|&x| stroke(x, top, x, bottom, 0.5)));
+        let mut y = top;
+        while y + pitch <= bottom + 0.1 {
+            g.extend(
+                xs.windows(2)
+                    .map(|w| white_box(w[0], y, w[1] - w[0], pitch)),
+            );
+            y += pitch;
+        }
+        g
+    }
+
+    fn table_rows(runs: &[TableRun]) -> Vec<Vec<String>> {
+        assert_eq!(runs.len(), 1, "expected 1 ruled table, got {runs:?}");
+        match &runs[0].block {
+            Block::Table { header, rows } => header
+                .iter()
+                .chain(rows.iter())
+                .map(|r| r.iter().map(|c| c.text.clone()).collect())
+                .collect(),
+            other => panic!("expected Block::Table, got {other:?}"),
+        }
+    }
+
+    /// A timetable rules every few rows and draws each row as white cell boxes: the boxes'
+    /// edges are its row lines, so each run of times stays its own row.
+    #[test]
+    fn white_cell_boxes_split_record_rows_between_rules() {
+        let xs = [50.0, 150.0, 250.0, 350.0];
+        let mut graphics = white_box_grid(&xs, 100.0, 220.0, &[70.0, 100.0, 220.0], 30.0);
+        graphics.extend(xs.iter().map(|&x| stroke(x, 70.0, x, 100.0, 0.5)));
+        let header = ["South Ferry", "Chambers St", "Times Sq"];
+        let times = [
+            ["8:37", "8:42", "8:55"],
+            ["8:41", "8:46", "8:59"],
+            ["8:45", "8:50", "9:03"],
+            ["8:48", "8:53", "9:06"],
+        ];
+        let mut lines = vec![line_with_spans(
+            &[(header[0], 60.0), (header[1], 160.0), (header[2], 260.0)],
+            80.0,
+            10.0,
+        )];
+        lines.extend(times.iter().enumerate().map(|(i, row)| {
+            line_with_spans(
+                &[(row[0], 90.0), (row[1], 190.0), (row[2], 290.0)],
+                110.0 + 30.0 * i as f32,
+                10.0,
+            )
+        }));
+        let rows = table_rows(&detect_ruled_tables(
+            &lines,
+            &extract_rule_segments(&graphics),
+            612.0,
+            792.0,
+        ));
+        let mut expected = vec![header.map(String::from).to_vec()];
+        expected.extend(times.map(|r| r.map(String::from).to_vec()));
+        assert_eq!(rows, expected);
+    }
+
+    /// Word draws a white box behind every text line of a tall cell. Their edges fall between
+    /// the lines of one paragraph, so the cell stays one row.
+    #[test]
+    fn white_line_boxes_inside_a_wrapped_cell_stay_one_row() {
+        let xs = [50.0, 250.0, 450.0];
+        let mut graphics = white_box_grid(&xs, 130.0, 250.0, &[100.0, 130.0, 250.0], 30.0);
+        graphics.extend(xs.iter().map(|&x| stroke(x, 100.0, x, 130.0, 0.5)));
+        let left = [
+            "Strong brand recognition and",
+            "a loyal customer base across",
+            "every region where we sell",
+            "our flagship product line",
+        ];
+        let right = [
+            "Long supplier lead times and",
+            "a narrow product range that",
+            "leaves us exposed when one",
+            "category slows down",
+        ];
+        let mut lines = vec![line_with_spans(
+            &[("Strengths", 60.0), ("Weaknesses", 260.0)],
+            110.0,
+            10.0,
+        )];
+        lines.extend((0..4).map(|i| {
+            line_with_spans(
+                &[(left[i], 60.0), (right[i], 260.0)],
+                140.0 + 30.0 * i as f32,
+                10.0,
+            )
+        }));
+        let rows = table_rows(&detect_ruled_tables(
+            &lines,
+            &extract_rule_segments(&graphics),
+            612.0,
+            792.0,
+        ));
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[1], vec![left.join(" "), right.join(" ")]);
+    }
+
+    /// A column header turned 90 degrees can straddle a column rule in the projected frame:
+    /// its characters run down its box, not across it, so it is not cut there.
+    #[test]
+    fn rotated_span_is_not_split_at_rules() {
+        let span = TextItem {
+            text: "66 St Lincoln".into(),
+            x: 119.0,
+            width: 25.0,
+            height: 40.0,
+            rotation: 270.0,
+            ..Default::default()
+        };
+        let parts = split_span_at_rules(&span, &[132.6]);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].text, "66 St Lincoln");
     }
 
     #[test]
