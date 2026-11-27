@@ -59,6 +59,11 @@ export interface JsLiteParseConfig {
   password?: string
   /** Suppress progress output. */
   quiet?: boolean
+  /**
+   * Legacy: convert .doc/.docx/.ppt/.pptx to PDF with LibreOffice instead
+   * of the built-in native decoders (needs LibreOffice installed).
+   */
+  useLibreoffice?: boolean
   /** Number of concurrent OCR workers (default: CPU cores - 1). */
   numWorkers?: number
   /**

@@ -487,6 +487,7 @@ class LiteParse:
         preserve_very_small_text: Optional[bool] = None,
         password: Optional[str] = None,
         quiet: Optional[bool] = None,
+        use_libreoffice: Optional[bool] = None,
         num_workers: Optional[int] = None,
         image_mode: Optional[str] = None,
         extract_images: Optional[bool] = None,
@@ -550,6 +551,9 @@ class LiteParse:
             preserve_very_small_text: Whether to preserve very small text
             password: Password for encrypted/protected documents
             quiet: Suppress progress output
+            use_libreoffice: Legacy: convert .doc/.docx/.ppt/.pptx to PDF with
+                LibreOffice instead of the built-in native decoders (needs
+                LibreOffice installed; default False)
             num_workers: Number of concurrent OCR workers (default: CPU cores - 1)
             extract_links: Render hyperlink annotations as ``[text](url)`` in
                 markdown output (default: True). Set False for plain anchor text.
@@ -666,6 +670,8 @@ class LiteParse:
             kwargs["password"] = password
         if quiet is not None:
             kwargs["quiet"] = quiet
+        if use_libreoffice is not None:
+            kwargs["use_libreoffice"] = use_libreoffice
         if num_workers is not None:
             kwargs["num_workers"] = num_workers
         if image_mode is not None:
@@ -1021,6 +1027,7 @@ class LiteParse:
             preserve_very_small_text=cfg.preserve_very_small_text,
             password=cfg.password,
             quiet=cfg.quiet,
+            use_libreoffice=cfg.use_libreoffice,
             num_workers=cfg.num_workers,
             image_mode=cfg.image_mode,
             image_output_dir=cfg.image_output_dir,

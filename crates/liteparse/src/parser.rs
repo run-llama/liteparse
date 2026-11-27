@@ -16,6 +16,8 @@ use crate::ocr::OcrEngine;
 use crate::ocr::http_simple::HttpOcrEngine;
 #[cfg(feature = "tesseract")]
 use crate::ocr::tesseract::TesseractOcrEngine;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::office as native_office;
 
 use crate::stages;
 use crate::types::{
@@ -502,8 +504,28 @@ impl LiteParse {
         let t0 = web_time::Instant::now();
 
         #[cfg(not(target_arch = "wasm32"))]
-        let (validated_input, _guard) =
-            conversion::resolve_pdf_input(input, self.config.password.as_deref(), false).await?;
+        if let Some(kind) = self.office_kind(&input) {
+            let mut request = self.office_request(self.resolve_target_pages()?, true);
+            request.screenshots = None;
+            request.image_rects = true;
+            let decoded = self.decode_office(kind, input, request).await?;
+            let mut stats = Self::office_complexity(&decoded.pages, &decoded.image_rects);
+            let mut pages = decoded.pages;
+            stages::apply_content_filters(&mut pages, &self.content_filters());
+            for (stats, page) in stats.iter_mut().zip(&stages::project(pages)) {
+                stats.layout = Some(stages::layout_complexity(page));
+            }
+            return Ok(stats);
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let (validated_input, _guard) = conversion::resolve_pdf_input(
+            input,
+            self.config.password.as_deref(),
+            false,
+            self.config.use_libreoffice,
+        )
+        .await?;
 
         #[cfg(target_arch = "wasm32")]
         let validated_input = input;
@@ -618,6 +640,12 @@ impl LiteParse {
     /// in-memory PDF data (e.g. from a network response or Node.js Buffer).
     pub async fn parse_input(&self, input: PdfInput) -> Result<ParseResult, LiteParseError> {
         self.validate_output_config()?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(kind) = self.office_kind(&input) {
+            let request = self.office_request(self.resolve_target_pages()?, true);
+            let decoded = self.decode_office(kind, input, request).await?;
+            return Ok(self.office_result(decoded, Vec::new()));
+        }
         let resolved = self.resolve_input(input).await?;
         let target_pages = self.resolve_target_pages()?;
         self.parse_resolved(
@@ -629,6 +657,106 @@ impl LiteParse {
             None,
         )
         .await
+    }
+
+    /// The native decoder for `input`: `None` for formats it does not handle,
+    /// and for every format with `use_libreoffice` (legacy conversion).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn office_kind(&self, input: &PdfInput) -> Option<native_office::Kind> {
+        if self.config.use_libreoffice {
+            return None;
+        }
+        native_office::Kind::detect(input)
+    }
+
+    /// What to ask the native Office decoders for, from config: text, plus
+    /// screenshots and picture positions when the parse reports them.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn office_request(&self, target_pages: Option<Vec<u32>>, text: bool) -> native_office::Request {
+        native_office::Request {
+            target_pages,
+            max_pages: self.config.max_pages,
+            text,
+            screenshots: (text && self.config.extract_screenshots).then(|| {
+                native_office::ScreenshotRequest {
+                    dpi: self.config.effective_dpi(),
+                    detect_rects: self.config.detect_screenshot_rects,
+                }
+            }),
+            image_rects: text && self.config.include_complexity,
+        }
+    }
+
+    /// Decode Word or PowerPoint input with the native decoders
+    /// ([`crate::native_office`]). These formats never go through
+    /// LibreOffice, so a decoder failure is this call's error.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn decode_office(
+        &self,
+        kind: native_office::Kind,
+        input: PdfInput,
+        request: native_office::Request,
+    ) -> Result<native_office::Decoded, LiteParseError> {
+        let t0 = web_time::Instant::now();
+        let decoded =
+            tokio::task::spawn_blocking(move || native_office::decode(kind, input, &request))
+                .await
+                .map_err(|e| LiteParseError::Conversion(format!("{kind:?} decoder task: {e}")))?
+                .map_err(|e| {
+                    LiteParseError::Conversion(format!("cannot decode {kind:?} document: {e}"))
+                })?;
+        if !self.config.quiet {
+            eprintln!(
+                "[liteparse] decoded {} {kind:?} page(s) in {:.0}ms",
+                decoded.pages.len().max(decoded.screenshots.len()),
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        Ok(decoded)
+    }
+
+    /// Complexity stats of decoded Office pages: no OCR signal can fire on
+    /// text read from the source, apart from pages with no text or with
+    /// pictures. Layout signals come from the projected pages, as for PDFs.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn office_complexity(
+        pages: &[Page],
+        image_rects: &[Vec<crate::types::Rect>],
+    ) -> Vec<stages::PageComplexityStats> {
+        pages
+            .iter()
+            .enumerate()
+            .map(|(i, page)| {
+                let images = image_rects.get(i).map(Vec::as_slice).unwrap_or(&[]);
+                crate::ocr_merge::calculate_native_page_complexity(page, images, 0, 1)
+            })
+            .collect()
+    }
+
+    /// The parse result of decoded Office pages: the same projection and
+    /// layout passes as PDF text, then the decoder's own screenshots.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn office_result(
+        &self,
+        decoded: native_office::Decoded,
+        outline: Vec<OutlineTarget>,
+    ) -> ParseResult {
+        let complexity = self
+            .config
+            .include_complexity
+            .then(|| Self::office_complexity(&decoded.pages, &decoded.image_rects));
+        let mut result = self.parse_from_pages(decoded.pages, outline);
+        if let Some(stats) = complexity {
+            for (page, mut stats) in result.pages.iter_mut().zip(stats) {
+                stats.layout = Some(stages::layout_complexity(page));
+                page.complexity = Some(stats);
+            }
+        }
+        result.total_pages = decoded.total_pages;
+        result.creator = decoded.creator;
+        result.producer = decoded.producer;
+        result.screenshots = decoded.screenshots;
+        result
     }
 
     /// Parse with early OCR previews. Calls can arrive out of page order.
@@ -660,9 +788,13 @@ impl LiteParse {
     async fn resolve_input(&self, input: PdfInput) -> Result<ResolvedInput, LiteParseError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let (input, guard) =
-                conversion::resolve_pdf_input(input, self.config.password.as_deref(), false)
-                    .await?;
+            let (input, guard) = conversion::resolve_pdf_input(
+                input,
+                self.config.password.as_deref(),
+                false,
+                self.config.use_libreoffice,
+            )
+            .await?;
             Ok(ResolvedInput { input, guard })
         }
         #[cfg(target_arch = "wasm32")]
@@ -1355,8 +1487,22 @@ impl LiteParse {
             }
         };
 
-        let (validated_input, _guard) =
-            conversion::resolve_pdf_input(input, self.config.password.as_deref(), true).await?;
+        if let Some(kind) = self.office_kind(&input) {
+            let mut request = self.office_request(page_numbers, false);
+            request.screenshots = Some(native_office::ScreenshotRequest {
+                dpi: self.config.effective_dpi(),
+                detect_rects: self.config.detect_screenshot_rects,
+            });
+            return Ok(self.decode_office(kind, input, request).await?.screenshots);
+        }
+
+        let (validated_input, _guard) = conversion::resolve_pdf_input(
+            input,
+            self.config.password.as_deref(),
+            true,
+            self.config.use_libreoffice,
+        )
+        .await?;
 
         if let PdfInput::Path(ref path) = validated_input
             && !conversion::is_pdf(path)
@@ -1399,6 +1545,25 @@ impl LiteParse {
             ));
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(kind) = self.office_kind(&input) {
+            // The decoders lay the whole document out in one pass, so the
+            // session decodes once here and hands the pages out per batch.
+            let request = self.office_request(None, true);
+            let decoded = self.decode_office(kind, input, request).await?;
+            let total_pages = decoded.total_pages;
+            return Ok(ParseSession {
+                page_limit: (decoded.pages.len().min(u32::MAX as usize) as u32)
+                    .min(self.config.max_pages.min(u32::MAX as usize) as u32),
+                parser: self.clone(),
+                source: SessionSource::Office(decoded),
+                total_pages,
+                outline: Vec::new(),
+                next_page: 1,
+                batch_size,
+            });
+        }
+
         let input = self.resolve_input(input).await?;
         // One cheap open (a few ms even for a 100 MB file — PDFium maps the
         // file and parses the xref rather than reading it) so the caller knows
@@ -1417,7 +1582,7 @@ impl LiteParse {
         Ok(ParseSession {
             page_limit: total_pages.min(self.config.max_pages.min(u32::MAX as usize) as u32),
             parser: self.clone(),
-            input,
+            source: SessionSource::Pdf(input),
             total_pages,
             outline,
             next_page: 1,
@@ -1429,7 +1594,7 @@ impl LiteParse {
 /// A document opened once and parsed in bounded page batches.
 pub struct ParseSession {
     parser: LiteParse,
-    input: ResolvedInput,
+    source: SessionSource,
     total_pages: u32,
     /// Walked once at open. Document-level, so every batch reports the same
     /// outline, and re-walking it per batch would dominate batching overhead.
@@ -1439,6 +1604,16 @@ pub struct ParseSession {
     /// Next source page to parse, 1-based.
     next_page: u32,
     batch_size: usize,
+}
+
+/// What a [`ParseSession`] reads its batches from.
+enum SessionSource {
+    /// A PDF (or input converted to one), parsed per batch.
+    Pdf(ResolvedInput),
+    /// A Word or PowerPoint document decoded at open; batches take its pages
+    /// (and their screenshots and picture positions) in order.
+    #[cfg(not(target_arch = "wasm32"))]
+    Office(native_office::Decoded),
 }
 
 /// One batch of pages from a [`ParseSession`].
@@ -1469,17 +1644,35 @@ impl ParseSession {
             .min(self.page_limit);
         let targets: Vec<u32> = (start_page..=end_page).collect();
 
-        let result = self
-            .parser
-            .parse_resolved(
-                &self.input,
-                Some(&targets),
-                targets.len(),
-                Some(self.outline.clone()),
-                #[cfg(target_arch = "wasm32")]
-                None,
-            )
-            .await?;
+        let result = match &mut self.source {
+            SessionSource::Pdf(input) => {
+                self.parser
+                    .parse_resolved(
+                        input,
+                        Some(&targets),
+                        targets.len(),
+                        Some(self.outline.clone()),
+                        #[cfg(target_arch = "wasm32")]
+                        None,
+                    )
+                    .await?
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            SessionSource::Office(decoded) => {
+                let n = targets.len().min(decoded.pages.len());
+                let shots = decoded.screenshots.len().min(n);
+                let images = decoded.image_rects.len().min(n);
+                let batch = native_office::Decoded {
+                    total_pages: decoded.total_pages,
+                    pages: decoded.pages.drain(..n).collect(),
+                    creator: decoded.creator.clone(),
+                    producer: decoded.producer.clone(),
+                    screenshots: decoded.screenshots.drain(..shots).collect(),
+                    image_rects: decoded.image_rects.drain(..images).collect(),
+                };
+                self.parser.office_result(batch, Vec::new())
+            }
+        };
 
         self.next_page = end_page.saturating_add(1);
         Ok(Some(ParseBatch {
@@ -1913,16 +2106,19 @@ mod tests {
         });
         let mut session = parser
             .open_batch_session(
-                PdfInput::Path("../../integration_tests_data/sample3.doc".to_string()),
+                PdfInput::Path("../../integration_tests_data/receipt.png".to_string()),
                 1,
             )
             .await
-            .expect("should convert and open a .doc");
+            .expect("should convert and open a .png");
 
-        assert!(session.input.is_converted());
-        let converted_path = match &session.input.input {
+        let SessionSource::Pdf(input) = &session.source else {
+            panic!("an image should resolve to a converted PDF");
+        };
+        assert!(input.is_converted());
+        let converted_path = match &input.input {
             PdfInput::Path(p) => p.clone(),
-            PdfInput::Bytes(_) => panic!("a converted .doc should resolve to a temp file path"),
+            PdfInput::Bytes(_) => panic!("a converted image should resolve to a temp file path"),
         };
 
         let mut pages = 0;
@@ -1934,12 +2130,61 @@ mod tests {
                  would mean it was re-resolved or cleaned up per batch"
             );
         }
-        assert_eq!(pages, 2);
+        assert_eq!(pages, 1);
 
         drop(session);
         assert!(
             !std::path::Path::new(&converted_path).exists(),
             "dropping the session should clean up the converted temp PDF"
         );
+    }
+
+    /// Word and PowerPoint input goes to the native decoders unless the
+    /// legacy LibreOffice path is asked for; the converter refuses those
+    /// formats unless it is.
+    #[tokio::test]
+    async fn test_office_routing_follows_use_libreoffice() {
+        let input = PdfInput::Path("deck.pptx".to_string());
+        let native = LiteParse::new(LiteParseConfig::default());
+        assert_eq!(
+            native.office_kind(&input),
+            Some(native_office::Kind::Presentation)
+        );
+        let legacy = LiteParse::new(LiteParseConfig {
+            use_libreoffice: true,
+            ..LiteParseConfig::default()
+        });
+        assert_eq!(legacy.office_kind(&input), None);
+        let refused = conversion::resolve_pdf_input(input, None, false, false).await;
+        assert!(matches!(refused, Err(LiteParseError::Conversion(m)) if m.contains("natively")));
+    }
+
+    /// Word input is decoded natively once, when the session opens, and
+    /// batches hand out its pages in order; nothing is converted to PDF.
+    #[tokio::test]
+    async fn test_batch_session_decodes_word_natively() {
+        let parser = LiteParse::new(LiteParseConfig {
+            ocr_enabled: false,
+            quiet: true,
+            ..LiteParseConfig::default()
+        });
+        let mut session = parser
+            .open_batch_session(
+                PdfInput::Path("../../integration_tests_data/sample3.doc".to_string()),
+                1,
+            )
+            .await
+            .expect("should decode and open a .doc");
+        assert!(matches!(session.source, SessionSource::Office(_)));
+        assert_eq!(session.total_pages(), 2);
+
+        let mut numbers = Vec::new();
+        while let Some(batch) = session.next_batch().await.expect("batch should parse") {
+            assert_eq!(batch.start_page, batch.end_page);
+            assert_eq!(batch.result.pages.len(), 1);
+            assert!(batch.result.text.contains(char::is_alphanumeric));
+            numbers.push(batch.result.pages[0].page_number);
+        }
+        assert_eq!(numbers, [1, 2]);
     }
 }

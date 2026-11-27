@@ -145,6 +145,11 @@ struct ParseCommand {
     #[arg(short, long)]
     quiet: bool,
 
+    /// Legacy: convert .doc/.docx/.ppt/.pptx to PDF with LibreOffice instead of
+    /// the built-in native decoders (needs LibreOffice installed)
+    #[arg(long)]
+    with_libre_office: bool,
+
     /// Number of concurrent OCR workers (default: CPU cores - 1)
     #[arg(long)]
     num_workers: Option<usize>,
@@ -255,6 +260,11 @@ struct ScreenshotCommand {
     /// Suppress progress output
     #[arg(short, long)]
     quiet: bool,
+
+    /// Legacy: convert .doc/.docx/.ppt/.pptx to PDF with LibreOffice instead of
+    /// the built-in native decoders (needs LibreOffice installed)
+    #[arg(long)]
+    with_libre_office: bool,
 }
 
 #[derive(Args, Debug)]
@@ -322,6 +332,11 @@ struct BatchParseCommand {
     /// Suppress progress output
     #[arg(short, long)]
     quiet: bool,
+
+    /// Legacy: convert .doc/.docx/.ppt/.pptx to PDF with LibreOffice instead of
+    /// the built-in native decoders (needs LibreOffice installed)
+    #[arg(long)]
+    with_libre_office: bool,
 
     /// Number of concurrent OCR workers (default: CPU cores - 1)
     #[arg(long)]
@@ -404,6 +419,11 @@ struct IsComplexCommand {
     /// Suppress progress output
     #[arg(short, long)]
     quiet: bool,
+
+    /// Legacy: convert .doc/.docx/.ppt/.pptx to PDF with LibreOffice instead of
+    /// the built-in native decoders (needs LibreOffice installed)
+    #[arg(long)]
+    with_libre_office: bool,
 }
 
 fn parse_output_format(s: &str) -> Result<OutputFormat, String> {
@@ -503,6 +523,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 preserve_very_small_text: cmd.preserve_small_text,
                 password: cmd.password,
                 quiet: cmd.quiet,
+                use_libreoffice: cmd.with_libre_office,
                 ocr_server_url: cmd.ocr_server_url,
                 ocr_server_headers: cmd.ocr_server_headers,
                 image_mode,
@@ -570,6 +591,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 dpi: Some(cmd.dpi),
                 password: cmd.password.clone(),
                 quiet: cmd.quiet,
+                use_libreoffice: cmd.with_libre_office,
                 ..Default::default()
             };
             let lp = LiteParse::new(config);
@@ -612,6 +634,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 preserve_very_small_text: false,
                 password: cmd.password,
                 quiet: cmd.quiet,
+                use_libreoffice: cmd.with_libre_office,
                 ocr_server_url: cmd.ocr_server_url,
                 ocr_server_headers: cmd.ocr_server_headers,
                 include_complexity: cmd.complexity,
@@ -749,6 +772,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 target_pages: cmd.target_pages,
                 password: cmd.password,
                 quiet: cmd.quiet,
+                use_libreoffice: cmd.with_libre_office,
                 ..Default::default()
             };
             let lp = LiteParse::new(config);

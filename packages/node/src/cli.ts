@@ -144,6 +144,10 @@ program
   .option("--password <password>", "Password for encrypted documents")
   .option("--config <file>", "JSON config file path")
   .option("-q, --quiet", "Suppress progress output")
+  .option(
+    "--with-libre-office",
+    "Legacy: convert .doc/.docx/.ppt/.pptx with LibreOffice instead of the native decoders",
+  )
   .option("--num-workers <n>", "Number of concurrent OCR workers", parseInt)
   .option(
     "--complexity",
@@ -198,6 +202,7 @@ program
       if (opts.extractTextMetadata) config.extractTextMetadata = true;
       if (opts.password) config.password = opts.password as string;
       if (opts.quiet) config.quiet = true;
+      if (opts.withLibreOffice) config.useLibreoffice = true;
       if (opts.numWorkers) config.numWorkers = opts.numWorkers as number;
       if (opts.complexity) config.includeComplexity = true;
       if (opts.extractVectorGraphics) config.extractVectorGraphics = true;
@@ -257,6 +262,10 @@ program
   )
   .option("--password <password>", "Password for encrypted documents")
   .option("-q, --quiet", "Suppress progress output")
+  .option(
+    "--with-libre-office",
+    "Legacy: convert .doc/.docx/.ppt/.pptx with LibreOffice instead of the native decoders",
+  )
   .action(async (file: string, opts: Record<string, unknown>) => {
     try {
       const config: Partial<LiteParseConfig> = {};
@@ -264,6 +273,7 @@ program
       if (opts.targetPages) config.targetPages = opts.targetPages as string;
       if (opts.password) config.password = opts.password as string;
       if (opts.quiet) config.quiet = true;
+      if (opts.withLibreOffice) config.useLibreoffice = true;
 
       const parser = new LiteParse(config);
       const stats = await parser.isComplex(await resolveInput(file));
@@ -321,12 +331,17 @@ program
   .option("--dpi <dpi>", "Rendering DPI", parseFloat)
   .option("--password <password>", "Password for encrypted documents")
   .option("-q, --quiet", "Suppress progress output")
+  .option(
+    "--with-libre-office",
+    "Legacy: convert .doc/.docx/.ppt/.pptx with LibreOffice instead of the native decoders",
+  )
   .action(async (file: string, opts: Record<string, unknown>) => {
     try {
       const config: Partial<LiteParseConfig> = {};
       if (opts.dpi) config.dpi = opts.dpi as number;
       if (opts.password) config.password = opts.password as string;
       if (opts.quiet) config.quiet = true;
+      if (opts.withLibreOffice) config.useLibreoffice = true;
       if (opts.targetPages) config.targetPages = opts.targetPages as string;
 
       const parser = new LiteParse(config);
@@ -392,6 +407,10 @@ program
   .option("--extension <ext>", "Only process files with this extension")
   .option("--password <password>", "Password for encrypted documents")
   .option("-q, --quiet", "Suppress progress output")
+  .option(
+    "--with-libre-office",
+    "Legacy: convert .doc/.docx/.ppt/.pptx with LibreOffice instead of the native decoders",
+  )
   .option("--num-workers <n>", "Number of concurrent OCR workers", parseInt)
   .option(
     "--extract-text-metadata",
@@ -440,6 +459,7 @@ program
         if (opts.dpi) config.dpi = opts.dpi as number;
         if (opts.password) config.password = opts.password as string;
         if (opts.quiet) config.quiet = true;
+        if (opts.withLibreOffice) config.useLibreoffice = true;
         if (opts.numWorkers) config.numWorkers = opts.numWorkers as number;
         if (opts.extractTextMetadata) config.extractTextMetadata = true;
         if (opts.extractImages) config.extractImages = true;

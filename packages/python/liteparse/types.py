@@ -478,6 +478,7 @@ class LiteParseConfig:
     preserve_very_small_text: bool
     password: Optional[str]
     quiet: bool
+    use_libreoffice: bool
     num_workers: int
     image_mode: str
     image_output_dir: Optional[str]

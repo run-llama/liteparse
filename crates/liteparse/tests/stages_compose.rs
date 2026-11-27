@@ -200,9 +200,10 @@ async fn compose_with(parser: &LiteParse, input: PdfInput, rotate_back: bool) ->
 
     // Non-PDF inputs are converted before the pipeline starts; a PDF passes
     // through untouched.
-    let (input, _guard) = liteparse::conversion::resolve_pdf_input(input, password, false)
-        .await
-        .unwrap();
+    let (input, _guard) =
+        liteparse::conversion::resolve_pdf_input(input, password, false, config.use_libreoffice)
+            .await
+            .unwrap();
     let want_doc_meta = config.extract_document_metadata && !_guard.is_converted();
 
     let engine = parser.ocr_engine().unwrap();

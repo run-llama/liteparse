@@ -63,6 +63,9 @@ pub mod markdown_layout;
 pub mod models;
 #[doc(hidden)]
 pub mod ocr;
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub mod office;
 
 #[doc(hidden)]
 pub mod ocr_merge;

@@ -58,6 +58,7 @@ flowchart LR
 
       subgraph Core["Rust Core"]
           direction TB
+          OFFICE["Word & PowerPoint\nNative Rust decoders"]
           CONV["Format Conversion\nLibreOffice / Rust image + resvg + usvg crates"]
           EXTRACT["Text Extraction\nPDFium C library"]
           OCR["Selective OCR\nTesseract / HTTP / Custom"]
@@ -85,7 +86,8 @@ flowchart LR
       end
 
       PDF --> EXTRACT
-      DOCX & XLSX & PPTX & IMG --> CONV
+      DOCX & PPTX --> OFFICE --> PROJ
+      XLSX & IMG --> CONV
       PROJ --> JSON & TEXT & SCREEN
       JSON & TEXT & SCREEN --> Bindings
 
@@ -695,14 +697,22 @@ The API requires:
 
 ## Multi-Format Input Support
 
-LiteParse supports **automatic conversion** of various document formats to PDF before parsing.
+LiteParse reads Word and PowerPoint files natively, and converts other formats to PDF before parsing.
 
 ### Supported Input Formats
 
-#### Office Documents (via LibreOffice)
-- **Word**: `.doc`, `.docx`, `.docm`, `.odt`, `.rtf`, `.pages`
-- **PowerPoint**: `.ppt`, `.pptx`, `.pptm`, `.odp`, `.key`
-- **Spreadsheets**: `.xls`, `.xlsx`, `.xlsm`, `.ods`, `.csv`, `.tsv`, `.numbers`
+#### Word and PowerPoint (native, no dependencies)
+- **Word**: `.docx`, `.doc`
+- **PowerPoint**: `.pptx`, `.ppt`
+
+Built-in Rust decoders lay the document out the way Word and PowerPoint do (styles, line breaking, pagination, tables, charts, SmartArt) and report every page's text with bounding boxes, plus screenshots on request. No LibreOffice and no intermediate PDF are involved, so a document parses in tens to hundreds of milliseconds.
+
+To use the previous LibreOffice conversion for these formats instead, pass `--with-libre-office` on the CLI (`useLibreoffice: true` in Node.js, `use_libreoffice=True` in Python).
+
+#### Other office documents (via LibreOffice)
+- **Word processing**: `.docm`, `.dot`, `.dotm`, `.dotx`, `.odt`, `.ott`, `.rtf`, `.pages`
+- **Presentations**: `.pptm`, `.pot`, `.potm`, `.potx`, `.odp`, `.otp`, `.key`
+- **Spreadsheets**: `.xls`, `.xlsx`, `.xlsm`, `.xlsb`, `.ods`, `.ots`, `.csv`, `.tsv`, `.numbers`
 
 Install LibreOffice for automatic conversion:
 

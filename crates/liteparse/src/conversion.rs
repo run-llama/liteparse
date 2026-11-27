@@ -8,6 +8,10 @@ use std::{
     path::Path,
 };
 
+/// Word and PowerPoint formats decoded natively (`crate::office`). They only
+/// reach LibreOffice when the caller opts into it (`use_libreoffice`).
+pub const NATIVE_OFFICE_EXTENSIONS: &[&str] = &["doc", "docx", "ppt", "pptx"];
+
 /// Supported file extensions for conversion (non-PDF formats).
 const OFFICE_EXTENSIONS: &[&str] = &[
     "doc", "docx", "docm", "dot", "dotm", "dotx", "odt", "ott", "rtf", "pages",
@@ -95,12 +99,33 @@ impl PdfInputGuard {
 ///
 /// When `reject_text_formats` is true, plain-text files (`.txt`, etc.) return a
 /// clear error instead of attempting conversion.
+///
+/// Unless `allow_libreoffice_for_native` is true, Word and PowerPoint input
+/// ([`NATIVE_OFFICE_EXTENSIONS`]) is refused rather than handed to
+/// LibreOffice: callers decode those formats natively, so reaching this point
+/// with one is a bug.
 pub async fn resolve_pdf_input(
     input: crate::types::PdfInput,
     password: Option<&str>,
     reject_text_formats: bool,
+    allow_libreoffice_for_native: bool,
 ) -> Result<(crate::types::PdfInput, PdfInputGuard), LiteParseError> {
     use crate::types::PdfInput;
+
+    if !allow_libreoffice_for_native {
+        let ext = match &input {
+            PdfInput::Path(p) => Path::new(p)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_lowercase),
+            PdfInput::Bytes(b) => guess_extension_from_data(b),
+        };
+        if let Some(ext) = ext.filter(|e| NATIVE_OFFICE_EXTENSIONS.contains(&e.as_str())) {
+            return Err(LiteParseError::Conversion(format!(
+                ".{ext} is decoded natively; LibreOffice conversion needs use_libreoffice"
+            )));
+        }
+    }
 
     match input {
         PdfInput::Path(p) => {
@@ -663,7 +688,7 @@ mod tests {
     async fn test_resolve_pdf_input_rejects_text_for_screenshot() {
         use crate::types::PdfInput;
 
-        let err = resolve_pdf_input(PdfInput::Path("/tmp/readme.txt".into()), None, true)
+        let err = resolve_pdf_input(PdfInput::Path("/tmp/readme.txt".into()), None, true, false)
             .await
             .unwrap_err()
             .to_string();
@@ -675,9 +700,10 @@ mod tests {
         use crate::types::PdfInput;
 
         let pdf_bytes = b"%PDF-1.4\n";
-        let (input, guard) = resolve_pdf_input(PdfInput::Bytes(pdf_bytes.to_vec()), None, true)
-            .await
-            .unwrap();
+        let (input, guard) =
+            resolve_pdf_input(PdfInput::Bytes(pdf_bytes.to_vec()), None, true, false)
+                .await
+                .unwrap();
         assert!(matches!(input, PdfInput::Bytes(_)));
         assert!(guard.temps.is_empty());
     }
