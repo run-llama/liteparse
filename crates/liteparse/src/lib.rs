@@ -43,6 +43,7 @@ mod bidi;
 #[doc(hidden)]
 pub mod conversion;
 mod document_metadata;
+mod encoding_repair;
 #[doc(hidden)]
 pub mod extract;
 #[doc(hidden)]

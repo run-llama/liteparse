@@ -399,6 +399,7 @@ fn extract_single_page(
             None => extract_text(&document.page(page_index)?)?,
         }
     };
+    crate::encoding_repair::repair_text_items(&mut text_items);
     assign_links(&mut text_items, &links);
     assign_strikethrough(&mut text_items, &graphics);
     assign_underline(&mut text_items, &graphics);
