@@ -201,37 +201,6 @@ pub struct LiteParse {
     glyph_resolver: Option<std::sync::Arc<dyn crate::GlyphResolver>>,
 }
 
-/// The learned table model's per-page inputs for `pages`, appended in page order. These need the
-/// open page (PDFium isn't thread-safe), so they are built under the PDFium lock and joined with
-/// projection signals later. `render: false` leaves out the page render (ruling lines, image
-/// branch), for [`render_table_inputs`] to add later.
-fn build_table_inputs(
-    document: &pdfium::Document<'_>,
-    pages: &[Page],
-    net: &crate::table_model::net::TableNet,
-    render: bool,
-    out: &mut Vec<(usize, crate::table_model::PageInput)>,
-) {
-    out.extend(pages.iter().filter_map(|p| {
-        let page = document.page(p.page_number as i32 - 1).ok()?;
-        crate::table_model::page_input(&page, render, render && net.has_img())
-            .map(|inp| (p.page_number, inp))
-    }));
-}
-
-/// Add the page render to inputs built by [`build_table_inputs`] with `render: false`.
-fn render_table_inputs(
-    document: &pdfium::Document<'_>,
-    inputs: &mut [(usize, crate::table_model::PageInput)],
-    net: &crate::table_model::net::TableNet,
-) {
-    for (page_number, input) in inputs {
-        if let Ok(page) = document.page(*page_number as i32 - 1) {
-            input.attach_render(&page, true, net.has_img());
-        }
-    }
-}
-
 /// Run block classification once and fan the result out to everything that
 /// needs it: the rendered per-page markdown (when Markdown is the output
 /// format) and each page's `blocks` (when `extract_blocks` is on).
@@ -259,12 +228,10 @@ fn apply_layout(
             // A page with no structural decomposition reports an empty list,
             // not `None` — extraction *was* enabled, there was just nothing to
             // decompose.
-            let heuristic = stages::layout_blocks(page, blocks.as_deref().unwrap_or_default());
-            page.blocks = Some(if page.model_blocks.is_empty() {
-                heuristic
-            } else {
-                crate::layout::with_model_blocks(page, heuristic)
-            });
+            page.blocks = Some(stages::layout_blocks(
+                page,
+                blocks.as_deref().unwrap_or_default(),
+            ));
         }
         if wants_markdown {
             page_md.push(stages::render_page_markdown(page, blocks.as_deref()));
@@ -450,6 +417,17 @@ impl LiteParse {
             crop_box: self.config.crop_box.as_ref(),
             skip_diagonal_text: self.config.skip_diagonal_text,
         }
+    }
+
+    /// The layout model (LayoutNet) a parse would run: the one given to
+    /// [`Self::with_table_net`], else `config.table_model`, else (with the
+    /// OCRia-nano backend) the installed package's. Loaded once per process.
+    pub fn layout_model(&self) -> Option<&'static crate::table_model::net::TableNet> {
+        self.table_net_override.or_else(|| {
+            self.config
+                .effective_table_model()
+                .and_then(|p| stages::load_layout_model(std::path::Path::new(&p)))
+        })
     }
 
     /// The OCR engine a parse would use: the override when set, else the
@@ -737,13 +715,7 @@ impl LiteParse {
         let ocr_engine = self.ocr_engine()?;
         let ocr_grayscale = ocr_engine.as_ref().is_some_and(|e| e.prefers_grayscale());
         // The learned table model (weights loaded once per process).
-        let table_net = self.table_net_override.or_else(|| {
-            self.config
-                .effective_table_model()
-                .and_then(|p| crate::table_model::load(std::path::Path::new(&p)))
-        });
-        // a separate block-class model alongside the table model (a two-model setup): none ships
-        let layout_net: Option<&crate::table_model::net::TableNet> = None;
+        let table_net = self.layout_model();
 
         #[allow(unused_mut)] // mutated only by the native image-output writer
         let (
@@ -883,13 +855,8 @@ impl LiteParse {
             let t_tin = web_time::Instant::now();
             let mut table_inputs = Vec::new();
             if let Some(net) = table_net {
-                build_table_inputs(
-                    analysis_document,
-                    &pages,
-                    net,
-                    !defer_table_inputs,
-                    &mut table_inputs,
-                );
+                table_inputs =
+                    stages::layout_inputs(analysis_document, &pages, net, !defer_table_inputs);
             }
             if !table_inputs.is_empty() {
                 log(&format!(
@@ -1012,7 +979,7 @@ impl LiteParse {
                         {
                             let lib = Library::init();
                             let document = self.open_document(&lib, ocr_input, password)?;
-                            render_table_inputs(
+                            stages::attach_layout_renders(
                                 &document,
                                 &mut table_inputs[table_next..upto],
                                 net,
@@ -1075,30 +1042,7 @@ impl LiteParse {
         // crop region, and before projection so filtered items never surface.
         stages::apply_content_filters(&mut pages, &self.content_filters());
 
-        // A page whose text is now mostly OCR (an invisible old OCR layer or a garbled layer
-        // replaced by fresh OCR) is an OCR page for the table model too: built from the PDF's
-        // characters, its units would rebuild tables out of the discarded layer, and the
-        // replacement OCR text would then repeat below them.
-        for (page_number, input) in table_inputs.iter_mut() {
-            if input.ocr {
-                continue;
-            }
-            let Some(page) = pages.iter().find(|p| p.page_number == *page_number) else {
-                continue;
-            };
-            let (mut ocr, mut all) = (0usize, 0usize);
-            for item in &page.text_items {
-                let n = item.text.chars().filter(|c| !c.is_whitespace()).count();
-                all += n;
-                if item.confidence.is_some() {
-                    ocr += n;
-                }
-            }
-            if all > 0 && ocr * 5 >= all * 4 {
-                input.ocr = true;
-                input.units.clear();
-            }
-        }
+        stages::mark_ocr_layout_inputs(&pages, &mut table_inputs);
 
         // Grid projection (keeping per-item projection signals for the table model)
         if !table_inputs.is_empty() {
@@ -1125,60 +1069,14 @@ impl LiteParse {
             crate::projection::collect_signals(false);
             let signals = crate::projection::take_signals();
             let t_tm = web_time::Instant::now();
-            let opt = crate::table_model::decode::DecodeOptions {
-                ..Default::default()
-            };
             if let Some(net) = table_net {
-                // pages are independent here (pure compute on built inputs): run them on up to
-                // num_workers threads, then assign in page order
-                let run = |(page_number, input): &(usize, crate::table_model::PageInput)| {
-                    crate::table_model::run_page(
-                        net,
-                        layout_net,
-                        input,
-                        signals.get(page_number),
-                        &opt,
-                    )
-                };
-                #[cfg(not(target_arch = "wasm32"))]
-                let models: Vec<crate::table_model::PageModel> = {
-                    let workers = self
-                        .config
-                        .num_workers
-                        .max(1)
-                        .min(table_inputs.len().max(1));
-                    if workers <= 1 {
-                        table_inputs.iter().map(run).collect()
-                    } else {
-                        let chunk = table_inputs.len().div_ceil(workers);
-                        std::thread::scope(|sc| {
-                            let hs: Vec<_> = table_inputs
-                                .chunks(chunk)
-                                .map(|part| {
-                                    sc.spawn(move || part.iter().map(run).collect::<Vec<_>>())
-                                })
-                                .collect();
-                            hs.into_iter()
-                                .flat_map(|h| h.join().expect("table model thread"))
-                                .collect()
-                        })
-                    }
-                };
-                #[cfg(target_arch = "wasm32")]
-                let models: Vec<crate::table_model::PageModel> =
-                    table_inputs.iter().map(run).collect();
-                for ((page_number, _), pm) in table_inputs.iter().zip(models) {
-                    if let Some(pp) = parsed_pages
-                        .iter_mut()
-                        .find(|p| p.page_number == *page_number)
-                    {
-                        pp.model_tables = pm.tables;
-                        pp.model_classes = pm.classes;
-                        pp.model_blocks = pm.blocks;
-                        // split lines the projection ran across two of the model's blocks (narrow gutters)
-                        crate::resegment::resegment_by_model_blocks(pp);
-                    }
-                }
+                stages::run_layout_model(
+                    net,
+                    &mut parsed_pages,
+                    &table_inputs,
+                    &signals,
+                    self.config.num_workers,
+                );
             }
             log(&format!(
                 "[liteparse] table model: {:.1}ms over {} pages",

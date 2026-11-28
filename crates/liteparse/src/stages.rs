@@ -23,8 +23,9 @@
 //! | complexity | [`page_complexity`], [`layout_complexity`] | pdfium / pure |
 //! | OCR | [`render_for_ocr`] → [`recognize`] → [`merge_ocr`] | pdfium / any / pure |
 //! | content filters | [`apply_content_filters`] | pure |
-//! | projection | [`project`] | pure |
-//! | markdown | [`document_signals_with_outline`] → [`extract_blocks`] → [`render_page_markdown`] | pure |
+//! | projection | [`project`], [`project_with_signals`] | pure |
+//! | layout model | [`layout_inputs`] → [`mark_ocr_layout_inputs`] → [`run_layout_model`] | pdfium / pure / pure |
+//! | markdown | [`document_signals`] → [`extract_blocks`] → [`render_page_markdown`] | pure |
 //! | deskew rotate-back | [`rotate_back_ocr_deskew`] | pure |
 //! | screenshots | [`screenshots`] | pdfium |
 //!
@@ -395,6 +396,162 @@ pub fn project_for_markdown(pages: Vec<Page>) -> Vec<ParsedPage> {
     projection::project_pages_for_markdown(pages)
 }
 
+// ── Layout model ───────────────────────────────────────────────────────
+
+/// One projected page's per-item signals, from [`project_with_signals`].
+pub use crate::projection::ProjSignals as ProjectionSignals;
+/// What [`run_layout_model`] needs from one open page: its text units, ruling
+/// lines and render. Built by [`layout_inputs`] while the document is open.
+pub use crate::table_model::PageInput as LayoutInput;
+/// LayoutNet: the learned table and block-class model shipped in the
+/// OCRia-nano package (`tablenet.bin` / `tablenet.onnx`). It reads the page's
+/// text units, so it runs with any OCR engine, or none.
+pub use crate::table_model::net::TableNet as LayoutModel;
+
+/// Load LayoutNet weights, once per process (later calls return the first
+/// model whatever their path). A `.bin` runs on the built-in Rust kernels; a
+/// `.onnx` needs ONNX Runtime (the `ocria-nano` feature) and otherwise falls
+/// back to the `.bin` beside it. `None` when neither loads.
+pub fn load_layout_model(path: &std::path::Path) -> Option<&'static LayoutModel> {
+    crate::table_model::load(path)
+}
+
+/// The layout model's inputs for `pages`, as `(page_number, input)` in page
+/// order. A page with no usable text layer gets an OCR input, whose units
+/// come from its projected OCR items at [`run_layout_model`].
+///
+/// Build these from the document [`extract`] ran on: PDFium reports slightly
+/// different character boxes for a page extraction has not touched.
+/// `render: false` leaves out the page render (ruling lines and the image
+/// branch) for [`attach_layout_renders`] to add later, from any document
+/// opened the same way, so the render can overlap OCR.
+pub fn layout_inputs(
+    document: &Document,
+    pages: &[Page],
+    model: &LayoutModel,
+    render: bool,
+) -> Vec<(usize, LayoutInput)> {
+    pages
+        .iter()
+        .filter_map(|p| {
+            let page = document.page(p.page_number as i32 - 1).ok()?;
+            crate::table_model::page_input(&page, render, render && model.has_img())
+                .map(|input| (p.page_number, input))
+        })
+        .collect()
+}
+
+/// Add the page render to inputs [`layout_inputs`] built with `render: false`.
+pub fn attach_layout_renders(
+    document: &Document,
+    inputs: &mut [(usize, LayoutInput)],
+    model: &LayoutModel,
+) {
+    for (page_number, input) in inputs {
+        if let Ok(page) = document.page(*page_number as i32 - 1) {
+            input.attach_render(&page, true, model.has_img());
+        }
+    }
+}
+
+/// Turn the inputs of pages whose text is now mostly OCR (80% of characters
+/// or more) into OCR inputs. Run it after [`merge_ocr`] and
+/// [`apply_content_filters`]: an invisible old OCR layer or a garbled layer
+/// that fresh OCR replaced would otherwise feed the model the discarded text.
+pub fn mark_ocr_layout_inputs(pages: &[Page], inputs: &mut [(usize, LayoutInput)]) {
+    for (page_number, input) in inputs.iter_mut() {
+        if input.ocr {
+            continue;
+        }
+        let Some(page) = pages.iter().find(|p| p.page_number == *page_number) else {
+            continue;
+        };
+        let (mut ocr, mut all) = (0usize, 0usize);
+        for item in &page.text_items {
+            let n = item.text.chars().filter(|c| !c.is_whitespace()).count();
+            all += n;
+            if item.confidence.is_some() {
+                ocr += n;
+            }
+        }
+        if all > 0 && ocr * 5 >= all * 4 {
+            input.ocr = true;
+            input.units.clear();
+        }
+    }
+}
+
+/// [`project`] (or [`project_for_markdown`] with `for_markdown`) that also
+/// returns each page's projection signals by page number, for
+/// [`run_layout_model`].
+pub fn project_with_signals(
+    pages: Vec<Page>,
+    for_markdown: bool,
+) -> (Vec<ParsedPage>, HashMap<usize, ProjectionSignals>) {
+    // signals collect in a thread-local map: drop anything a dump left behind
+    projection::take_signals();
+    projection::collect_signals(true);
+    let parsed = if for_markdown {
+        project_for_markdown(pages)
+    } else {
+        project(pages)
+    };
+    projection::collect_signals(false);
+    (parsed, projection::take_signals())
+}
+
+/// Run the layout model on each page that has an input, on up to
+/// `num_workers` threads. It sets the page's `model_tables`, `model_classes`
+/// and `model_blocks`, and splits projected lines that run across two of the
+/// model's blocks. [`extract_blocks`] and [`layout_blocks`] read those fields.
+///
+/// The `model_*` fields are not serialized, so this stage and the block
+/// stages after it must run in one process.
+pub fn run_layout_model(
+    model: &LayoutModel,
+    pages: &mut [ParsedPage],
+    inputs: &[(usize, LayoutInput)],
+    signals: &HashMap<usize, ProjectionSignals>,
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))] num_workers: usize,
+) {
+    let opt = crate::table_model::decode::DecodeOptions::default();
+    // a separate block-class model beside the table model (a two-model setup): none ships
+    let run = |(page_number, input): &(usize, LayoutInput)| {
+        crate::table_model::run_page(model, None, input, signals.get(page_number), &opt)
+    };
+    // pages are independent here (pure compute on built inputs): run them on up to
+    // num_workers threads, then assign in page order
+    #[cfg(not(target_arch = "wasm32"))]
+    let models: Vec<crate::table_model::PageModel> = {
+        let workers = num_workers.max(1).min(inputs.len().max(1));
+        if workers <= 1 {
+            inputs.iter().map(run).collect()
+        } else {
+            let chunk = inputs.len().div_ceil(workers);
+            std::thread::scope(|sc| {
+                let hs: Vec<_> = inputs
+                    .chunks(chunk)
+                    .map(|part| sc.spawn(move || part.iter().map(run).collect::<Vec<_>>()))
+                    .collect();
+                hs.into_iter()
+                    .flat_map(|h| h.join().expect("table model thread"))
+                    .collect()
+            })
+        }
+    };
+    #[cfg(target_arch = "wasm32")]
+    let models: Vec<crate::table_model::PageModel> = inputs.iter().map(run).collect();
+    for ((page_number, _), pm) in inputs.iter().zip(models) {
+        if let Some(pp) = pages.iter_mut().find(|p| p.page_number == *page_number) {
+            pp.model_tables = pm.tables;
+            pp.model_classes = pm.classes;
+            pp.model_blocks = pm.blocks;
+            // split lines the projection ran across two of the model's blocks (narrow gutters)
+            crate::resegment::resegment_by_model_blocks(pp);
+        }
+    }
+}
+
 // ── Markdown ───────────────────────────────────────────────────────────
 
 /// Whole-document signals the block classifier needs: computed once over
@@ -588,8 +745,15 @@ fn resolve_soft_hyphens(md: &str) -> String {
 
 /// The public, flat view of a page's blocks (`ParsedPage::blocks`), with
 /// block boxes mapped back from the projected frame into viewport space.
+/// On a page [`run_layout_model`] gave blocks, the model's text blocks replace
+/// the heuristic ones; heuristic table and figure blocks stay.
 pub fn layout_blocks(page: &ParsedPage, blocks: &[PositionedBlock]) -> Vec<LayoutBlock> {
-    crate::layout::blocks_for_page(page, blocks)
+    let heuristic = crate::layout::blocks_for_page(page, blocks);
+    if page.model_blocks.is_empty() {
+        heuristic
+    } else {
+        crate::layout::with_model_blocks(page, heuristic)
+    }
 }
 
 /// Point duplicate-image figure references at the canonical image's file

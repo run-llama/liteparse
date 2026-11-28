@@ -2252,6 +2252,9 @@ fn garbled_scope(page: &Page) -> GarbledScope {
     // Misread glyphs (see `misread_glyphs`), per base font: intruding char -> its distinct words
     // and the distinct tails it opens.
     let mut per_base_misread: HashMap<Option<&str>, MisreadByChar> = HashMap::new();
+    // Text in the wrong code page or in visual order (see `EncodingSlips`).
+    let mut per_font_slips: HashMap<Option<&str>, EncodingSlips> = HashMap::new();
+    let mut total_slips = EncodingSlips::default();
     for it in &page.text_items {
         if !it.math && !is_symbol_font(it.font_name.as_deref()) {
             let words = per_base_misread
@@ -2309,6 +2312,12 @@ fn garbled_scope(page: &Page) -> GarbledScope {
         let entry = per_font.entry(it.font_name.as_deref()).or_insert((0, 0));
         entry.0 += l;
         entry.1 += v;
+        let slips = EncodingSlips::of(&it.text);
+        total_slips.add(&slips);
+        per_font_slips
+            .entry(it.font_name.as_deref())
+            .or_default()
+            .add(&slips);
         let (sc, intr) = script_intrusions(&it.text);
         total_script += sc;
         total_intrusions += intr;
@@ -2333,6 +2342,7 @@ fn garbled_scope(page: &Page) -> GarbledScope {
         || controls_are_garbled(total_ctrl, total_chars)
         || tokens_are_garbled(total_judged, total_malformed)
         || unmapped_are_garbled(total_unmapped, total_visible)
+        || total_slips.garbled()
     {
         return GarbledScope::WholePage;
     }
@@ -2376,6 +2386,12 @@ fn garbled_scope(page: &Page) -> GarbledScope {
         per_font_unmapped
             .into_iter()
             .filter(|&(_, (u, n))| unmapped_are_garbled(u, n))
+            .map(|(font, _)| font.map(str::to_string)),
+    );
+    fonts.extend(
+        per_font_slips
+            .into_iter()
+            .filter(|(_, slips)| slips.garbled())
             .map(|(font, _)| font.map(str::to_string)),
     );
     // A misread glyph condemns every subset of its base font on the page: a producer that
@@ -2434,6 +2450,127 @@ fn script_intrusions(text: &str) -> (usize, usize) {
         })
         .count();
     (script, intrusions)
+}
+
+/// Signs of text decoded in the wrong code page, or stored in visual order: every character is a
+/// valid letter, so none of the other checks see it, but the page reads as nonsense.
+/// - `latin1`: letters in U+00C0..U+00FF. Cyrillic (or Armenian, Greek, Hebrew) in an 8-bit code
+///   page read as Latin-1 is made of them ("Ìîíòàæ êîíâåêòîðà" for "Монтаж конвектора"); no
+///   language written in Latin letters uses them for half its letters.
+/// - `arabic_odd`: code points Arabic text does not use (the rare letters U+063B..U+063F, the
+///   annotation marks U+0656..U+065F, `٭ ٮ ٯ ٴ`; not U+0653..U+0655, the combining madda and
+///   hamza of decomposed text) and Arabic-Indic digits inside a word
+///   ("ٞ٭وٴى، س٫ٟى", "حُـِحثٖ٤٣َ"), and a dammatan or kasratan with a letter after it
+///   ("انجلٌزٌة" for "انجليزية"; they only end words): a font whose glyph codes were read as
+///   Arabic code points.
+/// - `arabic_reversed`: Arabic words starting with teh marbuta, a letter that only ends words
+///   ("ةديج ةيعون" for "نوعية جيدة"): text stored in visual order, each word back to front.
+/// - `ascii_shift`: one of `; < = > ? @` between two capitals or digits ("?@>2545=8S B5:CM53>",
+///   "CB6OL9AAO= CDB86<AGFO="): Cyrillic whose codes lost their high byte, landing on U+0030..U+004F.
+#[derive(Default)]
+struct EncodingSlips {
+    visible: usize,
+    ascii_shift: usize,
+    letters: usize,
+    latin1: usize,
+    arabic: usize,
+    arabic_odd: usize,
+    arabic_words: usize,
+    arabic_reversed: usize,
+}
+
+/// Fewest Latin-1 letters, and their least share of all letters, for text to count as garbled.
+/// Mojibake pages sit above 0.8; no clean page measured came above 0.5.
+const LATIN1_MIN: usize = 30;
+const LATIN1_MIN_SHARE: f32 = 0.5;
+/// Fewest Arabic letters to judge, fewest odd code points, and their least rate per Arabic
+/// letter. Vocalised and Persian / Urdu pages stay at zero; the garbled ones start near 3%.
+const ARABIC_MIN_LETTERS: usize = 100;
+const ARABIC_ODD_MIN: usize = 10;
+const ARABIC_ODD_MIN_RATE: f32 = 0.02;
+/// Fewest shifted-ASCII marks, and their least share of the visible characters. The
+/// garbled pages measured sit at 6-10%; gene lists and parts tables, the densest clean text, under 5%.
+const ASCII_SHIFT_MIN: usize = 30;
+const ASCII_SHIFT_MIN_SHARE: f32 = 0.06;
+/// Fewest back-to-front Arabic words, and their least share of the Arabic words.
+const ARABIC_REVERSED_MIN: usize = 5;
+const ARABIC_REVERSED_MIN_SHARE: f32 = 0.05;
+
+fn is_arabic_letter(c: char) -> bool {
+    matches!(c as u32, 0x0621..=0x064A | 0x0671..=0x06D3 | 0xFB50..=0xFDFF | 0xFE70..=0xFEFC)
+}
+
+impl EncodingSlips {
+    fn of(text: &str) -> Self {
+        let mut s = EncodingSlips::default();
+        let cs: Vec<char> = text.chars().collect();
+        for (i, &c) in cs.iter().enumerate() {
+            let o = c as u32;
+            if c.is_alphabetic() {
+                s.letters += 1;
+            }
+            if !c.is_whitespace() {
+                s.visible += 1;
+            }
+            let cap = |c: char| c.is_ascii_uppercase() || c.is_ascii_digit();
+            if matches!(c, ';' | '<' | '=' | '>' | '?' | '@')
+                && i > 0
+                && cap(cs[i - 1])
+                && cs.get(i + 1).is_some_and(|&n| cap(n))
+            {
+                s.ascii_shift += 1;
+            }
+            if (0xC0..=0xFF).contains(&o) && o != 0xD7 && o != 0xF7 {
+                s.latin1 += 1;
+            }
+            if is_arabic_letter(c) {
+                s.arabic += 1;
+            }
+            let odd = match o {
+                0x063B..=0x063F | 0x0656..=0x065F | 0x066D..=0x066F | 0x0674 => true,
+                0x0660..=0x0669 | 0x06F0..=0x06F9 => {
+                    i > 0
+                        && is_arabic_letter(cs[i - 1])
+                        && cs.get(i + 1).is_some_and(|&n| is_arabic_letter(n))
+                }
+                0x064C | 0x064D => cs.get(i + 1).is_some_and(|&n| is_arabic_letter(n)),
+                _ => false,
+            };
+            s.arabic_odd += usize::from(odd);
+        }
+        for w in text.split_whitespace() {
+            if w.chars().filter(|&c| is_arabic_letter(c)).count() >= 3 {
+                s.arabic_words += 1;
+                let first = w.chars().next();
+                s.arabic_reversed +=
+                    usize::from(matches!(first, Some('\u{0629}' | '\u{FE93}' | '\u{FE94}')));
+            }
+        }
+        s
+    }
+
+    fn add(&mut self, o: &EncodingSlips) {
+        self.visible += o.visible;
+        self.ascii_shift += o.ascii_shift;
+        self.letters += o.letters;
+        self.latin1 += o.latin1;
+        self.arabic += o.arabic;
+        self.arabic_odd += o.arabic_odd;
+        self.arabic_words += o.arabic_words;
+        self.arabic_reversed += o.arabic_reversed;
+    }
+
+    fn garbled(&self) -> bool {
+        (self.latin1 >= LATIN1_MIN && self.latin1 as f32 >= self.letters as f32 * LATIN1_MIN_SHARE)
+            || (self.arabic >= ARABIC_MIN_LETTERS
+                && self.arabic_odd >= ARABIC_ODD_MIN
+                && self.arabic_odd as f32 >= self.arabic as f32 * ARABIC_ODD_MIN_RATE)
+            || (self.arabic_reversed >= ARABIC_REVERSED_MIN
+                && self.arabic_reversed as f32
+                    >= self.arabic_words as f32 * ARABIC_REVERSED_MIN_SHARE)
+            || (self.ascii_shift >= ASCII_SHIFT_MIN
+                && self.ascii_shift as f32 >= self.visible as f32 * ASCII_SHIFT_MIN_SHARE)
+    }
 }
 
 /// Fewest symbol intrusions, and their least rate per letter, for text to count as garbled
@@ -3617,6 +3754,65 @@ mod tests {
         );
         // Non-Latin scripts still contribute nothing.
         assert_eq!(count_letters_and_vowels("مرحبا こんにちは"), (0, 0));
+    }
+
+    /// Text in the wrong code page or in visual order is all valid letters; `EncodingSlips`
+    /// tells it from clean text in the same scripts.
+    #[test]
+    fn test_encoding_slips_flag_wrong_code_page_text() {
+        let page_of = |line: &str| -> String { vec![line; 12].join(" ") };
+        let garbled = [
+            // Cyrillic (CP1251) read as Latin-1
+            "Ìîíòàæ êîíâåêòîðà Ýòîò êîíâåêòîð ìîæåò áûòü óñòàíîâëåí â ëþáîì ïîìåùåíèè",
+            // glyph codes read as Arabic code points
+            "ٞ٭وٴى، س٫ٟى اق آس٧ب٨ ثفسف ٦ب ْف٬ ا٪ؽاق ٖفآ٨ ٦دۇٴؽ ؼـس٭ـٮ",
+            "أكٜق كٚ٤ ػٖ ٞٓهلٚ ٖٓ حَُٜحع حُيحثَ ك٢ كِٔطٖ٤",
+            // dammatan standing in for a letter inside words
+            "لغه انجلٌزٌة تٌحرري اٌلتقدر المجموع تعبٌر شفوى",
+            // Cyrillic with the high byte lost
+            "?@>2545=8S B5:CM53> 8 ?@> G=>3> :>=B@>;S >A2>5=8S 48AF8?;8=O 8 D>@ 20=8S >1M8E",
+            // Arabic in visual order, each word back to front
+            "في نم ةئفلا هذه ةيعون ةديج ةيلاع",
+        ];
+        for g in garbled {
+            assert!(EncodingSlips::of(&page_of(g)).garbled(), "{g}");
+        }
+        let clean = [
+            "Монтаж конвектора. Этот конвектор может быть установлен в любом помещении.",
+            "Événement créé à l'été : élève, théâtre, déjà réglé, frère aîné, où ça ?",
+            "Tiếng Việt có rất nhiều dấu: được, đã, đến, để, là, và, các, những, một",
+            "وزيادة على هذا، لم يعالج الفضيل قضايا وطنه فحسب، فقد كان غيره متأثرا",
+            "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ الْحَمْدُ لِلَّهِ رَبِّ الْعَالَمِينَ",
+            "پس از هبوط نطفه های بشری و همراه شدن آب حیات در سال ۱۳۹۹ و ۲۵٪ بود",
+            "ΕΛΛΗΝΙΚΗ ΔΗΜΟΚΡΑΤΙΑ ΝΟΜΟΣ ΗΜΑΘΙΑΣ ΔΗΜΟΣ ΗΡΩΙΚΗΣ ΠΟΛΕΩΣ ΝΑΟΥΣΑΣ",
+            "كتابٌ جديدٌ في بيتٍ قديمٍ، وهذا علمٌ نافعٌ لكل طالبٍ مجتهدٍ في مدرسةٍ",
+            // a gene list and scope settings: dense in `;` and `=`, yet under the share
+            "cg0456 chr4 RP11-783N5.1;TAPT1;TAPT1 0.72 TSS1500;Body Island VIN=5V/div \
+             Time=1ms/div load step T=50 and T=100 for the channels listed above",
+        ];
+        for c in clean {
+            assert!(!EncodingSlips::of(&page_of(c)).garbled(), "{c}");
+        }
+    }
+
+    #[test]
+    fn test_garbled_scope_flags_a_mojibake_font() {
+        let mut items: Vec<(&str, &str)> = HEALTHY_PARAGRAPH
+            .iter()
+            .map(|t| ("Helvetica", *t))
+            .collect();
+        items.push((
+            "Pragmatica",
+            "Ìîíòàæ êîíâåêòîðà Ýòîò êîíâåêòîð ìîæåò áûòü óñòàíîâëåí â ëþáîì ïîìåùåíèè",
+        ));
+        let page = make_font_page(&items);
+        match garbled_scope(&page) {
+            GarbledScope::Fonts(f) => {
+                assert!(f.contains(&Some("Pragmatica".to_string())));
+                assert!(!f.contains(&Some("Helvetica".to_string())));
+            }
+            _ => panic!("expected the mojibake font alone to be flagged"),
+        }
     }
 
     #[test]

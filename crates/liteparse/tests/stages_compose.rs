@@ -278,6 +278,11 @@ async fn compose_with(parser: &LiteParse, input: PdfInput, rotate_back: bool) ->
     } else {
         Vec::new()
     };
+    // The layout model's inputs need the open page; they stay in this process.
+    let layout_model = parser.layout_model();
+    let mut layout_inputs = layout_model
+        .map(|model| stages::layout_inputs(analysis_document, &extracted.pages, model, true))
+        .unwrap_or_default();
     drop(pristine);
     drop(document);
     drop(lib);
@@ -341,10 +346,22 @@ async fn compose_with(parser: &LiteParse, input: PdfInput, rotate_back: bool) ->
 
     // ── pure: filters, projection, complexity layout half
     stages::apply_content_filters(&mut pages, &parser.content_filters());
-    let parsed = stages::project(pages);
+    stages::mark_ocr_layout_inputs(&pages, &mut layout_inputs);
+    let (parsed, projection_signals) =
+        stages::project_with_signals(pages, markdown || config.extract_blocks);
 
-    // Boundary 2: projected pages cross before the markdown stages.
+    // Boundary 2: projected pages cross before the layout model and the
+    // markdown stages. The model's results are not serialized, so it runs after.
     let mut parsed: Vec<ParsedPage> = round_trip(parsed, "Vec<ParsedPage> after project");
+    if let Some(model) = layout_model {
+        stages::run_layout_model(
+            model,
+            &mut parsed,
+            &layout_inputs,
+            &projection_signals,
+            config.num_workers,
+        );
+    }
 
     let mut complexity = complexity.into_iter().peekable();
     for page in parsed.iter_mut() {
@@ -556,6 +573,69 @@ async fn parse_equals_composed_stages_with_ocr_rounds() {
             .count();
     }
     assert!(ocr_pages > 0, "no fixture page had mock OCR text merged in");
+}
+
+/// LayoutNet weights for the layout-model tests: `$LITEPARSE_TEST_TABLE_MODEL`,
+/// else the installed OCRia-nano package's. The tests skip without them.
+fn layout_model_path() -> Option<String> {
+    if let Ok(path) = std::env::var("LITEPARSE_TEST_TABLE_MODEL") {
+        return Some(path);
+    }
+    #[cfg(feature = "ocria-nano")]
+    return liteparse::models::installed_table_model().map(|p| p.to_string_lossy().into_owned());
+    #[cfg(not(feature = "ocria-nano"))]
+    None
+}
+
+/// LayoutNet with another OCR engine: the Tesseract backend (so nothing loads
+/// the model by default) plus an explicit `table_model`, as a caller keeping
+/// its own OCR server would configure it.
+fn layout_model_config(path: String, ocr_enabled: bool) -> LiteParseConfig {
+    LiteParseConfig {
+        ocr_backend: Some(OcrBackend::Tesseract),
+        table_model: Some(path),
+        ocr_enabled,
+        num_workers: if ocr_enabled { 1 } else { 4 },
+        quiet: true,
+        output_format: OutputFormat::Markdown,
+        extract_blocks: true,
+        include_complexity: true,
+        ..LiteParseConfig::default()
+    }
+}
+
+/// The layout model through the stage split, with and without OCR. With OCR,
+/// `parse()` renders the model's page images inside the OCR loop and the
+/// composition renders them up front, so this also pins those two as equal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn parse_equals_composed_stages_with_layout_model() {
+    let Some(path) = layout_model_path() else {
+        eprintln!("skipping: no LayoutNet weights (set LITEPARSE_TEST_TABLE_MODEL)");
+        return;
+    };
+    let (mut model_pages, mut ocr_model_pages) = (0, 0);
+    for pdf in corpus_pdfs() {
+        for with_ocr in [false, true] {
+            let config = layout_model_config(path.clone(), with_ocr);
+            let result = assert_parse_equals_composition(config, &pdf, with_ocr).await;
+            let pages = result
+                .pages
+                .iter()
+                .filter(|p| !p.model_classes.is_empty())
+                .count();
+            if with_ocr {
+                ocr_model_pages += pages;
+            } else {
+                model_pages += pages;
+            }
+        }
+    }
+    assert!(model_pages > 0, "the layout model ran on no page");
+    assert!(
+        ocr_model_pages > 0,
+        "the layout model ran on no page with OCR on"
+    );
 }
 
 /// A converted image input is a scanned page: OCR is its only text.

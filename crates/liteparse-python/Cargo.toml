@@ -1,6 +1,6 @@
 [package]
 name = "liteparse-python"
-version = "2.21.3"
+version = "2.21.4"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -16,7 +16,7 @@ tesseract = ["liteparse/tesseract"]
 ocria-nano = ["liteparse/ocria-nano"]
 
 [dependencies]
-liteparse = { package = "liteparse", version = "2.21.3", path = "../liteparse", default-features = false }
+liteparse = { package = "liteparse", version = "2.21.4", path = "../liteparse", default-features = false }
 pdfium-sys = { package = "liteparse-pdfium-sys", version = "1.15.0", path = "../pdfium-sys" }
 pdfium = { package = "liteparse-pdfium", version = "1.15.0", path = "../pdfium" }
 clap = { version = "4.5.55", features = ["derive"] }
