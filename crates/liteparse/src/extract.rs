@@ -2215,8 +2215,24 @@ fn extract_page_text_items_pass(
             // Combining marks (a separately drawn acute over an earlier "e")
             // jump back by design; leave them to the run they were drawn in.
             let backward_jump = char_w > 0.0 && gap < -(char_w * 3.0) && !is_combining_mark(c);
+            // A glyph that ends before the run so far begins is not kerning or overhang:
+            // PDFium handed back the pieces of a left-to-right line in right-to-left order. It
+            // does that for every line of a document whose viewer preferences set
+            // `/Direction /R2L` once the line needs bidi reordering (a decomposed "™" is
+            // enough), which turns "W.I.S.E.-CSI" into ".-E.S.I.WCSI". Start a new run so
+            // each piece keeps its own position and projection puts them back in order.
+            let reversed_run = !seg.dir_is_rtl(c)
+                && !is_rtl_char(c)
+                && !seg.text.chars().next_back().is_some_and(is_rtl_char)
+                && !is_combining_mark(c)
+                && seg.rotation_deg.abs() < 1.0
+                && vp_strict.right > vp_strict.left
+                && vp_strict.right <= seg.vp_left.min(seg.last_char_left) + 0.25
+                && y_overlap
+                && (seg.vp_top..=seg.vp_bottom)
+                    .contains(&((vp_strict.top + vp_strict.bottom) / 2.0));
             let very_large_backward_jump =
-                (seg_width > 20.0 && gap < -(seg_width * 0.5)) || backward_jump;
+                (seg_width > 20.0 && gap < -(seg_width * 0.5)) || backward_jump || reversed_run;
             // 4. Baseline step: the glyph sits on a baseline well above or below the
             //    previous glyph's, at a size the strict boxes still overlap (a line set
             //    a few points above the run's own, right after it). Only upright
@@ -2333,6 +2349,9 @@ fn extract_page_text_items_pass(
                     && (vp_loose.bottom - vp_loose.top).abs()
                         < 0.85 * (seg.vp_bottom - seg.vp_top).abs())
                 .then_some((seg.vp_top, seg.vp_bottom));
+                if reversed_run {
+                    seg.reversed = true;
+                }
                 seg.flush(&mut items);
                 let meta = obj_meta.meta_for(&ch, cv.text_object());
                 seg.start(
@@ -2346,6 +2365,7 @@ fn extract_page_text_items_pass(
                     &meta,
                 );
                 seg.host_band = host;
+                seg.reversed = reversed_run;
                 seg.append_ligature_tail(ligature_tail);
             } else if seg.pending_space {
                 let avg_cw = seg.avg_char_width();
@@ -2465,6 +2485,7 @@ fn extract_page_text_items_pass(
     }
 
     seg.flush(&mut items);
+    fix_reversed_runs(&mut items, &seg.reversed_items);
 
     // Drop items entirely outside the page view box. Print-spread / imposed
     // PDFs carry the neighbouring page's text at x beyond the page edge in
@@ -3992,6 +4013,64 @@ fn dedup_same_line(a: &TextItem, b: &TextItem) -> bool {
     }
 }
 
+/// Clean up the runs split off a line PDFium handed back in right-to-left order (see
+/// `reversed_run`). The spaces it emitted between them sit on whichever side of a run the
+/// reordering left them, so a run is followed by a space only when the next run on its line
+/// starts a visible gap away. PDFium also mirrors the brackets it reorders: "(40)" comes back
+/// as ")", "40", "(" from left to right. A lone bracket is turned to face the text it
+/// touches: opening when only the run on its right abuts it, closing when only the one on
+/// its left does.
+fn fix_reversed_runs(items: &mut [TextItem], reversed: &[usize]) {
+    const PAIRS: [(char, char); 6] = [
+        ('(', ')'),
+        ('[', ']'),
+        ('{', '}'),
+        ('（', '）'),
+        ('［', '］'),
+        ('｛', '｝'),
+    ];
+    for &i in reversed {
+        let it = &items[i];
+        let (left, right) = (it.x, it.x + it.width);
+        let same_line = |o: &TextItem| {
+            let overlap = (o.y + o.height).min(it.y + it.height) - o.y.max(it.y);
+            overlap > 0.5 * o.height.min(it.height) && o.rotation == 0.0
+        };
+        // A gap narrower than this is kerning or overhang, not a space.
+        let tol = 0.12 * it.height.max(1.0);
+        let mut next_gap = None::<f32>;
+        let mut abuts_left = false;
+        for (j, o) in items.iter().enumerate() {
+            if j == i || !same_line(o) {
+                continue;
+            }
+            if o.x + o.width > right && o.x > left {
+                let gap = o.x - right;
+                next_gap = Some(next_gap.map_or(gap, |g| g.min(gap)));
+            }
+            if o.x < left && ((o.x + o.width) - left).abs() <= tol {
+                abuts_left = true;
+            }
+        }
+        let followed_by_space = next_gap.is_some_and(|g| g > tol);
+        let abuts_right = next_gap.is_some_and(|g| g.abs() <= tol);
+        let mut chars = it.text.chars();
+        let lone_bracket = match (chars.next(), chars.next()) {
+            (Some(c), None) => PAIRS.iter().find(|(o, cl)| c == *o || c == *cl),
+            _ => None,
+        };
+        let item = &mut items[i];
+        item.followed_by_space = followed_by_space;
+        if let Some(&(open, close)) = lone_bracket {
+            match (abuts_left, abuts_right) {
+                (false, true) => item.text = open.to_string(),
+                (true, false) => item.text = close.to_string(),
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Accumulates characters into a single TextItem segment.
 struct SegmentBuilder {
     text: String,
@@ -4046,6 +4125,9 @@ struct SegmentBuilder {
     pending_space_generated: bool,
     has_content: bool,
     pending_space: bool,
+    // This run was split off a reversed line, and the indices of `items` that were.
+    reversed: bool,
+    reversed_items: Vec<usize>,
     // Per-word sub-boxes, finalized at each inter-word space break. The
     // currently-open word is accumulated in the `word_*` fields below and
     // flushed into `words` by `break_word`.
@@ -4109,6 +4191,8 @@ impl SegmentBuilder {
             pending_space_generated: false,
             has_content: false,
             pending_space: false,
+            reversed: false,
+            reversed_items: Vec::new(),
             words: Vec::new(),
             cur_word: String::new(),
             word_left: f32::MAX,
@@ -4581,6 +4665,7 @@ impl SegmentBuilder {
         if !self.has_content {
             return;
         }
+        let items_before = items.len();
 
         self.break_word();
         if self.extract_text_metadata {
@@ -4645,7 +4730,12 @@ impl SegmentBuilder {
             });
         }
 
+        let mut reversed_items = std::mem::take(&mut self.reversed_items);
+        if self.reversed && items.len() > items_before {
+            reversed_items.push(items.len() - 1);
+        }
         *self = Self::new(self.emit_words, self.extract_text_metadata);
+        self.reversed_items = reversed_items;
     }
 }
 
