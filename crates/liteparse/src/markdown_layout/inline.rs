@@ -457,6 +457,19 @@ pub(super) fn line_all_bold(line: &ProjectedLine) -> bool {
     saw_span
 }
 
+pub(super) fn line_starts_bold(line: &ProjectedLine) -> bool {
+    styled_spans(line)
+        .into_iter()
+        .min_by(|a, b| {
+            if line.rtl {
+                b.x.total_cmp(&a.x)
+            } else {
+                a.x.total_cmp(&b.x)
+            }
+        })
+        .is_some_and(|span| !is_mono_item(span) && is_bold_item(span))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::test_helpers::styled_line;

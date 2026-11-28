@@ -4,7 +4,7 @@
 //! Also #486: one glyph with huge font metrics must not stretch its line over
 //! the next and get it deduped away.
 use liteparse::types::PdfInput;
-use liteparse::{LiteParse, LiteParseConfig};
+use liteparse::{LiteParse, LiteParseConfig, OutputFormat};
 
 /// One row of 10pt Helvetica at y=600, `QUEBECROME` and `KIT`, then `LIMA NO.
 /// MIKE` `up` points above the row and `OSCAR PAPA:` `down` points below it.
@@ -109,6 +109,40 @@ async fn stacked_lines_lower_first_lose_no_text() {
     for want in ["QUEBECROME", "KIT", "LIMA NO. MIKE", "OSCAR PAPA:"] {
         assert!(got.contains(want), "missing {want:?} in {got:?}");
     }
+}
+
+/// Keep each bold run-in term and its wrapped definition in its own paragraph (#594).
+#[tokio::test]
+async fn bold_run_in_keeps_its_style_and_wrapped_paragraph() {
+    let content = concat!(
+        "BT /F2 10 Tf 50 760 Td (Department.) Tj ET\n",
+        "BT /F1 10 Tf 108.34 760 Td ( An office groups staff and assigns project work according to the annual) Tj ET\n",
+        "BT /F1 10 Tf 50 747 Td (schedule agreed with the finance team.) Tj ET\n",
+        "BT /F2 10 Tf 50 723 Td (Cost center.) Tj ET\n",
+        "BT /F1 10 Tf 107.79 723 Td ( The accounting unit holds payroll costs and identifies the projects each team is) Tj ET\n",
+        "BT /F1 10 Tf 50 710 Td (allowed to charge.) Tj ET",
+    );
+    let bold_font =
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>";
+    let parser = LiteParse::new(LiteParseConfig {
+        output_format: OutputFormat::Markdown,
+        ocr_enabled: false,
+        quiet: true,
+        ..LiteParseConfig::default()
+    });
+    let result = parser
+        .parse_input(PdfInput::Bytes(pdf(content, &[bold_font])))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.pages[0].markdown.trim(),
+        concat!(
+            "**Department.** An office groups staff and assigns project work according to the annual ",
+            "schedule agreed with the finance team.\n\n",
+            "**Cost center.** The accounting unit holds payroll costs and identifies the projects ",
+            "each team is allowed to charge."
+        )
+    );
 }
 
 /// #486: a hyphen in a font with Cambria Math's `/Ascent 3116 /Descent -2463`
