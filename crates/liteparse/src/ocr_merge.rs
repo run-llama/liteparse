@@ -565,9 +565,10 @@ pub(crate) fn calculate_page_complexity(
     let text_bbox_area: f32 = page
         .text_items
         .iter()
-        .filter(|item| !is_unusable_native(item))
+        .filter(|item| !is_unusable_native(item) && !is_oblique(item))
         .map(|item| item.width * item.height)
-        .sum();
+        // `sum` of no items is -0.0, which would print as negative coverage.
+        .fold(0.0, |area, item| area + item);
     let text_coverage = if page_area > 0.0 {
         text_bbox_area / page_area
     } else {
@@ -723,9 +724,10 @@ pub fn calculate_native_page_complexity(
     let text_bbox_area: f32 = page
         .text_items
         .iter()
-        .filter(|item| !is_unusable_native(item))
+        .filter(|item| !is_unusable_native(item) && !is_oblique(item))
         .map(|item| item.width * item.height)
-        .sum();
+        // `sum` of no items is -0.0, which would print as negative coverage.
+        .fold(0.0, |area, item| area + item);
     let text_coverage = if page_area > 0.0 {
         text_bbox_area / page_area
     } else {
@@ -1792,6 +1794,9 @@ fn merge_ocr_outcomes(
                     inside = (0..native_count)
                         .filter(|&i| {
                             let it = &natives[i];
+                            if is_oblique(it) {
+                                return false;
+                            }
                             let (cx, cy) = (it.x + it.width / 2.0, it.y + it.height / 2.0);
                             cx >= ocr_x && cx <= ocr_x + ocr_w && cy >= ocr_y && cy <= ocr_y + ocr_h
                         })
@@ -2005,9 +2010,10 @@ fn page_has_sparse_native_text(page: &Page) -> bool {
     let text_bbox_area: f32 = page
         .text_items
         .iter()
-        .filter(|item| !is_unusable_native(item))
+        .filter(|item| !is_unusable_native(item) && !is_oblique(item))
         .map(|item| item.width * item.height)
-        .sum();
+        // `sum` of no items is -0.0, which would print as negative coverage.
+        .fold(0.0, |area, item| area + item);
     let text_coverage = if page_area > 0.0 {
         text_bbox_area / page_area
     } else {
@@ -2037,6 +2043,7 @@ fn native_text_length(page: &Page) -> usize {
 /// metrics), or its content looks substitution-cipher garbled.
 /// Paint the boxes of the native text items the merge keeps (`!is_unusable_native`) white in an
 /// OCR raster of `page` (`channels` 1 or 3, tightly packed), widened by `MASK_MARGIN_PT`.
+/// Oblique items are left alone: their box covers far more than their ink.
 fn mask_native_text(pixels: &mut [u8], width: u32, height: u32, page: &Page, channels: usize) {
     const MASK_MARGIN_PT: f32 = 1.0;
     if page.page_width <= 0.0 || page.page_height <= 0.0 {
@@ -2050,7 +2057,7 @@ fn mask_native_text(pixels: &mut [u8], width: u32, height: u32, page: &Page, cha
     for item in page
         .text_items
         .iter()
-        .filter(|i| !is_unusable_native(i) && !i.text.trim().is_empty())
+        .filter(|i| !is_unusable_native(i) && !is_oblique(i) && !i.text.trim().is_empty())
     {
         let x0 = ((item.x - MASK_MARGIN_PT) * sx).floor().max(0.0) as usize;
         let y0 = ((item.y - MASK_MARGIN_PT) * sy).floor().max(0.0) as usize;
@@ -2067,6 +2074,20 @@ fn mask_native_text(pixels: &mut [u8], width: u32, height: u32, page: &Page, cha
 
 fn is_unusable_native(item: &TextItem) -> bool {
     item.has_unicode_map_error || is_likely_garbled(&item.text)
+}
+
+/// Degrees a native item's baseline may sit off a multiple of 90° and still count as
+/// axis-aligned text. Diagonal watermarks run at 30-60°; posters and slides tilt design text
+/// by 10-15°, which must keep blocking duplicate OCR lines.
+const OBLIQUE_MIN_DEG: f32 = 20.0;
+
+/// A native item drawn at an oblique angle, such as a diagonal watermark across a scan.
+/// Its axis-aligned box is far larger than its ink (a 45° line's box is a square as wide
+/// as the line is long), so it neither says how much of the page the text layer covers
+/// nor where OCR lines would duplicate it.
+fn is_oblique(item: &TextItem) -> bool {
+    let off = item.rotation.rem_euclid(90.0);
+    off.min(90.0 - off) > OBLIQUE_MIN_DEG
 }
 
 /// Total area of filled vector paths not accounted for by native text items.
@@ -3031,6 +3052,7 @@ fn native_width_coverage(items: &[TextItem], x: f32, y: f32, w: f32, h: f32) -> 
     }
     let mut spans: Vec<(f32, f32)> = items
         .iter()
+        .filter(|it| !is_oblique(it))
         .filter(|it| {
             let v = (y + h).min(it.y + it.height) - y.max(it.y);
             v > 0.5 * h.min(it.height)
@@ -3049,6 +3071,8 @@ fn native_width_coverage(items: &[TextItem], x: f32, y: f32, w: f32, h: f32) -> 
     covered / w
 }
 
+/// Whether an OCR box overlaps a native text item, within `tolerance`. Oblique native items
+/// (see `is_oblique`) never count: a diagonal watermark's box spans text it does not cover.
 fn overlaps_existing_text(
     items: &[TextItem],
     ocr_x: f32,
@@ -3057,7 +3081,7 @@ fn overlaps_existing_text(
     ocr_h: f32,
     tolerance: f32,
 ) -> bool {
-    for item in items {
+    for item in items.iter().filter(|item| !is_oblique(item)) {
         let item_right = item.x + item.width;
         let item_bottom = item.y + item.height;
 
@@ -4772,5 +4796,100 @@ mod tests {
                 "figure word {w:?} was dropped: {texts:?}"
             );
         }
+    }
+
+    fn rotated(text: &str, x: f32, y: f32, w: f32, h: f32, rotation: f32) -> TextItem {
+        TextItem {
+            text: text.into(),
+            x,
+            y,
+            width: w,
+            height: h,
+            rotation,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn oblique_means_off_every_quarter_turn() {
+        for r in [0.0, 1.5, 12.0, 88.0, 90.0, 180.0, 270.0, 348.0, 359.0] {
+            assert!(!is_oblique(&rotated("a", 0.0, 0.0, 1.0, 1.0, r)), "{r}");
+        }
+        for r in [30.0, 45.0, 135.0, 315.0, 330.0] {
+            assert!(is_oblique(&rotated("a", 0.0, 0.0, 1.0, 1.0, r)), "{r}");
+        }
+    }
+
+    /// A diagonal watermark's box spans the page; OCR lines under it are not duplicates of it.
+    #[test]
+    fn oblique_native_text_does_not_block_ocr_lines() {
+        let watermark = vec![rotated("WATERMARK", -100.0, 0.0, 600.0, 600.0, 315.0)];
+        assert!(!overlaps_existing_text(
+            &watermark, 50.0, 200.0, 150.0, 12.0, 2.0
+        ));
+        assert_eq!(
+            native_width_coverage(&watermark, 50.0, 200.0, 150.0, 12.0),
+            0.0
+        );
+        let level = vec![rotated("HEADER", -100.0, 0.0, 600.0, 600.0, 0.0)];
+        assert!(overlaps_existing_text(
+            &level, 50.0, 200.0, 150.0, 12.0, 2.0
+        ));
+    }
+
+    /// The OCR raster keeps the pixels under an oblique item; level text is blanked as before.
+    #[test]
+    fn mask_leaves_oblique_native_text_alone() {
+        let page = Page {
+            page_width: 10.0,
+            page_height: 10.0,
+            text_items: vec![
+                rotated("WATERMARK", 0.0, 0.0, 10.0, 10.0, 45.0),
+                rotated("level", 0.0, 0.0, 2.0, 2.0, 0.0),
+            ],
+            ..Default::default()
+        };
+        let mut pixels = vec![0u8; 10 * 10];
+        mask_native_text(&mut pixels, 10, 10, &page, 1);
+        assert_eq!(pixels[0], 255, "level text is masked");
+        assert_eq!(pixels[9 * 10 + 9], 0, "the watermark's box is not");
+    }
+
+    /// A scan carrying a diagonal watermark and a short header line as native text: the
+    /// watermark's box must not make the text layer look like it covers the page.
+    #[test]
+    fn oblique_native_text_does_not_count_as_coverage() {
+        let page = Page {
+            page_width: 600.0,
+            page_height: 800.0,
+            text_items: vec![
+                rotated("WATERMARK ACADEMY", 50.0, 250.0, 470.0, 300.0, 330.0),
+                rotated(
+                    "Notes and more notes at a site",
+                    60.0,
+                    780.0,
+                    460.0,
+                    20.0,
+                    0.0,
+                ),
+            ],
+            ..Default::default()
+        };
+        assert!(page_has_sparse_native_text(&page));
+        let stats = calculate_native_page_complexity(&page, &[], 0, 1);
+        assert!(stats.text_coverage < 0.05, "{}", stats.text_coverage);
+        assert!(stats.reasons.contains(&ComplexityReason::SparseText));
+    }
+
+    #[test]
+    fn coverage_of_a_page_without_counted_text_is_positive_zero() {
+        let page = Page {
+            page_width: 100.0,
+            page_height: 100.0,
+            text_items: vec![rotated("WATERMARK", 0.0, 0.0, 100.0, 100.0, 45.0)],
+            ..Default::default()
+        };
+        let stats = calculate_native_page_complexity(&page, &[], 0, 1);
+        assert!(stats.text_coverage.is_sign_positive());
     }
 }

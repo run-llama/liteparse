@@ -86,6 +86,12 @@ impl Detector {
         Ok(self.detect_with_faint(img)?.0)
     }
 
+    /// Line quads from the first pass alone, without the adaptive fine pass: enough to count a
+    /// page's long lines, at a fraction of [`Detector::detect`]'s cost on dense pages.
+    pub fn detect_coarse(&self, img: &Img) -> Result<Vec<Quad>, OcriaError> {
+        Ok(self.detect_at(img, self.long_side)?.0)
+    }
+
     /// Line quads as [`Detector::detect`], and the faint short-token candidates of the same pass
     /// (empty without [`Detector::faint`]).
     pub fn detect_with_faint(&self, img: &Img) -> Result<(Vec<Quad>, Vec<Quad>), OcriaError> {
