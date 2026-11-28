@@ -116,13 +116,33 @@ pub(crate) fn resegment_by_model_blocks(page: &mut ParsedPage) -> usize {
         })
         .collect();
 
+    // Tables drawn with shaded rows: their column gutters are not page columns even where the
+    // model put each column in a block of its own, and splitting there read the table one column
+    // after the other. Ruled grids are left to the model: rules also frame multi-column layouts.
+    let table_rects = crate::markdown_layout::fill_bands(&page.graphics);
+    let in_drawn_table = |l: &ProjectedLine| {
+        let (cx, cy) = (
+            l.bbox.x + l.bbox.width / 2.0,
+            l.bbox.y + l.bbox.height / 2.0,
+        );
+        table_rects
+            .iter()
+            .any(|r| r.x <= cx && cx <= r.x + r.width && r.y <= cy && cy <= r.y + r.height)
+    };
+
     // 1. split lines that cross a block boundary at a gutter. Candidate cuts first, per line (index, gap centre).
     let lines = std::mem::take(&mut page.projected_lines);
     let mut cand: Vec<Vec<(usize, f32)>> = vec![Vec::new(); lines.len()];
     for (li, (line, assign)) in lines.iter().zip(&assigns).enumerate() {
         let rotated = line.spans.iter().any(|s| s.rotation.abs() > 1.0);
         let touches_table = assign.iter().flatten().any(|&b| is_table(blocks[b].class));
-        if line.spans.len() < 2 || rotated || touches_table || line.rtl || line.all_mono {
+        if line.spans.len() < 2
+            || rotated
+            || touches_table
+            || line.rtl
+            || line.all_mono
+            || in_drawn_table(line)
+        {
             continue;
         }
         let gap_min = GUTTER_EM * line.dominant_font_size.max(4.0);

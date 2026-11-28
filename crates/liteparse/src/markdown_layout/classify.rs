@@ -862,11 +862,14 @@ fn classify_region(
         }
     };
     let borderless_runs = match heuristic {
-        HeuristicTables::On => precomputed_tables
-            .unwrap_or_else(|| detect_tables_banded(lines, rule_segments, page.page_height)),
+        HeuristicTables::On => precomputed_tables.unwrap_or_else(|| {
+            detect_tables_banded(lines, rule_segments, &page.graphics, page.page_height)
+        }),
         // keep the borderless detector's tables unless their cells read as prose columns
         HeuristicTables::Smart => precomputed_tables
-            .unwrap_or_else(|| detect_tables_banded(lines, rule_segments, page.page_height))
+            .unwrap_or_else(|| {
+                detect_tables_banded(lines, rule_segments, &page.graphics, page.page_height)
+            })
             .into_iter()
             .filter(|run| !table_block_is_prose(&run.block))
             .collect(),
@@ -2831,8 +2834,25 @@ fn model_table_prob(page: &ParsedPage, boxes: &[Rect]) -> Option<f32> {
 /// these are aligned prose, stat panels, timelines and the like read as grids; their lines fall
 /// through to paragraphs. A higher threshold (0.5) scored the same; limiting the check to short
 /// (<= 3-row) tables kept half the gain, since some false tables are large.
+///
+/// A table drawn with shaded rows (see `tables::fill_bands`) is not vetoed: the shading is the
+/// page saying it is a table, and a vetoed grid is read column by column.
 fn model_vetoes_table(page: &ParsedPage, lines: &[ProjectedLine]) -> bool {
-    model_table_prob(page, &line_page_boxes(page, lines)).is_some_and(|p| p < 0.3)
+    let boxes = line_page_boxes(page, lines);
+    if model_table_prob(page, &boxes).is_none_or(|p| p >= 0.3) {
+        return false;
+    }
+    let bands = super::tables::fill_bands(&page.graphics);
+    let shaded = boxes
+        .iter()
+        .filter(|b| {
+            let (cx, cy) = (b.x + b.width / 2.0, b.y + b.height / 2.0);
+            bands
+                .iter()
+                .any(|r| r.x <= cx && cx <= r.x + r.width && r.y <= cy && cy <= r.y + r.height)
+        })
+        .count();
+    shaded * 2 <= boxes.len()
 }
 
 /// The joint layout model's view of a line: (P(heading or title), P(title), promote threshold,
@@ -2986,4 +3006,55 @@ fn strip_leader_runs(text: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod veto_tests {
+    use super::model_vetoes_table;
+    use crate::markdown_layout::test_helpers::{line_with_spans, page};
+    use crate::types::{GraphicPrimitive, ProjectedLine, Rect};
+
+    /// The layout model can veto a heuristic table it reads as text; a table drawn with shaded
+    /// rows keeps its table.
+    #[test]
+    fn model_does_not_veto_a_shaded_table() {
+        let lines: Vec<ProjectedLine> = (0..4)
+            .map(|k| {
+                line_with_spans(
+                    &[("Station", 59.0), ("1 Harbor Road", 303.0)],
+                    100.0 + 20.0 * k as f32,
+                    10.0,
+                )
+            })
+            .collect();
+        let mut p = page(lines.clone());
+        // the model reads every line as text: P(Table) 0.05
+        p.model_classes = lines
+            .iter()
+            .map(|l| {
+                let mut probs = vec![0.0; crate::table_model::BLOCK_CLASSES.len()];
+                probs[0] = 0.95;
+                probs[6] = 0.05;
+                crate::table_model::UnitClass {
+                    bbox: l.bbox.clone(),
+                    chars: 20,
+                    probs,
+                }
+            })
+            .collect();
+        assert!(model_vetoes_table(&p, &lines));
+        p.graphics = (0..4)
+            .map(|k| GraphicPrimitive::Rect {
+                bbox: Rect {
+                    x: 54.0,
+                    y: 97.0 + 20.0 * k as f32,
+                    width: 524.0,
+                    height: 16.0,
+                },
+                fill: Some("ffeceefa".into()),
+                stroke: None,
+            })
+            .collect();
+        assert!(!model_vetoes_table(&p, &lines));
+    }
 }

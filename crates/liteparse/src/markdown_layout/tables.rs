@@ -40,6 +40,15 @@ const RULE_BAND_MIN_HEIGHT_PT: f32 = 10.0;
 /// A rule band with fewer lines than this is a rule under a heading or a run of
 /// hyperlink underlines - never a table.
 const RULE_BAND_MIN_LINES: usize = 3;
+/// Shaded rows needed for a stack of fills to read as a table's row banding (see `fill_bands`).
+const FILL_BAND_MIN_ROWS: usize = 3;
+/// Height range of one shaded row, in points: a text row with padding, not a hairline or a
+/// panel.
+const FILL_BAND_ROW_H_PT: std::ops::RangeInclusive<f32> = 6.0..=60.0;
+/// Narrowest shaded row: a run of short fills is a bar chart or a legend, not a table.
+const FILL_BAND_MIN_W_PT: f32 = 80.0;
+/// How far the edges of fills in one stack may disagree, in points.
+const FILL_BAND_EDGE_TOL_PT: f32 = 3.0;
 
 /// Floor for the sparse-new-row path: a partial-cell line whose bottom-gap
 /// exceeds this fraction qualifies as a real new row (with empty cells at
@@ -1981,18 +1990,22 @@ pub(super) fn detect_tables(lines: &[ProjectedLine]) -> Vec<TableRun> {
     detect_tables_impl(lines, true)
 }
 
-/// `detect_tables` plus the booktabs rule-band pass: a table drawn as nothing
-/// but a top and bottom hairline has no grid for the ruled detector and, when
-/// it has only two columns, is below `TABLE_MIN_COLUMNS` for the borderless
-/// one. The rules themselves are the missing evidence - see `rule_bands`.
+/// `detect_tables` plus the band pass: a table drawn as nothing but a top and
+/// bottom hairline, or with shaded rows instead of rules, has no grid for the
+/// ruled detector and, when it has only two columns, is below
+/// `TABLE_MIN_COLUMNS` for the borderless one. The rules or the shading are the
+/// missing evidence - see `rule_bands` and `fill_bands`.
 pub(super) fn detect_tables_banded(
     lines: &[ProjectedLine],
     segs: &RuleSegments,
+    graphics: &[GraphicPrimitive],
     page_height: f32,
 ) -> Vec<TableRun> {
     let pieces = compute_line_pieces(lines);
     let runs = detect_tables_with_pieces(lines, &pieces, true);
-    let bands = rule_bands(segs, page_height);
+    let mut bands = rule_bands(segs, page_height);
+    // Row shading bounds a table as well as a pair of rules does.
+    bands.extend(fill_bands(graphics).iter().map(|r| (r.y, r.y + r.height)));
     if bands.is_empty() {
         return runs;
     }
@@ -2027,6 +2040,107 @@ fn rule_bands(segs: &RuleSegments, page_height: f32) -> Vec<(f32, f32)> {
             continue;
         }
         out.push((top.y, bot.y));
+    }
+    out
+}
+
+/// Row banding: a vertical stack of at least `FILL_BAND_MIN_ROWS` shaded rows sharing the same
+/// left and right edges at a regular pitch, the way spreadsheets and reports shade alternate
+/// (or every) table row. Fills of one row's cells are joined first. Returns the bbox of each
+/// stack, extended down by one unshaded gap when the shading alternates so the last row
+/// counts too.
+///
+/// Like a ruled grid, this is geometry alone: a table drawn with shading instead of rules.
+pub(crate) fn fill_bands(graphics: &[GraphicPrimitive]) -> Vec<Rect> {
+    // Shaded cells, as (x0, y0, x1, y1).
+    let mut cells: Vec<(f32, f32, f32, f32)> = graphics
+        .iter()
+        .filter_map(|g| match g {
+            GraphicPrimitive::Rect {
+                bbox,
+                fill: Some(f),
+                ..
+            } if !is_invisible_ink(f) && FILL_BAND_ROW_H_PT.contains(&bbox.height) => {
+                Some((bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height))
+            }
+            _ => None,
+        })
+        .collect();
+    cells.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.total_cmp(&b.0)));
+    // One span per shaded row: cells at the same top and bottom that touch or nearly touch.
+    let mut rows: Vec<(f32, f32, f32, f32)> = Vec::new();
+    for c in cells {
+        match rows.last_mut() {
+            Some(r)
+                if (r.1 - c.1).abs() <= 1.0
+                    && (r.3 - c.3).abs() <= 1.0
+                    && c.0 <= r.2 + 2.0 * FILL_BAND_EDGE_TOL_PT =>
+            {
+                r.2 = r.2.max(c.2);
+            }
+            _ => rows.push(c),
+        }
+    }
+    rows.retain(|r| r.2 - r.0 >= FILL_BAND_MIN_W_PT);
+    let same_edges = |a: &(f32, f32, f32, f32), b: &(f32, f32, f32, f32)| {
+        (a.0 - b.0).abs() <= FILL_BAND_EDGE_TOL_PT && (a.2 - b.2).abs() <= FILL_BAND_EDGE_TOL_PT
+    };
+    let mut out = Vec::new();
+    let mut used = vec![false; rows.len()];
+    for i in 0..rows.len() {
+        if used[i] {
+            continue;
+        }
+        // The stack starting at row i: rows with its edges, each starting below the last and no
+        // further than three row heights on (an unshaded row between two shaded ones is fine).
+        let mut stack = vec![i];
+        for j in i + 1..rows.len() {
+            let last = rows[*stack.last().unwrap()];
+            let h = last.3 - last.1;
+            if !used[j] && same_edges(&rows[i], &rows[j]) {
+                if rows[j].1 >= last.3 - 1.0 && rows[j].1 - last.3 <= 3.0 * h {
+                    stack.push(j);
+                } else if rows[j].1 > last.3 {
+                    break;
+                }
+            }
+        }
+        if stack.len() < FILL_BAND_MIN_ROWS {
+            continue;
+        }
+        for &k in &stack {
+            used[k] = true;
+        }
+        let first = rows[stack[0]];
+        let last = rows[*stack.last().unwrap()];
+        // Alternating shading leaves an unshaded row under the last shaded one.
+        let mut gaps: Vec<f32> = stack
+            .windows(2)
+            .map(|w| rows[w[1]].1 - rows[w[0]].3)
+            .collect();
+        gaps.sort_by(f32::total_cmp);
+        let gap = gaps[gaps.len() / 2];
+        let tail = if gap > 0.5 * (last.3 - last.1) {
+            gap
+        } else {
+            0.0
+        };
+        let (x0, x1) = (
+            stack
+                .iter()
+                .map(|&k| rows[k].0)
+                .fold(f32::INFINITY, f32::min),
+            stack
+                .iter()
+                .map(|&k| rows[k].2)
+                .fold(f32::NEG_INFINITY, f32::max),
+        );
+        out.push(Rect {
+            x: x0,
+            y: first.1,
+            width: x1 - x0,
+            height: last.3 + tail - first.1,
+        });
     }
     out
 }
@@ -5881,11 +5995,13 @@ pub fn detect_table_rects(
     let (hs, vs, _) = extract_h_v_segments(graphics);
     let hs = cluster_h_segments(hs);
     let vs = cluster_v_segments(vs);
+    // A table shaded row by row instead of ruled is the same obstacle: cutting it column-wise
+    // reads all of one column before the next.
+    let mut out: Vec<Rect> = fill_bands(graphics);
     if hs.len() < 2 || vs.len() < 2 {
-        return Vec::new();
+        return out;
     }
     let components = find_grid_components(&hs, &vs);
-    let mut out = Vec::new();
     for (h_idx, v_idx) in components {
         let ys: Vec<f32> = h_idx.iter().map(|&i| hs[i].y).collect();
         let xs: Vec<f32> = v_idx.iter().map(|&i| vs[i].x).collect();
@@ -9064,5 +9180,91 @@ mod tests {
         merge_continuation_rows(&mut r);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0][1].text_item_indices, vec![1, 2]);
+    }
+
+    fn shaded(x: f32, y: f32, w: f32, h: f32, fill: &str) -> GraphicPrimitive {
+        GraphicPrimitive::Rect {
+            bbox: Rect {
+                x,
+                y,
+                width: w,
+                height: h,
+            },
+            fill: Some(fill.into()),
+            stroke: None,
+        }
+    }
+
+    /// Alternate rows shaded, each row drawn as two cell fills: one band over the whole table,
+    /// down to the unshaded row under the last shaded one.
+    #[test]
+    fn fill_bands_find_alternating_row_shading() {
+        let mut g = Vec::new();
+        for k in 0..4 {
+            let y = 100.0 + k as f32 * 40.0;
+            g.push(shaded(50.0, y, 240.0, 20.0, "ffeceefa"));
+            g.push(shaded(290.0, y, 280.0, 20.0, "ffeceefa"));
+        }
+        let bands = fill_bands(&g);
+        assert_eq!(bands.len(), 1, "{bands:?}");
+        let b = &bands[0];
+        assert_eq!((b.x, b.y, b.width), (50.0, 100.0, 520.0));
+        assert!((b.y + b.height - 260.0).abs() < 0.01, "{b:?}");
+    }
+
+    #[test]
+    fn fill_bands_need_three_matching_tinted_rows() {
+        let two: Vec<_> = (0..2)
+            .map(|k| shaded(50.0, 100.0 + k as f32 * 40.0, 400.0, 20.0, "ffd9d9d9"))
+            .collect();
+        assert!(fill_bands(&two).is_empty(), "two rows are a pair of boxes");
+        let white: Vec<_> = (0..5)
+            .map(|k| shaded(50.0, 100.0 + k as f32 * 20.0, 400.0, 20.0, "ffffffff"))
+            .collect();
+        assert!(fill_bands(&white).is_empty(), "white fills draw nothing");
+        let ragged: Vec<_> = (0..5)
+            .map(|k| {
+                shaded(
+                    50.0,
+                    100.0 + k as f32 * 30.0,
+                    100.0 + 60.0 * k as f32,
+                    20.0,
+                    "ffd9d9d9",
+                )
+            })
+            .collect();
+        assert!(
+            fill_bands(&ragged).is_empty(),
+            "bars of a chart are not rows"
+        );
+        let panel = vec![shaded(50.0, 100.0, 400.0, 300.0, "ffd9d9d9")];
+        assert!(fill_bands(&panel).is_empty(), "a panel is not a row");
+    }
+
+    /// A two-column listing (name, address) with its rows shaded is a table: the shading is a
+    /// band the two-column pass accepts.
+    #[test]
+    fn shaded_two_column_rows_form_a_table() {
+        let rows = [
+            ("Station North", "65 Harbor Road"),
+            ("Station East", "1400 Richmond Avenue"),
+            ("Station South", "3730 Victory Boulevard"),
+            ("Station West", "256 Hylan Blvd."),
+        ];
+        let lines: Vec<ProjectedLine> = rows
+            .iter()
+            .enumerate()
+            .map(|(k, (a, b))| {
+                line_with_spans(&[(a, 59.0), (b, 303.0)], 100.0 + 20.0 * k as f32, 10.0)
+            })
+            .collect();
+        let segs = extract_rule_segments(&[]);
+        // every row shaded, a small gap between rows
+        let shading: Vec<GraphicPrimitive> = (0..4)
+            .map(|k| shaded(54.0, 97.0 + 20.0 * k as f32, 524.0, 16.0, "ffeceefa"))
+            .collect();
+        let runs = detect_tables_banded(&lines, &segs, &shading, 792.0);
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!((runs[0].start, runs[0].end), (0, 4));
     }
 }

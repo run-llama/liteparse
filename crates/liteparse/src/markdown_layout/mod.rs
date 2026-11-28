@@ -29,6 +29,7 @@ pub use headings::{build_heading_map, compute_body_size};
 pub use inline::{apply_link, escape_inline};
 pub use repetition::{compute_header_footer_set, detect_single_page_chrome, model_furniture_lines};
 pub use tables::detect_table_rects;
+pub(crate) use tables::fill_bands;
 pub(crate) use tables::{count_text_table_runs, validated_ruled_table_rects};
 
 /// Minimum plausible text-row height in points. Floors a `bbox.height` before
