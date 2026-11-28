@@ -82,11 +82,12 @@ impl Page<'_, '_> {
             return StructureTree::default();
         }
         let count = unsafe { ffi!(FPDF_StructTree_CountChildren(tree)) };
+        let single_page = unsafe { ffi!(FPDF_GetPageCount(self.doc_handle)) } == 1;
         let mut roots = Vec::with_capacity(count.max(0) as usize);
         for index in 0..count {
             let element = unsafe { ffi!(FPDF_StructTree_GetChildAtIndex(tree, index)) };
             if !element.is_null() {
-                roots.push(read_structure_element(element));
+                roots.push(read_structure_element(element, single_page));
             }
         }
         unsafe { ffi!(FPDF_StructTree_Close(tree)) };
@@ -109,10 +110,11 @@ impl Page<'_, '_> {
         let mut out = Vec::new();
 
         let count = unsafe { ffi!(FPDF_StructTree_CountChildren(tree)) };
+        let single_page = unsafe { ffi!(FPDF_GetPageCount(self.doc_handle)) } == 1;
         for i in 0..count {
             let elem = unsafe { ffi!(FPDF_StructTree_GetChildAtIndex(tree, i)) };
             if !elem.is_null() {
-                walk_element(elem, &mcid_bboxes, &mut out);
+                walk_element(elem, &mcid_bboxes, &mut out, single_page);
             }
         }
 
@@ -122,7 +124,10 @@ impl Page<'_, '_> {
     }
 }
 
-fn read_structure_element(elem: pdfium_sys::FPDF_STRUCTELEMENT) -> StructureElement {
+fn read_structure_element(
+    elem: pdfium_sys::FPDF_STRUCTELEMENT,
+    single_page: bool,
+) -> StructureElement {
     let element_type = read_element_type(elem);
     let id = read_optional_widestring(|buf, len| unsafe {
         ffi!(FPDF_StructElement_GetID(elem, buf, len))
@@ -135,7 +140,7 @@ fn read_structure_element(elem: pdfium_sys::FPDF_STRUCTELEMENT) -> StructureElem
         ffi!(FPDF_StructElement_GetTitle(elem, buf, len))
     });
     let attributes = read_attributes(elem);
-    let marked_content_ids = read_marked_content_ids(elem);
+    let marked_content_ids = read_marked_content_ids(elem, single_page);
     let count = unsafe { ffi!(FPDF_StructElement_CountChildren(elem)) };
     let mut children = Vec::new();
     let mut annotation_object_numbers = Vec::new();
@@ -147,7 +152,7 @@ fn read_structure_element(elem: pdfium_sys::FPDF_STRUCTELEMENT) -> StructureElem
                 annotation_object_numbers.push(object_number);
             }
         } else {
-            children.push(read_structure_element(child));
+            children.push(read_structure_element(child, single_page));
         }
     }
     StructureElement {
@@ -163,11 +168,20 @@ fn read_structure_element(elem: pdfium_sys::FPDF_STRUCTELEMENT) -> StructureElem
     }
 }
 
-fn read_marked_content_ids(elem: pdfium_sys::FPDF_STRUCTELEMENT) -> Vec<i32> {
-    let count = unsafe { ffi!(FPDF_StructElement_GetMarkedContentIdCount(elem)) };
+fn read_marked_content_ids(elem: pdfium_sys::FPDF_STRUCTELEMENT, single_page: bool) -> Vec<i32> {
+    // A single-page document can keep legacy integer IDs that lack a page entry.
+    let count = if single_page {
+        unsafe { ffi!(FPDF_StructElement_GetMarkedContentIdCount(elem)) }
+    } else {
+        unsafe { ffi!(FPDF_StructElement_CountChildren(elem)) }
+    };
     let mut ids = Vec::with_capacity(count.max(0) as usize);
     for index in 0..count {
-        let id = unsafe { ffi!(FPDF_StructElement_GetMarkedContentIdAtIndex(elem, index)) };
+        let id = if single_page {
+            unsafe { ffi!(FPDF_StructElement_GetMarkedContentIdAtIndex(elem, index)) }
+        } else {
+            unsafe { ffi!(FPDF_StructElement_GetChildMarkedContentID(elem, index)) }
+        };
         if id >= 0 {
             ids.push(id);
         }
@@ -368,32 +382,23 @@ fn walk_element(
     elem: pdfium_sys::FPDF_STRUCTELEMENT,
     mcid_bboxes: &std::collections::HashMap<i32, RectF>,
     out: &mut Vec<StructNode>,
+    single_page: bool,
 ) {
     let role = read_element_type(elem);
     let alt_text = read_alt_text(elem);
 
-    // Collect mcids: the multi-mcid getters + per-child marked-content-only children.
-    let mut mcids: Vec<i32> = Vec::new();
-    let n_mcids = unsafe { ffi!(FPDF_StructElement_GetMarkedContentIdCount(elem)) };
-    for i in 0..n_mcids {
-        let m = unsafe { ffi!(FPDF_StructElement_GetMarkedContentIdAtIndex(elem, i)) };
-        if m >= 0 {
-            mcids.push(m);
-        }
-    }
-    // Also legacy: single direct mcid getter (older tag-trees expose it here).
-    let single = unsafe { ffi!(FPDF_StructElement_GetMarkedContentID(elem)) };
-    if single >= 0 && !mcids.contains(&single) {
-        mcids.push(single);
-    }
-
+    let mut mcids = read_marked_content_ids(elem, single_page);
     let n_children = unsafe { ffi!(FPDF_StructElement_CountChildren(elem)) };
-    for i in 0..n_children {
-        // Non-struct children expose their mcid via GetChildMarkedContentID
-        // (returns -1 when the child is itself a struct element).
-        let child_mcid = unsafe { ffi!(FPDF_StructElement_GetChildMarkedContentID(elem, i)) };
-        if child_mcid >= 0 && !mcids.contains(&child_mcid) {
-            mcids.push(child_mcid);
+    if single_page {
+        let single = unsafe { ffi!(FPDF_StructElement_GetMarkedContentID(elem)) };
+        if single >= 0 && !mcids.contains(&single) {
+            mcids.push(single);
+        }
+        for i in 0..n_children {
+            let child = unsafe { ffi!(FPDF_StructElement_GetChildMarkedContentID(elem, i)) };
+            if child >= 0 && !mcids.contains(&child) {
+                mcids.push(child);
+            }
         }
     }
 
@@ -408,7 +413,7 @@ fn walk_element(
     for i in 0..n_children {
         let child_elem = unsafe { ffi!(FPDF_StructElement_GetChildAtIndex(elem, i)) };
         if !child_elem.is_null() {
-            walk_element(child_elem, mcid_bboxes, out);
+            walk_element(child_elem, mcid_bboxes, out, single_page);
         }
     }
 }
