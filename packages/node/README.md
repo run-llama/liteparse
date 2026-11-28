@@ -161,7 +161,7 @@ is the default OCR backend.
 ```typescript
 import { LiteParse, models } from "@llamaindex/liteparse";
 
-models.pull("ocria-nano");                 // once: models + ONNX Runtime (60-75 MB); prints the licence notice
+await models.pull("ocria-nano");                 // once: models + ONNX Runtime (60-75 MB); prints the licence notice
 const parser = new LiteParse({ outputFormat: "markdown" });
 const result = await parser.parse("scan.pdf"); // OCR + tables with OCRia-nano-1
 

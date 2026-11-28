@@ -75,7 +75,7 @@ result = LiteParse(ocr_backend="ocria-nano").parse("scan.pdf")
 ```typescript
 import { LiteParse, models } from "@llamaindex/liteparse";
 
-models.pull("ocria-nano"); // once
+await models.pull("ocria-nano"); // once
 const result = await new LiteParse({ ocrBackend: "ocria-nano" }).parse("scan.pdf");
 ```
 
