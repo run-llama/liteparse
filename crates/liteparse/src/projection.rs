@@ -2350,7 +2350,8 @@ fn project_to_grid(
             }
 
             for line_idx in block.start..block.end {
-                for (box_idx, m) in meta[line_idx].iter_mut().enumerate() {
+                let mut candidates: Vec<(usize, i32, usize, usize)> = Vec::new();
+                for (box_idx, m) in meta[line_idx].iter().enumerate() {
                     if m.snap != Some(SnapKind::Left) {
                         continue;
                     }
@@ -2371,19 +2372,36 @@ fn project_to_grid(
                     if total < 4 || (right_snapped as f64 / total as f64) < 0.5 {
                         continue;
                     }
-                    if debug {
-                        let preview: String = lines[line_idx]
-                            .get(box_idx)
-                            .map(|t| t.item.text.chars().take(30).collect())
-                            .unwrap_or_default();
-                        eprintln!(
-                            "[debug] FIXUP left-unsnap: line={} left_anchor={} total={} right_snapped={} text='{}'",
-                            line_idx, left_key, total, right_snapped, preview
-                        );
+                    candidates.push((box_idx, left_key, total, right_snapped));
+                }
+                // A force-unsnapped item is rendered only after every snapped item, so a
+                // snapped item later on its line would be written first and push it to the
+                // end of the line ("12,155  3,057" -> "3,057  12,155"). Only unsnap items
+                // that no snapped item follows on the line: the short right-column lines the
+                // fixup is for.
+                let mut later_snapped = false;
+                for box_idx in (0..meta[line_idx].len()).rev() {
+                    let candidate = candidates.iter().find(|c| c.0 == box_idx);
+                    if let Some(&(_, left_key, total, right_snapped)) = candidate
+                        && !later_snapped
+                    {
+                        if debug {
+                            let preview: String = lines[line_idx]
+                                .get(box_idx)
+                                .map(|t| t.item.text.chars().take(30).collect())
+                                .unwrap_or_default();
+                            eprintln!(
+                                "[debug] FIXUP left-unsnap: line={} left_anchor={} total={} right_snapped={} text='{}'",
+                                line_idx, left_key, total, right_snapped, preview
+                            );
+                        }
+                        let m = &mut meta[line_idx][box_idx];
+                        m.snap = None;
+                        m.left_anchor = None;
+                        m.force_unsnapped = true;
+                    } else if meta[line_idx][box_idx].snap.is_some() {
+                        later_snapped = true;
                     }
-                    m.snap = None;
-                    m.left_anchor = None;
-                    m.force_unsnapped = true;
                 }
             }
         }
@@ -5953,6 +5971,48 @@ mod tests {
             orig_height: h,
             orig_rotation: 0.0,
         }
+    }
+
+    #[test]
+    fn left_unsnap_fixup_keeps_items_before_their_snapped_right_neighbours() {
+        // Issue #614: the right column of an English paragraph starts at x≈276 on four
+        // lines, and two of them are right-snapped, so the multi-column fixup treated
+        // "Hong" and "described" as short right-column lines and deferred them. The
+        // snapped words to their right were written first and the deferred words ended up
+        // at the end of the line ("with Kong Hong").
+        let page = Page {
+            ocr_deskew: None,
+            page_number: 1,
+            page_label: None,
+            page_width: 595.276,
+            page_height: 807.874,
+            content_bounds: None,
+            graphics: Vec::new(),
+            vector_graphics: None,
+            text_items: Vec::new(),
+            struct_nodes: Vec::new(),
+            image_refs: Vec::new(),
+            annotations: None,
+            form_fields: None,
+            structure_tree: None,
+        };
+        let projection_boxes = vec![
+            item_at("Hong", 276.28, 130.75, 23.38, 10.45),
+            item_at("Kong", 305.99, 130.75, 22.88, 10.45),
+            item_at("Our", 313.84, 145.75, 15.0, 10.45),
+            item_at("described", 276.75, 160.75, 39.17, 10.45),
+            item_at("in", 321.43, 160.75, 7.33, 10.45),
+            item_at("Consolidated", 275.59, 175.75, 53.29, 10.45),
+            item_at("independent", 277.88, 190.75, 51.04, 10.45),
+            item_at("for", 317.34, 205.75, 11.5, 10.45),
+        ];
+
+        let (_, text) = project_to_grid(&page, projection_boxes, false);
+
+        let words = |line: &str| line.split_whitespace().collect::<Vec<_>>().join(" ");
+        let lines: Vec<String> = text.lines().map(words).collect();
+        assert!(lines.iter().any(|l| l == "Hong Kong"), "{text}");
+        assert!(lines.iter().any(|l| l == "described in"), "{text}");
     }
 
     #[test]
