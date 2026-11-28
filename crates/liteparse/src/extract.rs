@@ -1757,6 +1757,51 @@ fn tracking_line(
     out.1.extend((start..end).map(|k| (k, tracking)));
 }
 
+/// Word spaces PDFium never puts on the text page. Word exports often draw the space
+/// between a heading number and its title as its own text object (`(51-8.1)Tj 1.39 0 Td
+/// ( )Tj 0.16 0 Td (Savings...)Tj`). When the font's space glyph has no outline, that
+/// object's box has zero width and PDFium skips it, so the gap is left to PDFium's own
+/// space heuristic, which misses a word space set narrower than usual ("51-8.1Savings").
+/// The skipped object still marks the word break: this keeps the viewport origin of every
+/// top-level zero-width text object so the missing-space recovery can honour it.
+struct DroppedSpaces {
+    /// (y, x) viewport origins, sorted by y.
+    origins: Vec<(f32, f32)>,
+}
+
+impl DroppedSpaces {
+    fn new(page: &Page, vp_xform: &pdfium::ViewportTransform) -> Self {
+        let mut origins = Vec::new();
+        for index in 0..page.object_count() {
+            let Some(object) = page.object(index) else {
+                continue;
+            };
+            if object.kind() != pdfium::PageObjectKind::Text {
+                continue;
+            }
+            let Some(b) = object.bounds() else {
+                continue;
+            };
+            if (b.right - b.left).abs() < 0.01 && (b.top - b.bottom).abs() < 0.01 {
+                let (x, y) = vp_xform.transform_point(b.left, b.bottom);
+                origins.push((y, x));
+            }
+        }
+        origins.sort_by(|a, b| a.0.total_cmp(&b.0));
+        Self { origins }
+    }
+
+    /// Whether a skipped text object sits on `baseline` (within `y_tol`) with its
+    /// origin after `after` and no further than `before` along the line.
+    fn between(&self, baseline: f32, y_tol: f32, after: f32, before: f32) -> bool {
+        let start = self.origins.partition_point(|&(y, _)| y < baseline - y_tol);
+        self.origins[start..]
+            .iter()
+            .take_while(|&&(y, _)| y <= baseline + y_tol)
+            .any(|&(_, x)| x > after && x <= before)
+    }
+}
+
 /// The same subsets' "ft" ligature reads as ">" ("Wirtscha>skriminalität"): a ligature-wide
 /// ">" with lowercase letters on both sides.
 fn misdecoded_ft_ligature(
@@ -1987,6 +2032,7 @@ fn extract_page_text_items_pass(
     );
 
     let (tracking_spaces, tracking) = tracking_generated_spaces(text_page, char_count);
+    let dropped_spaces = DroppedSpaces::new(page, &vp_xform);
     for i in 0..char_count {
         let ch = text_page.char_at_unchecked(i);
         let cv = CharView {
@@ -2441,7 +2487,21 @@ fn extract_page_text_items_pass(
                     // enough samples for the font.
                     calibrated.unwrap_or(0.35 * em_vp)
                 };
-                if both_alnum && thresh > 0.0 && loose_gap > thresh {
+                // A space the PDF draws as its own zero-width object (see `DroppedSpaces`):
+                // the glyph after it starts past the previous glyph, so the word break is real
+                // even when the gap is narrower than the threshold above.
+                let drawn_space = loose_gap > 0.0
+                    && seg.rotation_deg.abs() < 1.0
+                    && !seg.dir_is_rtl(c)
+                    && baseline.is_some_and(|b| {
+                        dropped_spaces.between(
+                            b,
+                            0.2 * em_vp,
+                            seg.last_char_loose_left,
+                            vp_loose.left.min(vp_strict.left),
+                        )
+                    });
+                if (both_alnum && thresh > 0.0 && loose_gap > thresh) || drawn_space {
                     seg.text.push(' ');
                     seg.break_word();
                 }
