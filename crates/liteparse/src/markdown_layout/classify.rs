@@ -174,6 +174,7 @@ pub(super) fn classify_page(page: &ParsedPage, heading_map: &[(f32, u8)]) -> Vec
     classify_page_with_filters(
         page,
         heading_map,
+        super::headings::inferred_heading_level(heading_map, 0),
         &std::collections::HashSet::new(),
         &[],
         crate::config::ImageMode::Placeholder,
@@ -192,6 +193,7 @@ pub(super) fn classify_page(page: &ParsedPage, heading_map: &[(f32, u8)]) -> Vec
 pub fn classify_page_with_filters(
     page: &ParsedPage,
     heading_map: &[(f32, u8)],
+    inferred_level: u8,
     header_footer: &std::collections::HashSet<String>,
     outline: &[OutlineTarget],
     image_mode: crate::config::ImageMode,
@@ -600,6 +602,10 @@ pub fn classify_page_with_filters(
         blocks.push(positioned_interruption(kind));
     };
 
+    // Level of the last heading on this page that a stronger source (struct
+    // tag, outline, font size) placed, in reading order across regions: a
+    // style-only heading nests one below it.
+    let mut section_level: Option<u8> = None;
     for (rstart, rend) in region_ranges {
         let region_lines = &lines[rstart..rend];
 
@@ -645,6 +651,8 @@ pub fn classify_page_with_filters(
             page,
             &rule_segments,
             heading_map,
+            inferred_level,
+            &mut section_level,
             outline,
             toc_page,
             debug,
@@ -825,6 +833,8 @@ fn classify_region(
     page: &ParsedPage,
     rule_segments: &super::tables::RuleSegments,
     heading_map: &[(f32, u8)],
+    inferred_level: u8,
+    section_level: &mut Option<u8>,
     outline: &[OutlineTarget],
     toc_page: bool,
     debug: bool,
@@ -902,6 +912,8 @@ fn classify_region(
             page,
             rule_segments,
             heading_map,
+            inferred_level,
+            section_level,
             outline,
             toc_page,
             debug,
@@ -1209,6 +1221,7 @@ fn classify_region(
         // headings, slide titles).
         let demote = model.is_some_and(|m| m.0 <= m.3) && line.font_size_is_estimated;
         let size_level = size_level.filter(|_| !demote);
+        let label_level = section_label_level(*section_level, inferred_level);
         let model_level = model
             .filter(|&(ph, _, promote, _)| {
                 outline_level.is_none()
@@ -1228,8 +1241,7 @@ fn classify_region(
                 if pt * 2.0 > ph {
                     1
                 } else {
-                    heading_level_for(heading_size_of(line), heading_map)
-                        .unwrap_or((heading_map.len() as u8 + 1).clamp(1, MAX_HEADING_LEVELS as u8))
+                    heading_level_for(heading_size_of(line), heading_map).unwrap_or(label_level)
                 }
             });
         let level = outline_level
@@ -1349,6 +1361,9 @@ fn classify_region(
                 }
             }
             if !demoted_heading {
+                if outline_level.is_some() || size_level.is_some() {
+                    *section_level = Some(level);
+                }
                 state.flush_paragraph(&mut blocks);
                 state.reset_list();
                 if debug {
@@ -1408,7 +1423,7 @@ fn classify_region(
             {
                 state.flush_paragraph(&mut blocks);
                 state.reset_list();
-                let level = (heading_map.len() as u8 + 1).clamp(1, MAX_HEADING_LEVELS as u8);
+                let level = section_label_level(*section_level, inferred_level);
                 blocks.push(PositionedBlock::sourced(
                     Block::Heading {
                         level,
@@ -1488,10 +1503,9 @@ fn classify_region(
         {
             state.flush_paragraph(&mut blocks);
             state.reset_list();
-            // Level: one deeper than the deepest size-based level we already
-            // have. With an empty heading_map this lands on H1; with a full
-            // 6-level map it caps at H6.
-            let level = (heading_map.len() as u8 + 1).clamp(1, MAX_HEADING_LEVELS as u8);
+            // Level: one below the section it sits in, or before any section on
+            // this page one below every level a stronger source uses.
+            let level = section_label_level(*section_level, inferred_level);
             if debug {
                 eprintln!(
                     "[MD heading-emit bold] h{} idx={} '{}' size={:.2}",
@@ -2336,6 +2350,7 @@ mod tests {
         let blocks = classify_page_with_filters(
             &pages[0],
             &map,
+            super::super::headings::inferred_heading_level(&map, 0),
             &set,
             &[],
             crate::config::ImageMode::Placeholder,
@@ -2833,6 +2848,14 @@ fn model_table_prob(page: &ParsedPage, boxes: &[Rect]) -> Option<f32> {
 /// (<= 3-row) tables kept half the gain, since some false tables are large.
 fn model_vetoes_table(page: &ParsedPage, lines: &[ProjectedLine]) -> bool {
     model_table_prob(page, &line_page_boxes(page, lines)).is_some_and(|p| p < 0.3)
+}
+
+/// Level for a heading found only by style: one below the enclosing section
+/// (`section`, the last explicitly levelled heading on the page) so levels step
+/// down one at a time, never past `inferred` (one below every explicit level in
+/// the document), which also covers a page with no section heading yet.
+fn section_label_level(section: Option<u8>, inferred: u8) -> u8 {
+    section.map_or(inferred, |s| (s + 1).min(inferred))
 }
 
 /// The joint layout model's view of a line: (P(heading or title), P(title), promote threshold,

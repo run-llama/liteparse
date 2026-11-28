@@ -784,6 +784,45 @@ pub(super) fn heading_level_for(size: f32, heading_map: &[(f32, u8)]) -> Option<
     None
 }
 
+/// Deepest level a struct-tree `H1`..`H6` tag or an outline entry gives a
+/// projected line, or 0 when neither levels any line. Only tags and bookmarks
+/// that reach a line count: one whose marked content sits under child nodes,
+/// or a bookmark whose title matches no line, promotes nothing, so it must not
+/// push style-only headings deeper. `outline` is the whole document's.
+pub fn explicit_heading_depth(pages: &[ParsedPage], outline: &[OutlineTarget]) -> u8 {
+    pages
+        .iter()
+        .filter_map(|p| {
+            let target_index = (p.page_number as i32).saturating_sub(1);
+            let page_outline: Vec<OutlineTarget> = outline
+                .iter()
+                .filter(|e| e.page_index == target_index)
+                .cloned()
+                .collect();
+            p.projected_lines
+                .iter()
+                .filter_map(|line| {
+                    struct_heading_level(line, &p.struct_nodes).or_else(|| {
+                        outline_heading_level(line, p.page_height, &page_outline, line.text.trim())
+                    })
+                })
+                .max()
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// Level for a heading found only by style (a body-size bold line, a
+/// "1. **Foo**" numbered label): one below every level the document already
+/// gives a stronger source — the font-size map, struct-tree tags, outline
+/// entries — so it nests under them instead of outranking them. A tagged
+/// document whose headings share the body font has an empty size map; ranking
+/// against it alone put these labels at `#` beneath its `###` sections.
+pub fn inferred_heading_level(heading_map: &[(f32, u8)], explicit_depth: u8) -> u8 {
+    let depth = (heading_map.len() as u8).max(explicit_depth);
+    (depth + 1).clamp(1, MAX_HEADING_LEVELS as u8)
+}
+
 /// Highest-priority heading source: a struct-tree node `H1`..`H6` directly
 /// tagging this line via its `mcid`. Available only for tagged PDFs.
 pub(super) fn struct_heading_level(
@@ -979,6 +1018,42 @@ mod tests {
         ])];
         let body = compute_body_size(&pages);
         assert!((body - 10.0).abs() < 0.01, "body size = {body}");
+    }
+
+    #[test]
+    fn explicit_heading_depth_counts_only_tags_that_reach_a_line() {
+        let node = |role: &str, mcid: i32| StructNode {
+            role: role.into(),
+            mcids: vec![mcid],
+            bbox: None,
+            alt_text: None,
+        };
+        let tagged = |text: &str, y: f32, mcid: i32| {
+            let mut l = line(text, 50.0, y, 10.0, 10.0);
+            l.mcid = Some(mcid);
+            l
+        };
+        let mut p1 = page(vec![tagged("Title", 50.0, 1), tagged("Body", 70.0, 2)]);
+        p1.struct_nodes = vec![node("H1", 1), node("P", 2)];
+        let mut p2 = page(vec![tagged("Section", 50.0, 1)]);
+        // H5 tags marked content no line carries: it promotes nothing, so it
+        // does not count.
+        p2.struct_nodes = vec![node("H2", 1), node("H5", 9)];
+        assert_eq!(explicit_heading_depth(&[p1, p2], &[]), 2);
+        assert_eq!(explicit_heading_depth(&[page(vec![])], &[]), 0);
+    }
+
+    #[test]
+    fn inferred_heading_nests_below_explicit_levels() {
+        // Untagged, no size map: the style-only heading is the top level.
+        assert_eq!(inferred_heading_level(&[], 0), 1);
+        // A tagged document whose `###` sections share the body font: its bold
+        // labels go to `####`, not `#`.
+        assert_eq!(inferred_heading_level(&[], 3), 4);
+        // The size map still counts when it is the deeper source.
+        assert_eq!(inferred_heading_level(&[(20.0, 1), (16.0, 2)], 1), 3);
+        // Never past H6.
+        assert_eq!(inferred_heading_level(&[], 6), 6);
     }
 
     #[test]

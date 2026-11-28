@@ -218,7 +218,8 @@ fn apply_layout(
     if !wants_markdown && !config.extract_blocks {
         return None;
     }
-    let signals = stages::document_signals(parsed_pages, config.keep_headers_footers);
+    let signals =
+        stages::document_signals_with_outline(parsed_pages, outline, config.keep_headers_footers);
     let block_options = parser.block_options(outline);
     let mut page_md = Vec::with_capacity(parsed_pages.len());
     for page in parsed_pages.iter_mut() {
