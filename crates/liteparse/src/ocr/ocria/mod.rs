@@ -65,6 +65,27 @@ type PageReads = (Vec<rec::Read>, bool, usize);
 /// specks read as "|", "l" or a letter pair at 0.5-0.7; the lone "1"s of issue #615 read at 0.97+.
 const FAINT_CONF: f32 = 0.9;
 
+/// A page read at no more than this confidence, from at least `SIDEWAYS_RETRY_MIN_BOXES`
+/// boxes, is tried a quarter turn round before its read is kept (see `run_page`).
+const SIDEWAYS_RETRY_MAX_CONF: f32 = 0.56;
+const SIDEWAYS_RETRY_MIN_BOXES: usize = 4;
+/// ...and at most this share of its boxes are long horizontal lines: a page read upright
+/// has plenty, a page on its side has almost none.
+const SIDEWAYS_RETRY_MAX_LONG_SHARE: f32 = 0.45;
+/// How much better the turned page's sample must read than the upright page did.
+const SIDEWAYS_RETRY_MARGIN: f32 = 0.15;
+
+/// Mean confidence of a page's reads, weighted by characters.
+fn read_conf(reads: &[rec::Read]) -> f32 {
+    let (mut num, mut den) = (0f32, 0f32);
+    for (t, c, _) in reads {
+        let n = t.trim().chars().count().max(1) as f32;
+        num += c * n;
+        den += n;
+    }
+    if den > 0.0 { num / den } else { 0.0 }
+}
+
 /// Detector thresholds for a model without `det.meta.json`.
 const DET_THRESH: f32 = 0.5;
 const DET_MERGE: f32 = 0.6;
@@ -380,23 +401,22 @@ impl OcriaEngine {
         let (mut boxes, mut faint) = self.det.detect_with_faint(&img0)?;
         let mut sideways = false;
         let mut flip_hint: Option<bool> = None;
-        let turned;
-        let mut img = &img0;
+        let mut turned: Option<Img> = None;
         let tall = page::mostly_tall(&boxes);
         if self.opts.orient && (page::looks_sideways(&boxes) || tall) {
             // maybe a page scanned on its side: detect again a quarter turn counter-clockwise and
             // keep that when it finds far more lines (the router's flip vote finishes 270 deg)
-            turned = img0.rot90(1);
-            let tboxes = self.det.detect(&turned)?;
+            let t = img0.rot90(1);
+            let tboxes = self.det.detect(&t)?;
             // a numeric table also has few long boxes, and turned, each stacked column of numbers
             // reads as one long line: the turn must also read better, not only find longer boxes
             // a page of upright boxes needs no line count: the turn must read clearly better
             let longer = page::long_lines(&tboxes) > 2 * page::long_lines(&boxes) + 5;
             let margin = if longer { 0.05 } else { 0.1 };
             if longer || tall {
-                let (conf_t, flip_t) = self.sample_conf(&turned, &tboxes)?;
+                let (conf_t, flip_t) = self.sample_conf(&t, &tboxes)?;
                 if conf_t > self.sample_conf(&img0, &boxes)?.0 + margin {
-                    img = &turned;
+                    turned = Some(t);
                     boxes = tboxes;
                     faint.clear();
                     sideways = true;
@@ -406,14 +426,46 @@ impl OcriaEngine {
                 }
             }
         }
+        let img = turned.as_ref().unwrap_or(&img0);
         if self.opts.gutter {
             boxes = page::split_gutters(img, &boxes);
         }
-        let (mut reads, flip, dom) = if boxes.is_empty() {
+        let (mut reads, mut flip, mut dom) = if boxes.is_empty() {
             (Vec::new(), false, 0)
         } else {
             self.read(img, &boxes, flip_hint)?
         };
+        // Dense small print on its side can merge into a few wide blobs that pass for lines,
+        // so the box shapes above never suggest a turn; the read then comes out as garbage
+        // with low confidence and few long lines. Only then, try the quarter turn: a coarse
+        // detection first (it must find far more long lines), then the full detection and a
+        // sample read, which must read clearly better than the page just did.
+        if self.opts.orient
+            && !sideways
+            && boxes.len() >= SIDEWAYS_RETRY_MIN_BOXES
+            && read_conf(&reads) < SIDEWAYS_RETRY_MAX_CONF
+            && (page::long_lines(&boxes) as f32)
+                <= SIDEWAYS_RETRY_MAX_LONG_SHARE * boxes.len() as f32
+        {
+            let t = img0.rot90(1);
+            let coarse = self.det.detect_coarse(&t)?;
+            if page::long_lines(&coarse) > 2 * page::long_lines(&boxes) + 5 {
+                let tboxes = self.det.detect(&t)?;
+                let (conf_t, flip_t) = self.sample_conf(&t, &tboxes)?;
+                if conf_t > read_conf(&reads) + SIDEWAYS_RETRY_MARGIN {
+                    let t = turned.insert(t);
+                    boxes = if self.opts.gutter {
+                        page::split_gutters(t, &tboxes)
+                    } else {
+                        tboxes
+                    };
+                    faint.clear();
+                    sideways = true;
+                    (reads, flip, dom) = self.read(t, &boxes, Some(flip_t))?;
+                }
+            }
+        }
+        let img = turned.as_ref().unwrap_or(&img0);
         let n_lines = boxes.len();
         if !faint.is_empty() && !flip {
             // with the page's recognizer: a lone glyph is too short for the router
@@ -864,4 +916,20 @@ pub fn shared_engine() -> Result<Arc<OcriaEngine>, LiteParseError> {
         })
         .clone()
         .map_err(LiteParseError::Ocr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_conf;
+
+    #[test]
+    fn read_conf_weights_by_characters() {
+        let reads = vec![
+            ("a long confident line".to_string(), 0.9, Vec::new()),
+            ("x".to_string(), 0.1, Vec::new()),
+        ];
+        let c = read_conf(&reads);
+        assert!(c > 0.85 && c < 0.9, "{c}");
+        assert_eq!(read_conf(&[]), 0.0);
+    }
 }
